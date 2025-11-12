@@ -1,0 +1,38 @@
+{
+  "name": "freiraum-mitarbeiter",
+  "version": "0.2.0",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win nsis"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "de.freiraum.mitarbeiter",
+    "productName": "Freiraum Mitarbeiter",
+    "directories": {
+      "output": "../installers",
+      "buildResources": "../assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "app/**"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "../assets/logo.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "artifactName": "Freiraum-Mitarbeiter-Setup-${version}.exe"
+    }
+  }
+}

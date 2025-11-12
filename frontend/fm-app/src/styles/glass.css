@@ -1,0 +1,13 @@
+:root{
+  --glass-bg: rgba(12,12,12,.60);
+  --glass-bd: rgba(255,255,255,.10);
+  --glass-tx: rgba(255,255,255,.92);
+}
+.glass-card{
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-bd);
+  color: var(--glass-tx);
+  border-radius: 16px;
+  backdrop-filter: blur(12px);
+}
+

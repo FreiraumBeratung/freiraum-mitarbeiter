@@ -1,0 +1,22 @@
+[data-testid="avatar-bot"], .avatar-bot {
+  transform-origin: center bottom;
+}
+
+.avatar-breathe {
+  animation: avatar-breathe 4.4s ease-in-out infinite;
+}
+
+@keyframes avatar-breathe {
+  0% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-1px) scale(1.012); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+.avatar-blink {
+  animation: avatar-blink 6s infinite;
+}
+
+@keyframes avatar-blink {
+  0%, 48%, 52%, 100% { opacity: 1; }
+  49%, 51% { opacity: .2; }
+}

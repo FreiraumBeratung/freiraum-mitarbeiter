@@ -1,0 +1,26 @@
+{
+  "provider": "duckduckgo",
+  "duckduckgo_html": "https://duckduckgo.com/html/",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Freiraum-Mitarbeiter/1.0",
+  "timeout_sec": 10,
+  "request_delay_ms": 350,
+  "max_per_site_emails": 3,
+  "max_pages": 1
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

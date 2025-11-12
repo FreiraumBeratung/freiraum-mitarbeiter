@@ -1,0 +1,25 @@
+{
+  "categories": {
+    "shk": ["shk", "sanitär", "heizung", "klima", "installateur", "heizungsbauer"],
+    "elektro": ["elektro", "elektriker", "elektrotechnik"],
+    "makler": ["makler", "immobilien", "immobilienmakler"],
+    "restaurant": ["restaurant", "gastronomie", "imbiss", "bistro", "cafe", "café"],
+    "gaLa": ["garten", "landschaftsbau", "galabau"],
+    "handel": ["handel", "baustoffe", "händler", "großhandel", "großhandel"]
+  },
+  "regions": ["arnsberg", "neheim", "sundern", "meschede", "hsK", "hsk", "sauerland"],
+  "verbs": {
+    "hunt": ["such", "suche", "finde", "recherchiere", "ermittle"],
+    "outreach": ["schreib", "anschreiben", "kontaktiere", "maile", "email"],
+    "add_only": ["nur anlegen", "nur speichern", "erstmal sammeln"],
+    "schedule": ["termin", "kalender", "eintragen", "meeting", "besprechung"]
+  },
+  "timewords": ["heute", "morgen", "übermorgen", "montag", "dienstag", "mittwoch", "donnerstag", "freitag", "samstag", "sonntag", "uhr"],
+  "modifiers": {
+    "count": ["10", "20", "50", "100"],
+    "mode_outreach": ["anschreiben", "direkt anschreiben"],
+    "mode_add": ["nur anlegen", "nur speichern"]
+  }
+}
+
+

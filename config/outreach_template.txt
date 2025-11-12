@@ -1,0 +1,27 @@
+Hallo {{company}},
+
+kurz und konkret: Wir helfen Betrieben in {{city}} ({{category}}) dabei,
+Leads gezielter zu generieren, Anfragen schneller zu beantworten und Angebote
+sauber nachzufassen – mit deinem digitalen Mitarbeiter.
+
+Wenn Sie offen sind: 15 Minuten Kennenlern-Termin? Ich richte mich gern nach Ihnen.
+
+Herzliche Grüße
+Freiraum Beratung
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

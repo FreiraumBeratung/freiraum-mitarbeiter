@@ -1,0 +1,4 @@
+:root{ --glass-bg: rgba(12,12,12,.6); --glass-bd: rgba(255,255,255,.08); --glass-tx: rgba(255,255,255,.9); }
+.glass-card{ background: var(--glass-bg); border: 1px solid var(--glass-bd); backdrop-filter: blur(10px); color: var(--glass-tx); border-radius: 16px; }
+.glass-bar{ background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04)); border: 1px solid var(--glass-bd); backdrop-filter: blur(12px); }
+

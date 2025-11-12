@@ -1,0 +1,21 @@
+{
+  "name": "freiraum-hyper-audit",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare": "node -e \"console.log('ok')\"",
+    "hyper:audit": "node tools/hyper_audit.mjs",
+    "hyper:audit:ci": "SET NO_COLOR=1&& node tools/hyper_audit.mjs --ci",
+    "playwright:install": "npx playwright install chromium"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "tree-kill": "^1.2.2"
+  }
+}
+
+
+
+
+
+

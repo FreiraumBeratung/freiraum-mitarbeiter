@@ -1,0 +1,110 @@
+:root {
+  --avatar-breath-scale-min: 0.985;
+  --avatar-breath-scale-max: 1.015;
+}
+
+@keyframes avatar-breath {
+  0% {
+    transform: scale(var(--avatar-breath-scale-min));
+  }
+  50% {
+    transform: scale(var(--avatar-breath-scale-max));
+  }
+  100% {
+    transform: scale(var(--avatar-breath-scale-min));
+  }
+}
+
+@keyframes avatar-head-tilt {
+  0% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-1.6deg);
+  }
+  50% {
+    transform: rotate(0.8deg);
+  }
+  75% {
+    transform: rotate(-0.6deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes avatar-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.08);
+  }
+}
+
+@keyframes avatar-reaction-glow {
+  0% {
+    box-shadow: 0 0 0 rgba(255, 122, 0, 0);
+  }
+  30% {
+    box-shadow: 0 0 28px rgba(255, 122, 0, 0.22);
+  }
+  100% {
+    box-shadow: 0 0 0 rgba(255, 122, 0, 0);
+  }
+}
+
+@keyframes avatar-hand-wave {
+  0% {
+    transform: rotate(0deg);
+  }
+  20% {
+    transform: rotate(18deg);
+  }
+  40% {
+    transform: rotate(-12deg);
+  }
+  60% {
+    transform: rotate(10deg);
+  }
+  80% {
+    transform: rotate(-6deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+/* Utility classes */
+.avatar-breathing {
+  animation: avatar-breath 4s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+.avatar-head-motion {
+  animation: avatar-head-tilt 9s ease-in-out infinite;
+  transform-origin: 50% 45%;
+  will-change: transform;
+}
+.avatar-eye {
+  animation: avatar-blink 6s ease-in-out infinite;
+  transform-origin: center;
+}
+.avatar-reaction {
+  animation: avatar-reaction-glow 1100ms ease-out 1;
+}
+.avatar-hand-wave {
+  animation: avatar-hand-wave 900ms ease-in-out 1;
+  transform-origin: right center;
+}
+
+
+
+
+
+
+
+
+

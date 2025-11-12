@@ -1,0 +1,279 @@
+:root {
+  --fr-orange: #ff7300;
+  --fr-orange-soft: rgba(255, 115, 0, 0.14);
+  --glass-bg: rgba(255, 255, 255, 0.05);
+  --glass-brd: rgba(255, 255, 255, 0.12);
+  --txt: #f5f6f9;
+  --muted: rgba(255, 255, 255, 0.7);
+  --muter: rgba(255, 255, 255, 0.55);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  color: var(--txt);
+  background: radial-gradient(1200px 600px at 20% -10%, rgba(255, 115, 0, 0.06), transparent 60%),
+    #0c0d10;
+}
+
+.glass {
+  backdrop-filter: blur(10px);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-brd);
+  border-radius: 18px;
+}
+
+.card {
+  border-radius: 18px;
+}
+
+.title {
+  font-weight: 800;
+  letter-spacing: 0.3px;
+}
+
+.fr-btn {
+  border: 1px solid var(--glass-brd);
+  background: var(--fr-orange-soft);
+  color: var(--txt);
+  border-radius: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.fr-btn:hover {
+  filter: brightness(1.05);
+}
+
+.breath {
+  animation: breath 4s ease-in-out infinite;
+}
+
+@keyframes breath {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.blink {
+  animation: blink 6s infinite;
+}
+
+@keyframes blink {
+  0%,
+  97%,
+  100% {
+    opacity: 1;
+  }
+  98%,
+  99% {
+    opacity: 0.1;
+  }
+}
+
+.listen-glow {
+  box-shadow: 0 0 30px rgba(255, 115, 0, 0.45);
+}
+
+.pulse:hover {
+  box-shadow: 0 0 0 0 rgba(255, 115, 0, 0.5);
+  animation: pulse 1.8s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 115, 0, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(255, 115, 0, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 115, 0, 0);
+  }
+}
+
+.toggle {
+  position: relative;
+  width: 56px;
+  height: 30px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--glass-brd);
+  transition: 0.25s;
+}
+
+.toggle.on {
+  background: rgba(255, 115, 0, 0.28);
+  border-color: rgba(255, 115, 0, 0.5);
+}
+
+.toggle-dot {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  transition: 0.25s;
+}
+
+.toggle.on .toggle-dot {
+  left: 29px;
+  background: var(--fr-orange);
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--txt);
+  opacity: 0.9;
+}
+
+.sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--glass-brd);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  color: var(--muter);
+}
+
+.grid {
+  display: grid;
+  gap: 12px;
+}
+
+.nav-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.nav-tabs a {
+  padding: 8px 12px;
+  border-radius: 10px;
+  text-decoration: none;
+  color: var(--txt);
+  border: 1px solid var(--glass-brd);
+  background: rgba(255, 255, 255, 0.06);
+  transition: all 0.2s;
+}
+
+.nav-tabs a:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.nav-tabs a.active {
+  background: var(--fr-orange-soft);
+  border-color: rgba(255, 115, 0, 0.42);
+}
+
+/* Simple robot sprite container */
+.robot {
+  width: 120px;
+  height: 120px;
+  position: relative;
+}
+
+.robot .head {
+  width: 68px;
+  height: 48px;
+  background: linear-gradient(#1a1b20, #0f1013);
+  border: 1px solid var(--glass-brd);
+  border-radius: 14px;
+  position: absolute;
+  top: 22px;
+  left: 26px;
+}
+
+.robot .eye {
+  position: absolute;
+  top: 10px;
+  width: 10px;
+  height: 10px;
+  background: #72f5a7;
+  border-radius: 50%;
+}
+
+.robot .eye.r {
+  right: 14px;
+}
+
+.robot .eye.l {
+  left: 14px;
+}
+
+.robot .body {
+  position: absolute;
+  top: 70px;
+  left: 35px;
+  width: 50px;
+  height: 38px;
+  border-radius: 10px;
+  background: linear-gradient(#131419, #0c0d10);
+  border: 1px solid var(--glass-brd);
+}
+
+.robot .arm {
+  position: absolute;
+  top: 72px;
+  width: 12px;
+  height: 32px;
+  background: #131419;
+  border: 1px solid var(--glass-brd);
+  border-radius: 8px;
+}
+
+.robot .arm.l {
+  left: 16px;
+}
+
+.robot .arm.r {
+  right: 16px;
+}
+
+.robot .leg {
+  position: absolute;
+  top: 108px;
+  width: 12px;
+  height: 22px;
+  background: #131419;
+  border: 1px solid var(--glass-brd);
+  border-radius: 6px;
+}
+
+.robot .leg.l {
+  left: 44px;
+}
+
+.robot .leg.r {
+  left: 64px;
+}
+
+.head-tilt {
+  transform-origin: 50% 100%;
+  transition: transform 0.25s;
+}
+
+
