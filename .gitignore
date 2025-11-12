@@ -38,3 +38,18 @@ logs/
 test-results/
 *.zip
 *.7z
+# Modelle & große Binärdateien
+backend/models/
+*.bin
+*.onnx
+*.pt
+*.pth
+*.ckpt
+
+# Laufzeit & Daten
+data/
+exports/
+logs/
+test-results/
+*.zip
+*.7z
