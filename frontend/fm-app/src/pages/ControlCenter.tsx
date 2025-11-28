@@ -196,7 +196,7 @@ export default function ControlCenter() {
           </div>
         </div>
 
-        <div className="flex gap-2 mb-4">
+        <div className="flex gap-2 mb-4 hide-local-nav">
           <Link
             to="/control-center"
             className="fr-pill px-4 py-2 text-sm border-b-2 border-freiraum-orange text-freiraum-text"
@@ -311,7 +311,7 @@ export default function ControlCenter() {
             >
               {osmHunting ? "Suche läuft..." : "OSM-Suche starten"}
             </button>
-          </GlassCard>
+          </div>
         </div>
 
         {log && (

@@ -1,42 +1,52 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import GlassChip from "./GlassChip";
+import { PartnerBotBus } from "../modules/partnerbot";
 
-const features = [
-  { path: "/control-center", label: "Control Center", icon: "⚙️" },
-  { path: "/kontakte", label: "Leads", icon: "📋" },
-  { path: "/mail/compose", label: "E-Mail", icon: "📧" },
-  { path: "/lead-radar", label: "Lead-Radar", icon: "🎯" },
-  { path: "/voice-diagnostics", label: "Voice-Diag", icon: "🎤" },
-  { path: "/leads-real", label: "Leads Real", icon: "🔍" },
-  { path: "/exports", label: "Exporte", icon: "📊" },
+const items = [
+  { label: "Control Center", path: "/control-center" },
+  { label: "Leads", path: "/leads" },
+  { label: "E-Mail", path: "/mail/compose" },
+  { label: "Lead-Radar", path: "/lead-radar" },
+  { label: "Voice-Diagnostics", path: "/voice-diagnostics" },
+  { label: "Leads Real", path: "/leads/real" },
+  { label: "Exporte", path: "/exports" },
 ];
 
 export default function TopFeatureBar() {
-  const location = useLocation();
-  const navigate = useNavigate();
+  const nav = useNavigate();
+  const loc = useLocation();
+  const [pulseToken, setPulseToken] = useState<string | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const off = PartnerBotBus.onPose(() => {
+      setPulseToken(Date.now().toString());
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => {
+        setPulseToken(null);
+        timerRef.current = null;
+      }, 350);
+    });
+    return () => {
+      off();
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    };
+  }, []);
 
   return (
-    <div
-      className="sticky top-0 z-50 w-full border-b border-white/10 backdrop-blur-md"
-      style={{
-        background: "rgba(12, 13, 15, 0.85)",
-      }}
-    >
-      <div className="max-w-full overflow-x-auto">
-        <div className="flex items-center gap-3 px-4 py-3">
-          {features.map((feat) => (
-            <GlassChip
-              key={feat.path}
-              icon={feat.icon}
-              label={feat.label}
-              active={location.pathname === feat.path}
-              onClick={() => navigate(feat.path)}
-            />
-          ))}
-        </div>
+    <div style={{position:"sticky", top:0, zIndex:40, backdropFilter:"blur(10px)", background:"rgba(0,0,0,.45)", borderBottom:"1px solid rgba(255,255,255,.08)"}}>
+      <div style={{display:"flex", gap:12, padding:"10px 14px", overflowX:"auto"}}>
+        {items.map(it => (
+          <GlassChip
+            key={it.path}
+            label={it.label}
+            active={loc.pathname===it.path}
+            onClick={()=>nav(it.path)}
+            className={pulseToken ? "animate-pulseShort" : ""}
+          />
+        ))}
       </div>
     </div>
   );
 }
-

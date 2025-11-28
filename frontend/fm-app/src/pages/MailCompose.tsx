@@ -1,160 +1,223 @@
-import React, { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { PartnerBotBus } from "../components/PartnerBotBus";
-import GlassCard from "../components/ui/GlassCard";
-import Backdrop from "../components/layout/Backdrop";
+import React, { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { PartnerBotBus } from "../components/PartnerBot";
 
-const BACKEND = "http://127.0.0.1:30521";
+declare global {
+  interface Window {
+    __fm_set_mail_body?: (text: string) => void;
+    __fm_set_mail_to?: (address: string) => void;
+    __fm_set_mail_subject?: (subject: string) => void;
+    __fm_get_mail_body?: () => string | null;
+    __fm_get_mail_subject?: () => string | null;
+    __fm_preview_mail?: () => void;
+    __fm_send_mail_now?: () => void;
+  }
+}
 
 export default function MailCompose() {
-  const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const [to, setTo] = useState("");
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
-  const [preview, setPreview] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [toast, setToast] = useState("");
+  const [sp] = useSearchParams();
+  const [to, setTo] = useState(sp.get("to") || "");
+  const [subject, setSubject] = useState(sp.get("subject") || "");
+  const [body, setBody] = useState(sp.get("body") || "");
 
-  useEffect(() => {
-    // Prefill from query params (voice intent)
-    const toParam = searchParams.get("to");
-    const bodyParam = searchParams.get("body");
-    if (toParam) setTo(toParam);
-    if (bodyParam) setBody(decodeURIComponent(bodyParam));
+  // Automatische "Vorschau oder sofort senden?" Nachricht entfernt
+  // Die Nachricht wird jetzt nur noch vom Voice-Modul gesteuert
 
-    // Show PartnerBot message if opened via voice
-    if (toParam || bodyParam) {
-      PartnerBotBus.poseAndSay("thumbs", "Alles klar – soll ich direkt senden oder vorher zeigen?", 5000);
+  const handlePreview = useCallback(() => {
+    window.print();
+  }, []);
+
+  const handleSendNow = useCallback(async () => {
+    console.log("[fm-mail] handleSendNow gestartet");
+
+    if (!to || !to.trim()) {
+      PartnerBotBus.say("Es ist kein Empfänger angegeben.");
+      alert("Es ist kein Empfänger angegeben.");
+      return;
     }
-  }, [searchParams]);
+    if (!body || !body.trim()) {
+      PartnerBotBus.say("Der E-Mail-Text ist leer.");
+      alert("Der E-Mail-Text ist leer.");
+      return;
+    }
 
-  const handlePreview = () => {
-    setPreview(true);
-  };
+    const API_BASE =
+      (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
+      (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
+      "http://127.0.0.1:30521";
 
-  const handleSend = async () => {
-    setSending(true);
+    const url = `${API_BASE.replace(/\/+$/, "")}/api/mail/send`;
+
+    console.log("[fm-mail] handleSendNow – sende POST", url);
+
     try {
-      const resp = await fetch(`${BACKEND}/api/mail/send`, {
+      const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to, subject, body }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          to: to.trim(),
+          subject: subject?.trim() || null,
+          body: body.trim(),
+        }),
       });
 
-      if (resp.ok) {
-        setToast("E-Mail gesendet!");
-        PartnerBotBus.poseAndSay("thumbs", "E-Mail erfolgreich gesendet!", 3000);
-        setTimeout(() => navigate("/control-center"), 2000);
-      } else {
-        throw new Error("Backend error");
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        console.error("[fm-mail] Mailversand fehlgeschlagen", response.status, text);
+        PartnerBotBus.say(`Mailversand fehlgeschlagen (${response.status}).`);
+        alert(`Mailversand fehlgeschlagen (${response.status}): ${text || "Unbekannter Fehler"}`);
+        return;
       }
-    } catch (error) {
-      // Graceful fallback if backend endpoint doesn't exist
-      setToast("Mail-Senden lokal nicht installiert");
-      PartnerBotBus.poseAndSay("wave", "Mail-Senden lokal nicht installiert", 4000);
-    } finally {
-      setSending(false);
+
+      const data = await response.json().catch(() => ({} as any));
+      console.log("[fm-mail] Mailversand erfolgreich", data);
+      PartnerBotBus.say("E-Mail wurde erfolgreich gesendet.");
+      alert("E-Mail wurde erfolgreich gesendet.");
+    } catch (err) {
+      console.error("[fm-mail] Mailversand – Netzwerk/Client-Fehler", err);
+      PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
+      alert("Mailversand fehlgeschlagen (Verbindung).");
     }
-  };
+  }, [to, subject, body]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      console.warn("[fm-mail] window ist undefined, kann __fm_send_mail_now nicht registrieren");
+      return;
+    }
+
+    const w = window as any;
+
+    // Globalen Setter für E-Mail-Body bereitstellen
+    w.__fm_set_mail_body = (text: string) => {
+      // KI-Text in den Body schreiben
+      setBody(text);
+    };
+
+    // Globalen Setter für E-Mail-Empfänger bereitstellen
+    w.__fm_set_mail_to = (addr: string) => {
+      console.log("[fm-mail] __fm_set_mail_to", addr);
+      setTo(addr);
+    };
+
+    // Globalen Setter für E-Mail-Betreff bereitstellen
+    w.__fm_set_mail_subject = (subj: string) => {
+      console.log("[fm-mail] __fm_set_mail_subject", subj);
+      setSubject(subj);
+    };
+
+    // Globalen Getter für E-Mail-Body bereitstellen
+    w.__fm_get_mail_body = () => {
+      return body || null;
+    };
+
+    // Globalen Getter für E-Mail-Betreff bereitstellen
+    w.__fm_get_mail_subject = () => {
+      return subject || null;
+    };
+
+    // Vorschau-Hook registrieren
+    w.__fm_preview_mail = () => {
+      console.log("[fm-mail] preview triggered via window.__fm_preview_mail");
+      handlePreview();
+    };
+
+    // Senden-Hook registrieren
+    w.__fm_send_mail_now = () => {
+      console.log("[fm-mail] __fm_send_mail_now aufgerufen – triggere handleSendNow");
+      try {
+        // handleSendNow ist async, aber wir müssen hier nicht awaiten
+        handleSendNow();
+      } catch (err) {
+        console.error("[fm-mail] Fehler in __fm_send_mail_now/handleSendNow", err);
+      }
+    };
+
+    console.log("[fm-mail] __fm_send_mail_now, __fm_set_mail_to, __fm_get_mail_body, __fm_get_mail_subject registriert");
+
+    // Cleanup beim Unmount
+    return () => {
+      if (w.__fm_set_mail_body) {
+        delete w.__fm_set_mail_body;
+      }
+      if (w.__fm_set_mail_to) {
+        console.log("[fm-mail] __fm_set_mail_to beim Unmount entfernt");
+        delete w.__fm_set_mail_to;
+      }
+      if (w.__fm_set_mail_subject) {
+        console.log("[fm-mail] __fm_set_mail_subject beim Unmount entfernt");
+        delete w.__fm_set_mail_subject;
+      }
+      if (w.__fm_get_mail_body) {
+        console.log("[fm-mail] __fm_get_mail_body beim Unmount entfernt");
+        delete w.__fm_get_mail_body;
+      }
+      if (w.__fm_get_mail_subject) {
+        console.log("[fm-mail] __fm_get_mail_subject beim Unmount entfernt");
+        delete w.__fm_get_mail_subject;
+      }
+      if (w.__fm_preview_mail) {
+        console.log("[fm-mail] __fm_preview_mail beim Unmount entfernt");
+        delete w.__fm_preview_mail;
+      }
+      if (w.__fm_send_mail_now) {
+        console.log("[fm-mail] __fm_send_mail_now beim Unmount entfernt");
+        delete w.__fm_send_mail_now;
+      }
+    };
+  }, [handleSendNow, handlePreview, body, subject]);
+
+  useEffect(() => {
+    try {
+      const prefs = { provider: "piper", voice: "thorsten", rate: 0.92, pitch: 0.95 };
+      localStorage.setItem("fm_voice_prefs", JSON.stringify(prefs));
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   return (
-    <>
-      <Backdrop />
-      <div className="relative z-10" style={{ padding: 24, maxWidth: 800, margin: "0 auto" }}>
-        <div className="mb-6">
-          <h1 className="text-3xl font-bold mb-2">E-Mail verfassen</h1>
-          <p className="text-white/60">Neue Nachricht erstellen und senden</p>
+    <div className="glass-card" style={{ margin: "16px auto", maxWidth: 980, padding: 18 }}>
+      <h2 style={{ fontSize: 22, marginBottom: 10 }}>E-Mail verfassen</h2>
+      <div style={{ display: "grid", gap: 10 }}>
+        <input
+          placeholder="An"
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          className="glass-card"
+          style={{ padding: 10 }}
+        />
+        <input
+          placeholder="Betreff"
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+          className="glass-card"
+          style={{ padding: 10 }}
+        />
+        <textarea
+          placeholder="Nachricht"
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={10}
+          className="glass-card"
+          style={{ padding: 10 }}
+        />
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="chip" onClick={handlePreview}>
+            Vorschau drucken
+          </button>
+          <button
+            className="chip chip-active"
+            data-fm-mail="send-now"
+            onClick={handleSendNow}
+          >
+            Sofort senden
+          </button>
         </div>
-
-        {toast && (
-          <GlassCard className="mb-4 p-4 bg-orange-500/20 border-orange-500/40">
-            <div className="text-orange-200">{toast}</div>
-          </GlassCard>
-        )}
-
-        {preview ? (
-          <GlassCard className="p-6">
-            <div className="mb-4">
-              <div className="text-sm text-white/50 mb-1">An:</div>
-              <div className="text-white/90">{to || "(leer)"}</div>
-            </div>
-            <div className="mb-4">
-              <div className="text-sm text-white/50 mb-1">Betreff:</div>
-              <div className="text-white/90">{subject || "(leer)"}</div>
-            </div>
-            <div className="mb-6">
-              <div className="text-sm text-white/50 mb-1">Nachricht:</div>
-              <div className="text-white/90 whitespace-pre-wrap">{body || "(leer)"}</div>
-            </div>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setPreview(false)}
-                className="fr-btn fr-pill px-4 py-2 bg-white/10 hover:bg-white/20"
-              >
-                Zurück bearbeiten
-              </button>
-              <button
-                onClick={handleSend}
-                disabled={sending}
-                className="fr-btn fr-pill px-4 py-2 bg-freiraum-orange/80 hover:bg-freiraum-orange"
-              >
-                {sending ? "Wird gesendet..." : "Sofort senden"}
-              </button>
-            </div>
-          </GlassCard>
-        ) : (
-          <GlassCard className="p-6">
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-white/70 mb-2">An:</label>
-                <input
-                  type="email"
-                  value={to}
-                  onChange={(e) => setTo(e.target.value)}
-                  className="fr-input w-full"
-                  placeholder="empfaenger@example.com"
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-white/70 mb-2">Betreff:</label>
-                <input
-                  type="text"
-                  value={subject}
-                  onChange={(e) => setSubject(e.target.value)}
-                  className="fr-input w-full"
-                  placeholder="Betreff der E-Mail"
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-white/70 mb-2">Nachricht:</label>
-                <textarea
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  className="fr-textarea w-full min-h-[200px]"
-                  placeholder="Ihre Nachricht..."
-                />
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button
-                  onClick={handlePreview}
-                  className="fr-btn fr-pill px-4 py-2 bg-white/10 hover:bg-white/20"
-                >
-                  Zeig mir die Vorschau
-                </button>
-                <button
-                  onClick={handleSend}
-                  disabled={sending}
-                  className="fr-btn fr-pill px-4 py-2 bg-freiraum-orange/80 hover:bg-freiraum-orange"
-                >
-                  {sending ? "Wird gesendet..." : "Sofort senden"}
-                </button>
-              </div>
-            </div>
-          </GlassCard>
-        )}
       </div>
-    </>
+    </div>
   );
 }
 

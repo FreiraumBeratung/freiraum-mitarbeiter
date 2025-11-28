@@ -26,8 +26,14 @@ export default function VoiceButton() {
     await voice.stop();
   };
 
+  const listening = state === "listening";
+
   return (
-    <div style={{ position: "fixed", right: 18, bottom: 18, zIndex: 9999 }}>
+    <div className="glass-card" style={{ padding: 14, display: "grid", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontWeight: 600 }}>Push-to-Talk</span>
+        <span style={{ fontSize: 12, opacity: 0.7 }}>{label(state)}</span>
+      </div>
       <button
         onMouseDown={press}
         onMouseUp={release}
@@ -40,22 +46,37 @@ export default function VoiceButton() {
           width: 66,
           height: 66,
           borderRadius: 9999,
-          background: state === "listening" ? "rgba(255,115,0,.9)" : "rgba(255,255,255,.10)",
+          background: listening ? "rgba(255,115,0,.9)" : "rgba(255,255,255,.10)",
           border: "1px solid rgba(255,255,255,.25)",
           backdropFilter: "blur(8px)",
           color: "#fff",
           fontSize: 24,
           cursor: "pointer",
-          boxShadow:
-            state === "listening"
-              ? "0 0 24px rgba(255,115,0,.6)"
-              : "0 4px 14px rgba(0,0,0,.35)",
+          boxShadow: listening ? "0 0 24px rgba(255,115,0,.6)" : "0 4px 14px rgba(0,0,0,.35)",
+          margin: "0 auto",
         }}
       >
         🎤
       </button>
     </div>
   );
+}
+
+function label(state: VoiceState) {
+  switch (state) {
+    case "listening":
+      return "Hört zu";
+    case "transcribing":
+      return "Versteht";
+    case "acting":
+      return "Führt aus";
+    case "done":
+      return "Bereit";
+    case "error":
+      return "Bitte erneut";
+    default:
+      return "Bereit";
+  }
 }
 
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-import { speakSmart } from "../modules/tts";
+import { speak } from "../modules/voice/tts";
 import { getVoicePrefs, setVoicePrefs } from "../modules/tts/settings";
 import { voiceState } from "../modules/voice/state";
 import VoicePTT from "../components/VoicePTT";
@@ -85,7 +85,7 @@ export default function VoiceDiagnostics() {
   }, [provider, ttsOk]);
 
   const testSpeak = async () => {
-    await speakSmart(
+    await speak(
       "Guten Tag, ich bin dein verlässlicher Geschäftspartner. Ich arbeite ruhig, souverän und auf Deutsch."
     );
   };
@@ -127,7 +127,7 @@ export default function VoiceDiagnostics() {
       }).catch(() => {});
     }
     setNote("Lead-Suche gestartet (SHK Arnsberg).");
-    await speakSmart("Verstanden. Ich starte die Suche nach SHK Betrieben in Arnsberg.");
+    await speak("Verstanden. Ich starte die Suche nach SHK Betrieben in Arnsberg.");
   };
 
   const demoHSK1 = async () => {
@@ -145,7 +145,7 @@ export default function VoiceDiagnostics() {
       }).catch(() => {});
     }
     setNote("Lead-Suche gestartet (SHK Sundern).");
-    await speakSmart("Verstanden. Ich starte die Suche nach SHK Betrieben in Sundern.");
+    await speak("Verstanden. Ich starte die Suche nach SHK Betrieben in Sundern.");
   };
 
   const demoHSK2 = async () => {
@@ -160,7 +160,7 @@ export default function VoiceDiagnostics() {
       // optional trigger
     }
     setNote("Erinnerung gesetzt: Arnsberg 11");
-    await speakSmart("Erledigt. Erinnerung ist gesetzt.");
+    await speak("Erledigt. Erinnerung ist gesetzt.");
   };
 
   const cancelLead = async () => {
@@ -170,10 +170,10 @@ export default function VoiceDiagnostics() {
       }).catch(() => {});
       voiceState.lastLeadTaskId = null;
       setNote("Letzte Suche gestoppt.");
-      await speakSmart("Alles klar. Ich stoppe die letzte Suche.");
+      await speak("Alles klar. Ich stoppe die letzte Suche.");
     } else {
       setNote("Keine aktive Suche gespeichert.");
-      await speakSmart("Es gibt nichts zu stoppen.");
+      await speak("Es gibt nichts zu stoppen.");
     }
   };
 
