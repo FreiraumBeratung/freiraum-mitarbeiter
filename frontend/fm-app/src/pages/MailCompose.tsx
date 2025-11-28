@@ -19,6 +19,7 @@ export default function MailCompose() {
   const [to, setTo] = useState(sp.get("to") || "");
   const [subject, setSubject] = useState(sp.get("subject") || "");
   const [body, setBody] = useState(sp.get("body") || "");
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Automatische "Vorschau oder sofort senden?" Nachricht entfernt
   // Die Nachricht wird jetzt nur noch vom Voice-Modul gesteuert
@@ -66,19 +67,29 @@ export default function MailCompose() {
       if (!response.ok) {
         const text = await response.text().catch(() => "");
         console.error("[fm-mail] Mailversand fehlgeschlagen", response.status, text);
+        // Nur TTS, kein blockierendes alert()
         PartnerBotBus.say(`Mailversand fehlgeschlagen (${response.status}).`);
-        alert(`Mailversand fehlgeschlagen (${response.status}): ${text || "Unbekannter Fehler"}`);
+        // Sanfte Fehler-Notification
+        setSuccessMessage(`Fehler: Mailversand fehlgeschlagen (${response.status})`);
+        setTimeout(() => setSuccessMessage(null), 5000);
         return;
       }
 
       const data = await response.json().catch(() => ({} as any));
       console.log("[fm-mail] Mailversand erfolgreich", data);
-      PartnerBotBus.say("E-Mail wurde erfolgreich gesendet.");
-      alert("E-Mail wurde erfolgreich gesendet.");
+      // HINWEIS: Nur EINE TTS-Ausgabe beim erfolgreichen Versand
+      PartnerBotBus.say("Die E-Mail wurde versendet.");
+      // Sanfte, nicht-blockierende UI-Notification statt alert()
+      setSuccessMessage("E-Mail wurde erfolgreich gesendet.");
+      // Nach 4 Sekunden automatisch ausblenden
+      setTimeout(() => setSuccessMessage(null), 4000);
     } catch (err) {
       console.error("[fm-mail] Mailversand – Netzwerk/Client-Fehler", err);
+      // Nur TTS, kein blockierendes alert()
       PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
-      alert("Mailversand fehlgeschlagen (Verbindung).");
+      // Sanfte Fehler-Notification
+      setSuccessMessage("Fehler: Mailversand fehlgeschlagen (Verbindung)");
+      setTimeout(() => setSuccessMessage(null), 5000);
     }
   }, [to, subject, body]);
 
@@ -179,9 +190,31 @@ export default function MailCompose() {
   }, []);
 
   return (
-    <div className="glass-card" style={{ margin: "16px auto", maxWidth: 980, padding: 18 }}>
-      <h2 style={{ fontSize: 22, marginBottom: 10 }}>E-Mail verfassen</h2>
-      <div style={{ display: "grid", gap: 10 }}>
+    <>
+      {/* Toast-Notification für erfolgreichen Versand */}
+      {successMessage && (
+        <div
+          className="glass-card"
+          style={{
+            position: "fixed",
+            top: 20,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1000,
+            padding: "12px 24px",
+            borderRadius: 8,
+            backgroundColor: "rgba(0, 0, 0, 0.85)",
+            color: "white",
+            fontSize: 14,
+            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.3)",
+          }}
+        >
+          {successMessage}
+        </div>
+      )}
+      <div className="glass-card" style={{ margin: "16px auto", maxWidth: 980, padding: 18 }}>
+        <h2 style={{ fontSize: 22, marginBottom: 10 }}>E-Mail verfassen</h2>
+        <div style={{ display: "grid", gap: 10 }}>
         <input
           placeholder="An"
           value={to}
@@ -217,7 +250,8 @@ export default function MailCompose() {
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 

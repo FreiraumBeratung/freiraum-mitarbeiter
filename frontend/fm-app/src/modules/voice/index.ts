@@ -212,6 +212,32 @@ export class VoiceController {
         }
         await speak("Verstanden. Ich starte die Suche.");
       } else if (intent.type === "reminder") {
+        // HINWEIS: Diese Ausgabe "Erledigt, Erinnerung ist gesetzt" gehört ausschließlich
+        // zur Reminder-/Termin-Logik und darf NICHT im E-Mail-Kontext (Wizard 2/3) ausgelöst werden.
+        
+        // Prüfung: Wenn E-Mail-Kontext vorhanden ist, KEINEN Reminder setzen
+        const lowerText = (text || "").toLowerCase();
+        const isEmailKeywordInText =
+          lowerText.includes("mail") ||
+          lowerText.includes("e-mail") ||
+          lowerText.includes("email") ||
+          lowerText.includes("schreibe") ||
+          lowerText.includes("schreib");
+        
+        // Prüfe auch lastAction, um E-Mail-Kontext zu erkennen (z.B. bei Wizard-2-Befehlen im laufenden Composer)
+        const lastAction = getLastAction();
+        const isEmailContextFromAction =
+          lastAction &&
+          (lastAction.kind === "email-compose" ||
+           lastAction.description.toLowerCase().includes("e-mail") ||
+           lastAction.description.toLowerCase().includes("mail"));
+
+        if (isEmailKeywordInText || isEmailContextFromAction) {
+          // E-Mail-Kontext erkannt -> Reminder-Intent ignorieren, damit Wizard3 übernimmt
+          console.log("[fm-voice] Reminder-Intent im E-Mail-Kontext erkannt – ignoriert, damit Wizard3 übernimmt");
+          return;
+        }
+
         const body: Record<string, unknown> = { title: intent.payload.title || "Nachfassung" };
         if (intent.payload.when) body.when = intent.payload.when;
         await fetch(`${BACKEND}/api/proactive/remember`, {
@@ -455,65 +481,46 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
 
   if (intent.type === "email-send") {
     console.log("[fm-voice] applyVoiceIntent(email-send) – versuche __fm_send_mail_now aufzurufen");
-    try {
-      if (typeof window === "undefined") {
-        console.warn("[fm-voice] window ist undefined, kann __fm_send_mail_now nicht ausführen");
-        PartnerBotBus.pose("confused");
-        PartnerBotBus.say("E-Mail-Versand ist gerade nicht verfügbar.");
-        return;
-      }
 
-      const w = window as any;
-      const fn = w.__fm_send_mail_now;
+    if (typeof window !== "undefined" && typeof (window as any).__fm_send_mail_now === "function") {
+      const sendFn = (window as any).__fm_send_mail_now;
+      console.log("[fm-voice] typeof window.__fm_send_mail_now:", typeof sendFn);
 
-      console.log("[fm-voice] typeof window.__fm_send_mail_now:", typeof fn);
+      try {
+        // Funktion WIRKLICH ausführen
+        const maybePromise = sendFn();
 
-      if (typeof fn === "function") {
-        try {
-          const last = getLastAction();
-          const hasEmail = last && last.kind === "email-compose";
-          if (hasEmail) {
-            console.log("[fm-voice] rufe window.__fm_send_mail_now() auf …");
-            PartnerBotBus.pose("thumbs-up");
-            PartnerBotBus.say("Ich sende die E-Mail jetzt ab.");
-            fn();
-            console.log("[fm-voice] window.__fm_send_mail_now() wurde ohne Exception aufgerufen");
-          } else {
-            PartnerBotBus.pose("confused");
-            PartnerBotBus.say(
-              "Ich sehe gerade keine fertige E-Mail, die ich senden kann. Bitte öffne oder erstelle erst eine E-Mail.",
-            );
-          }
-        } catch (err) {
-          console.error("[fm-voice] Fehler beim Aufruf von window.__fm_send_mail_now()", err);
-          PartnerBotBus.pose("confused");
-          PartnerBotBus.say("Beim Senden der E-Mail ist ein Fehler aufgetreten.");
+        // Falls die Funktion ein Promise zurückgibt, optional loggen
+        if (maybePromise && typeof (maybePromise as any).then === "function") {
+          (maybePromise as Promise<unknown>)
+            .then(() => {
+              console.log("[fm-voice] applyVoiceIntent(email-send) – __fm_send_mail_now erfolgreich abgeschlossen");
+            })
+            .catch((err) => {
+              console.error("[fm-voice] applyVoiceIntent(email-send) – Fehler beim E-Mail-Versand", err);
+            });
+        } else {
+          console.log("[fm-voice] applyVoiceIntent(email-send) – __fm_send_mail_now synchron ausgeführt");
         }
-      } else {
-        console.warn("[fm-voice] window.__fm_send_mail_now ist keine Funktion – versuche Fallback über Button-Klick");
-        try {
-          const btn = document.querySelector<HTMLButtonElement>('[data-fm-mail="send-now"]');
-          if (btn) {
-            console.log("[fm-voice] Fallback: klicke Button [data-fm-mail=\"send-now\"]");
-            PartnerBotBus.pose("thumbs-up");
-            PartnerBotBus.say("Ich sende die E-Mail jetzt ab.");
-            btn.click();
-          } else {
-            console.warn("[fm-voice] Fallback fehlgeschlagen: Button [data-fm-mail=\"send-now\"] nicht gefunden");
-            PartnerBotBus.pose("confused");
-            PartnerBotBus.say("E-Mail-Versand ist gerade nicht verfügbar.");
-          }
-        } catch (err) {
-          console.error("[fm-voice] Fehler beim DOM-Fallback für email-send", err);
-          PartnerBotBus.pose("confused");
-          PartnerBotBus.say("Beim Senden der E-Mail ist ein Fehler aufgetreten.");
-        }
+      } catch (err) {
+        console.error("[fm-voice] applyVoiceIntent(email-send) – Ausnahme beim Aufruf von __fm_send_mail_now", err);
       }
-    } catch (err) {
-      console.error("[fm-voice] Unerwarteter Fehler in applyVoiceIntent(email-send)", err);
-      PartnerBotBus.pose("confused");
-      PartnerBotBus.say("Beim Senden der E-Mail ist ein Fehler aufgetreten.");
+    } else {
+      console.warn("[fm-voice] applyVoiceIntent(email-send) – __fm_send_mail_now ist nicht verfügbar");
+      // Fallback: Versuche Button-Klick
+      try {
+        const btn = document.querySelector<HTMLButtonElement>('[data-fm-mail="send-now"]');
+        if (btn) {
+          console.log("[fm-voice] Fallback: klicke Button [data-fm-mail=\"send-now\"]");
+          btn.click();
+        } else {
+          console.warn("[fm-voice] Fallback fehlgeschlagen: Button [data-fm-mail=\"send-now\"] nicht gefunden");
+        }
+      } catch (err) {
+        console.error("[fm-voice] Fehler beim DOM-Fallback für email-send", err);
+      }
     }
+
     // GANZ WICHTIG: Für diesen Intent KEINE KI-Anfrage starten, kein /api/ai/chat!
     return;
   }

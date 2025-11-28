@@ -320,6 +320,21 @@ function detectWizard2Intent(normalized: string, raw: string): VoiceIntent | nul
   let n = normalized.toLowerCase().trim();
   const rawTrimmed = raw.trim();
 
+  // Prüfung: Termin-Intent darf NICHT auslösen, wenn E-Mail-Kontext vorhanden ist
+  const lower = n;
+  const isEmailContext =
+    lower.includes("mail") ||
+    lower.includes("e-mail") ||
+    lower.includes("email") ||
+    lower.includes("schreibe") ||
+    lower.includes("schreib");
+  const mentionsTermin = lower.includes("termin");
+
+  if (mentionsTermin && isEmailContext) {
+    // Termin im E-Mail-Kontext -> Wizard3 soll übernehmen, nicht Wizard2
+    return null;
+  }
+
   // typische STT-Fehler glätten
   n = n.replace(/\bdie andere\b/g, "die anrede"); // "die andere" -> "die anrede"
   n = n.replace(/\bandere die andere\b/g, "ändere die anrede");
@@ -867,6 +882,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     "schick email los",
     "schick die mail los",
     "schick die email los",
+    "email senden",
+    "e mail senden",
+    "mail senden",
   ];
 
   if (SEND_PATTERNS.some((p) => text.includes(p))) {

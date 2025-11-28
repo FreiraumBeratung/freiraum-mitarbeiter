@@ -15,7 +15,11 @@ export function parseIntentDE(text: string): Intent {
     return { type: "lead_hunt", payload: { category: "shk", location: "Sundern" } };
   }
 
-  if (/(erinnere mich|termin).*(morgen).*(11|elf)/.test(t) && /arnsberg/.test(t)) {
+  // Prüfung: Kein Reminder-Intent bei E-Mail-Kontext (auch für spezielle Arnsberg-Regel)
+  const isEmailContextForArnsberg =
+    /mail|e-mail|email|schreibe|schreib/.test(t);
+
+  if (/(erinnere mich|termin).*(morgen).*(11|elf)/.test(t) && /arnsberg/.test(t) && !isEmailContextForArnsberg) {
     const when = (() => {
       const d = new Date();
       d.setDate(d.getDate() + 1);
@@ -40,7 +44,12 @@ export function parseIntentDE(text: string): Intent {
     return { type: "lead_hunt", payload: { category, location } };
   }
 
-  if (/erinnere mich|termin|nachfassung/.test(t)) {
+  // Prüfung: Kein Reminder-Intent bei E-Mail-Kontext
+  const isEmailContext =
+    /mail|e-mail|email|schreibe|schreib/.test(t);
+  const mentionsReminderKeywords = /erinnere mich|termin|nachfassung/.test(t);
+
+  if (mentionsReminderKeywords && !isEmailContext) {
     let title = "Nachfassung";
     const m1 = t.match(/morgen(?: um)? (\d{1,2})(?:[:\.](\d{2}))?/);
     let when: string | undefined;
