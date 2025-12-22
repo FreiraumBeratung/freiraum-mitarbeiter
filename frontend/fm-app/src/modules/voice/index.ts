@@ -22,6 +22,7 @@ declare global {
     __fm_set_mail_subject?: (subject: string) => void;
     __fm_get_mail_body?: () => string | null;
     __fm_get_mail_subject?: () => string | null;
+    __fm_get_mail_to?: () => string | null;
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
   }
@@ -41,6 +42,57 @@ console.log('[fm-voice] Wizard4Email builder global registriert.');
 const WIZARD4_AUTOSEND_ENABLED = true;
 
 const BACKEND = "http://127.0.0.1:30521";
+
+/**
+ * Extrahiert eine E-Mail-Adresse aus einem Text per Regex.
+ * Gibt die erste gefundene E-Mail-Adresse zurück oder null.
+ */
+function extractEmailFromText(text: string): string | null {
+  if (!text) return null;
+  const t = String(text).trim();
+
+  // 1) Standard-Regex: findet saubere E-Mail direkt im Text
+  const m = t.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  if (m && m[0]) return m[0];
+
+  // 2) TLD-Cut-Fallback: schneidet alles nach bekannten TLDs ab
+  // Beispiel: "freiraumberatung@web.deine" -> "freiraumberatung@web.de"
+  const lower = t.toLowerCase();
+  const tlds = ['.de', '.com', '.net', '.org', '.eu', '.io'];
+
+  const atPos = lower.indexOf('@');
+  if (atPos < 1) return null;
+
+  // nur ein begrenztes Fenster betrachten, damit keine riesigen Texte matchen
+  const window = lower.slice(0, Math.min(lower.length, atPos + 64));
+
+  let bestEnd = -1;
+  for (const tld of tlds) {
+    const idx = window.indexOf(tld, atPos);
+    if (idx !== -1) {
+      const end = idx + tld.length;
+      if (end > bestEnd) bestEnd = end;
+    }
+  }
+
+  if (bestEnd !== -1) {
+    const candidate = t.slice(0, bestEnd);
+    return candidate.trim();
+  }
+
+  return null;
+}
+
+/**
+ * Prüft, ob eine E-Mail-Adresse strict gültig ist.
+ * Verwendet eine solide Basis-Validierung für unsere Zwecke.
+ */
+function isStrictValidEmail(email: string): boolean {
+  if (!email) return false;
+  const e = email.trim();
+  // sehr solide Basis-Validierung für unsere Zwecke
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
+}
 
 interface Wizard3ParseResult {
   to: string | null;
@@ -329,8 +381,10 @@ function applyEmailToComposeUI(params: {
     (window as any).__fm_set_mail_subject(subject);
   }
 
-  if (body && typeof window !== "undefined" && (window as any).__fm_set_mail_body) {
-    console.log(`${logPrefix}: __fm_set_mail_body gesetzt`);
+  // Body setzen (auch wenn leer - wichtig für previewOnly)
+  // body kann null, "" oder ein String sein - nur null sollte ignoriert werden
+  if (body !== null && typeof window !== "undefined" && (window as any).__fm_set_mail_body) {
+    console.log(`${logPrefix}: __fm_set_mail_body gesetzt`, body === '' ? '(leer)' : body);
     (window as any).__fm_set_mail_body(body);
   }
 }
@@ -435,10 +489,50 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     return;
   }
 
+  function normalizeEmailForAutoSend(raw: string): string | null {
+    if (!raw) return null;
+    const text = String(raw).trim();
+
+    // finde irgendwas, was wie eine mail beginnt
+    const start = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+/);
+    if (!start) return null;
+
+    const s = start[0];
+    const lower = (s + text.slice(s.length)).toLowerCase();
+
+    const tlds = ['.de', '.com', '.net', '.org', '.eu', '.io'];
+
+    // suche die erste erlaubte tld NACH dem @
+    const atPos = lower.indexOf('@');
+    if (atPos < 1) return null;
+
+    let bestEnd = -1;
+    for (const tld of tlds) {
+      const idx = lower.indexOf(tld, atPos);
+      if (idx !== -1) {
+        const end = idx + tld.length;
+        if (end > bestEnd) bestEnd = end;
+      }
+    }
+    if (bestEnd === -1) return null;
+
+    const candidate = (s + text.slice(s.length)).slice(0, bestEnd).trim();
+
+    // final strict check (keine spaces, genau ein @, dot tld vorhanden)
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(candidate)) return null;
+
+    // Zusätzlich: TLD muss in allowlist sein
+    const candLower = candidate.toLowerCase();
+    if (!tlds.some(t => candLower.endsWith(t))) return null;
+
+    return candidate;
+  }
+
   if (intent.type === "email-compose") {
     console.log("[fm-voice] email-compose intent:", intent);
     
     const w = window as any;
+    let didAutoSend = false;
     
     // Wizard4-Email-Draft erstellen (kompletter Entwurf mit Betreff + Body)
     const rawText = lastTranscript || intent.bodyHint || intent.toRaw || "";
@@ -448,6 +542,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       try {
         wizard4Draft = w.buildWizard4EmailFromInput(rawText);
         console.log('[fm-voice][wizard4] email draft from input:', rawText, wizard4Draft);
+        console.log('[fm-voice][wizard4][debug] emailIntent snapshot', {
+          to: (intent as any)?.to,
+          toRaw: (intent as any)?.toRaw,
+          draftToEmail: (wizard4Draft as any)?.toEmail,
+        });
+        
         w.__fm_wizard4_last_draft = wizard4Draft;
       } catch (err) {
         console.error('[fm-voice][wizard4] Fehler beim Bauen des Wizard4EmailDraft:', err);
@@ -459,44 +559,75 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       );
     }
     
-    // Empfänger bestimmen (NUR gültige E-Mail-Adressen mit '@')
-    let finalToEmail: string | null = null; // Für AutoSend 4.0
-    let toCandidate: string | null =
-      (wizard4Draft && wizard4Draft.toEmail) ||
-      intent.to ||
-      intent.toRaw ||
-      null;
+    // -----------------------------
+    // Wizard4: ALWAYS-RUN To-Resolver
+    // -----------------------------
+    let finalToEmail: string | null = null;
+    let safeAutoSendEmail: string | null = null;
     
-    if (toCandidate) {
-      toCandidate = toCandidate.trim();
+    try {
+      const fromDraft = (wizard4Draft && typeof wizard4Draft.toEmail === 'string') ? wizard4Draft.toEmail.trim() : '';
+      const fromIntentTo = (intent && typeof (intent as any).to === 'string') ? String((intent as any).to).trim() : '';
+      const fromToRaw = (intent && typeof (intent as any).toRaw === 'string') ? String((intent as any).toRaw).trim() : '';
+      
+      // Reihenfolge: intent.to > draft.toEmail > toRaw
+      const primary = fromIntentTo || fromDraft || fromToRaw;
+      
+      const extracted = primary ? extractEmailFromText(primary) : null;
+      
+      if (extracted && isStrictValidEmail(extracted)) {
+        finalToEmail = extracted;
+      }
+      
+      // AutoSend-safe Normalisierung
+      safeAutoSendEmail = normalizeEmailForAutoSend(primary || '');
+      
+      console.log('[fm-voice][wizard4][debug] to-resolver', {
+        fromIntentTo,
+        fromDraft,
+        fromToRaw,
+        primary,
+        extracted,
+        finalToEmail,
+        safeAutoSendEmail,
+      });
+    } catch (err) {
+      console.error('[fm-voice][wizard4][debug] to-resolver error', err);
     }
     
-    // Nur setzen, wenn ein '@' drin ist → also wirklich wie eine E-Mail aussieht
-    let toEmail: string | null = null;
-    if (toCandidate && toCandidate.includes('@')) {
-      toEmail = toCandidate;
-      finalToEmail = toCandidate; // Für AutoSend 4.0 merken
-      console.log('[fm-voice] email-compose (Wizard4): gültige E-Mail-Adresse erkannt:', toEmail);
-    } else {
-      console.log(
-        '[fm-voice] email-compose (Wizard4): keine gültige E-Mail-Adresse erkannt (kein @), Empfänger-Feld bleibt leer.',
-        {
-          toCandidate,
-          toName: wizard4Draft ? wizard4Draft.toName : undefined,
-        }
-      );
-      // An dieser Stelle lassen wir das Feld bewusst leer (toEmail bleibt null)
+    // Empfänger ins UI setzen (wenn möglich)
+    if (finalToEmail && typeof (w as any).__fm_set_mail_to === 'function') {
+      console.log('[fm-voice] email-compose (Wizard4): __fm_set_mail_to (resolved)', finalToEmail);
+      try {
+        (w as any).__fm_set_mail_to(finalToEmail);
+      } catch (err) {
+        console.error('[fm-voice] Fehler beim Setzen von __fm_set_mail_to (resolved):', err);
+      }
     }
     
-    // Betreff bestimmen (Wizard4 hat Vorrang)
+    // Betreff bestimmen (Wizard4 hat Vorrang - IMMER draft.subject verwenden wenn vorhanden)
     const subject = (wizard4Draft && wizard4Draft.subject) || intent.subjectHint || null;
     
-    // Body bestimmen (Wizard4 hat Vorrang)
-    const body = (wizard4Draft && wizard4Draft.body) || intent.bodyHint || null;
+    // Body bestimmen (Wizard4 hat Vorrang - IMMER draft.body verwenden, NIEMALS bodyHint als Fallback)
+    // Wenn draft vorhanden, verwende draft.body (auch wenn leer)
+    // Wenn draft.sendMode === "previewOnly", Body auf "" setzen
+    let body: string | null = null;
+    if (wizard4Draft) {
+      // Wenn previewOnly, Body immer leer
+      if (wizard4Draft.sendMode === 'previewOnly') {
+        body = '';
+      } else {
+        // Verwende draft.body (auch wenn leer - das ist korrekt)
+        body = wizard4Draft.body || '';
+      }
+    } else {
+      // Nur wenn kein Draft vorhanden, bodyHint als Fallback (sollte nicht passieren)
+      body = intent.bodyHint || null;
+    }
     
     // URL-Parameter für Navigation (optional, für Fallback-Rendering)
     const params = new URLSearchParams();
-    if (toEmail) params.set("to", toEmail);
+    if (finalToEmail) params.set("to", finalToEmail);
     if (subject) params.set("subject", subject);
     if (body) params.set("body", body);
     const qs = params.toString();
@@ -509,29 +640,43 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     setTimeout(() => {
       // Setze E-Mail-Felder über Helper-Funktion mit Wizard4-Daten
       applyEmailToComposeUI({
-        to: toEmail,
+        to: finalToEmail,
         subject: subject,
         body: body,
         logPrefix: "[fm-voice] email-compose (Wizard4)",
       });
       
+      // Stelle sicher, dass finalToEmail IMMER gesetzt wird (auch wenn schon gesetzt)
+      if (finalToEmail && typeof w.__fm_set_mail_to === 'function') {
+        try {
+          w.__fm_set_mail_to(finalToEmail);
+          console.log('[fm-voice][wizard4] __fm_set_mail_to aufgerufen (vor AutoSend):', finalToEmail);
+        } catch (err) {
+          console.error('[fm-voice] Fehler beim Setzen von __fm_set_mail_to (vor AutoSend):', err);
+        }
+      }
+      
       // Zusätzliches Logging für Debugging
       if (wizard4Draft) {
+        // Logge den FINALEN Body, der wirklich ins UI gesetzt wurde
+        const finalBody = body || '';
         console.log('[fm-voice][wizard4] Email-Felder gesetzt:', {
-          to: toEmail,
+          to: finalToEmail,
           subject: subject,
-          body: body,
+          body: finalBody,
           sendMode: wizard4Draft.sendMode,
-          toName: wizard4Draft.toName
+          toName: wizard4Draft.toName,
+          draftBody: wizard4Draft.body,
+          usedBodyHint: !wizard4Draft && !!intent.bodyHint
         });
         
-        if (wizard4Draft.toName && !toEmail) {
+        if (wizard4Draft.toName && !finalToEmail) {
           console.log('[fm-voice][wizard4] Hinweis: Nur Name erkannt, keine E-Mail-Adresse:', wizard4Draft.toName);
         }
       }
       
       // -----------------------------
-      // AutoSend 4.0 – Wizard 4
+      // AutoSend 4.0 – Wizard 4 (mit Retry-Logik)
       // -----------------------------
       try {
         const canAutoSend =
@@ -539,39 +684,86 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           wizard4Draft &&
           wizard4Draft.sendMode === 'sendNow' &&
           typeof w.__fm_send_mail_now === 'function' &&
-          finalToEmail !== null &&
-          typeof finalToEmail === 'string' &&
-          finalToEmail.includes('@');
+          safeAutoSendEmail !== null;
         
         if (canAutoSend) {
-          console.log('[fm-voice][wizard4] AutoSend: sende E-Mail jetzt.', {
-            to: finalToEmail,
+          console.log('[fm-voice][wizard4] AutoSend: starte Retry-Logik.', {
+            to: safeAutoSendEmail,
             subject: wizard4Draft.subject,
             sendMode: wizard4Draft.sendMode,
           });
           
-          w.__fm_send_mail_now();
+          // Retry-Logik: Warte bis Empfänger wirklich im UI steht
+          let retryCount = 0;
+          const maxRetries = 5;
+          
+          const trySend = () => {
+            // Stelle sicher, dass safeAutoSendEmail im UI steht
+            if (safeAutoSendEmail && typeof w.__fm_set_mail_to === 'function') {
+              try {
+                w.__fm_set_mail_to(safeAutoSendEmail);
+                console.log('[fm-voice][wizard4] AutoSend: safeAutoSendEmail ins UI gesetzt:', safeAutoSendEmail);
+              } catch (err) {
+                console.error('[fm-voice][wizard4] AutoSend: Fehler beim Setzen von safeAutoSendEmail:', err);
+              }
+            }
+            
+            const currentTo = (typeof w.__fm_get_mail_to === 'function') ? String(w.__fm_get_mail_to() || '') : '';
+            
+            if (currentTo && currentTo.includes('@')) {
+              console.log('[fm-voice][wizard4] AutoSend: Empfänger steht im UI, sende jetzt.', { currentTo, safeAutoSendEmail });
+              didAutoSend = true;
+              w.__fm_send_mail_now();
+            } else if (retryCount < maxRetries) {
+              retryCount++;
+              console.log('[fm-voice][wizard4] AutoSend: Empfänger noch nicht im UI, retry in 200ms.', { 
+                currentTo, 
+                retryCount, 
+                maxRetries,
+                safeAutoSendEmail
+              });
+              setTimeout(trySend, 200);
+            } else {
+              console.warn('[fm-voice][wizard4] AutoSend: Abbruch nach', maxRetries, 'Retries. Empfänger nicht im UI gesetzt.', { 
+                currentTo,
+                expectedTo: safeAutoSendEmail
+              });
+              // AutoSend fehlgeschlagen, zeige prepared-Nachricht
+              if (!didAutoSend) {
+                PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
+              }
+            }
+          };
+          
+          // Starte Retry-Logik nach kurzer Verzögerung
+          setTimeout(trySend, 150);
         } else {
           console.log('[fm-voice][wizard4] AutoSend nicht ausgeführt.', {
             autosendEnabled: WIZARD4_AUTOSEND_ENABLED,
             hasDraft: !!wizard4Draft,
             sendMode: wizard4Draft ? wizard4Draft.sendMode : null,
-            hasValidTo: !!(finalToEmail && finalToEmail.includes('@')),
+            hasSafeAutoSendEmail: safeAutoSendEmail !== null,
             hasSendFn: typeof w.__fm_send_mail_now === 'function',
           });
+          // AutoSend nicht ausgeführt, zeige prepared-Nachricht
+          if (!didAutoSend) {
+            PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
+          }
         }
       } catch (err) {
         console.error('[fm-voice][wizard4] Fehler beim AutoSend:', err);
+        // Bei Fehler zeige prepared-Nachricht
+        if (!didAutoSend) {
+          PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
+        }
       }
     }, 100);
     
     // lastAction setzen für spätere KI-Integration
-    const recipient = toEmail || (wizard4Draft && wizard4Draft.toName) || "Unbekannt";
+    const recipient = finalToEmail || (wizard4Draft && wizard4Draft.toName) || "Unbekannt";
     const description = `E-Mail an ${recipient}.`;
     setLastAction({ kind: "email-compose", description });
     
-    // NUR diese eine Nachricht sprechen - keine Vorschau, kein Senden, kein Doppel-Audio
-    PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
     return;
   }
 

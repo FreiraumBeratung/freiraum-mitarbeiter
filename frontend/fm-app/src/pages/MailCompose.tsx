@@ -9,6 +9,7 @@ declare global {
     __fm_set_mail_subject?: (subject: string) => void;
     __fm_get_mail_body?: () => string | null;
     __fm_get_mail_subject?: () => string | null;
+    __fm_get_mail_to?: () => string | null;
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
   }
@@ -129,6 +130,11 @@ export default function MailCompose() {
       return subject || null;
     };
 
+    // Globalen Getter für E-Mail-Empfänger bereitstellen
+    w.__fm_get_mail_to = () => {
+      return to || null;
+    };
+
     // Vorschau-Hook registrieren
     w.__fm_preview_mail = () => {
       console.log("[fm-mail] preview triggered via window.__fm_preview_mail");
@@ -146,7 +152,7 @@ export default function MailCompose() {
       }
     };
 
-    console.log("[fm-mail] __fm_send_mail_now, __fm_set_mail_to, __fm_get_mail_body, __fm_get_mail_subject registriert");
+    console.log("[fm-mail] __fm_send_mail_now, __fm_set_mail_to, __fm_get_mail_body, __fm_get_mail_subject, __fm_get_mail_to registriert");
 
     // Cleanup beim Unmount
     return () => {
@@ -169,6 +175,10 @@ export default function MailCompose() {
         console.log("[fm-mail] __fm_get_mail_subject beim Unmount entfernt");
         delete w.__fm_get_mail_subject;
       }
+      if (w.__fm_get_mail_to) {
+        console.log("[fm-mail] __fm_get_mail_to beim Unmount entfernt");
+        delete w.__fm_get_mail_to;
+      }
       if (w.__fm_preview_mail) {
         console.log("[fm-mail] __fm_preview_mail beim Unmount entfernt");
         delete w.__fm_preview_mail;
@@ -178,7 +188,7 @@ export default function MailCompose() {
         delete w.__fm_send_mail_now;
       }
     };
-  }, [handleSendNow, handlePreview, body, subject]);
+  }, [handleSendNow, handlePreview, body, subject, to]);
 
   useEffect(() => {
     try {

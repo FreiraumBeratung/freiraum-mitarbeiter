@@ -17,8 +17,43 @@ export type VoiceIntent =
   | { type: "ai-chat"; query: string }
   | { type: "unknown" };
 
+const DISABLE_WIZARD3_ONESHOT_FOR_TESTING = true;
+
+// ============================================================
+// INTENT 4.2: Umgangssprachliche E-Mail-Befehle erkennen
+// ============================================================
+
+/**
+ * Mail-Verben: Umgangssprachliche Befehle zum Schreiben/Senden von E-Mails
+ */
+const MAIL_VERBS = [
+  "schreib", "schreibe", "schicken", "schick", "hau", "mach", "mache",
+  "setz", "setze", "tippe", "tipp", "sende", "send"
+];
+
+/**
+ * Mail-Nomen: Begriffe für E-Mail/Nachricht
+ */
+const MAIL_NOUNS = [
+  "mail", "email", "e-mail", "nachricht"
+];
+
+/**
+ * Soft-Words: Füllwörter, die ignoriert werden sollen
+ */
+const SOFT_WORDS = [
+  "mal", "eben", "kurz", "bitte", "mir", "uns", "doch"
+];
+
+/**
+ * Artikel: Präpositionen/Artikel, die ignoriert werden können
+ */
+const ARTICLES = [
+  "dem", "den", "der", "die", "das", "an", "für"
+];
+
 function normalize(text: string) {
-  return (text || "")
+  let normalized = (text || "")
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
@@ -29,6 +64,17 @@ function normalize(text: string) {
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  
+  // Intent 4.2: Soft-Words entfernen (für flexiblere Erkennung)
+  for (const softWord of SOFT_WORDS) {
+    const re = new RegExp(`\\b${softWord}\\b`, 'gi');
+    normalized = normalized.replace(re, '');
+  }
+  
+  // Mehrfachspaces nach Soft-Word-Entfernung wieder normalisieren
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+  
+  return normalized;
 }
 
 const matchAny = (text: string, candidates: string[]) => candidates.some((c) => text.includes(c));
@@ -745,10 +791,12 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   }
 
   // 1) Wizard3-OneShot: E-Mail mit Inhalt erkennen (VOR email-compose)
-  const wizard3 = detectWizard3OneShot(original, text);
-  if (wizard3) {
-    console.log("[fm-voice] routeVoiceIntent -> wizard3-one-shot (E-Mail + Inhalt erkannt)");
-    return wizard3;
+  if (!DISABLE_WIZARD3_ONESHOT_FOR_TESTING) {
+    const wizard3 = detectWizard3OneShot(original, text);
+    if (wizard3) {
+      console.log("[fm-voice] routeVoiceIntent -> wizard3-one-shot (E-Mail + Inhalt erkannt)");
+      return wizard3;
+    }
   }
 
   // 2) E-Mail-Compose Versuch mit einfacher Heuristik (nur wenn kein Wizard3)
@@ -941,6 +989,56 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   if (wizard2Fallback) {
     console.log("[fm-voice] routeVoiceIntent -> Wizard2 (Fallback)");
     return wizard2Fallback;
+  }
+
+  // ============================================================
+  // INTENT 4.2: Umgangssprachliche E-Mail-Befehle erkennen
+  // ============================================================
+  // Diese Regel MUSS vor ai-chat greifen, um umgangssprachliche
+  // E-Mail-Befehle zuverlässig zu erkennen, bevor sie als allgemeine
+  // KI-Anfragen interpretiert werden.
+  // 
+  // Regel: Wenn mindestens EIN Mail-Verb UND mindestens EIN Mail-Nomen
+  // enthalten sind, dann handelt es sich um einen E-Mail-Befehl.
+  {
+    const hasMailVerb = MAIL_VERBS.some(verb => {
+      // Prüfe, ob das Verb als Wortgrenze vorkommt (nicht als Teil eines anderen Wortes)
+      const re = new RegExp(`\\b${verb}\\b`, 'i');
+      return re.test(text);
+    });
+    
+    const hasMailNoun = MAIL_NOUNS.some(noun => {
+      // Prüfe, ob das Nomen als Wortgrenze vorkommt
+      const re = new RegExp(`\\b${noun}\\b`, 'i');
+      return re.test(text);
+    });
+    
+    if (hasMailVerb && hasMailNoun) {
+      console.log(
+        "[intent-router][intent-4.2] Umgangssprache-Mail erkannt:",
+        text
+      );
+      
+      // Versuche, Empfänger und Body-Hint zu extrahieren
+      const emailParsed = parseEmailCompose(original);
+      const extractedEmail = extractEmailAddress(original);
+      
+      // Erstelle email-compose Intent
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: emailParsed?.toRaw,
+        subjectHint: undefined,
+        bodyHint: emailParsed?.bodyHint,
+      };
+      
+      // Wenn eine E-Mail-Adresse per Regex gefunden wurde, diese als 'to' setzen
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][intent-4.2] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+      
+      return intent;
+    }
   }
 
   // Fallback: alles, was nicht gematcht wurde, geht an die KI
