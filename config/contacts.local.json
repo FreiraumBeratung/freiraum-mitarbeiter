@@ -1,0 +1,26 @@
+[
+  {
+    "id": "freiraumberatung",
+    "displayName": "Freiraumberatung",
+    "aliases": ["freiraumberatung", "freiraum", "freiraum beratung"],
+    "emails": ["freiraumberatung@web.de"]
+  },
+  {
+    "id": "denis",
+    "displayName": "Denis Bytyqi",
+    "aliases": ["denis", "Denis", "Denis Bytyqi"],
+    "emails": ["freiraumberatung@web.de"]
+  },
+  {
+    "id": "endrit",
+    "displayName": "Endrit Bytyqi",
+    "aliases": ["endrit", "Endrit", "Endrit Bytyqi", "dit", "Dit", "bruder", "Bruder"],
+    "emails": ["bac598@web.de"]
+  },
+  {
+    "id": "thomas",
+    "displayName": "Thomas Müller",
+    "aliases": ["thomas", "Thomas", "Thomas Müller", "Thomas Mueller", "dem thomas", "den thomas", "bei thomas", "an thomas", "mueller", "Müller", "Mueller"],
+    "emails": ["DenisBytyqi598@web.de"]
+  }
+]

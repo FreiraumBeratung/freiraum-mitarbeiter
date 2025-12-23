@@ -100,6 +100,17 @@ try:
     app.include_router(lead_radar_router)
 except Exception:
     pass
+try:
+    from .routers.contacts import router as contacts_router
+
+    app.include_router(contacts_router)
+    # Initialisiere Contact Resolver beim Startup (für Logging)
+    from .services.contact_resolver import get_contact_resolver
+    resolver = get_contact_resolver()
+    print(f"[fm-contacts] Contact Resolver initialisiert: {len(resolver.contacts)} Kontakte geladen")
+except Exception as e:
+    print(f"[fm-contacts] FEHLER beim Laden des Contacts-Routers: {e}")
+    pass
 # lead_hunter_osm will be loaded by router_loader
 load_and_include_routers(app)
 

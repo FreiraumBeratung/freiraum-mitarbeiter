@@ -94,6 +94,90 @@ function isStrictValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
 }
 
+/**
+ * Prüft, ob ein Token ein ungültiger Empfänger-Name ist (Pronomen, zu kurz, etc.)
+ */
+function isInvalidRecipientToken(name: string): boolean {
+  if (!name || typeof name !== 'string') return true;
+  const trimmed = name.trim().toLowerCase();
+  if (trimmed.length < 2) return true;
+  const invalidTokens = ['sie', 'ihn', 'ihr', 'ihm', 'mir', 'mich', 'dir', 'dich', 'uns', 'euch', 'jemand', 'jemanden', 'irgendwen', 'irgendjemand'];
+  return invalidTokens.includes(trimmed);
+}
+
+/**
+ * Extrahiert den Empfängernamen aus einem normalisierten Transcript.
+ * Unterstützt umgangssprachliche Mail-Sätze auf Deutsch.
+ * 
+ * @param normalized - Bereits normalisierter Text (lowercase, ohne Satzzeichen)
+ * @returns Extrahierter Name oder null
+ */
+function extractRecipientNameFromTranscript(normalized: string): string | null {
+  if (!normalized || !normalized.trim()) return null;
+  
+  let text = normalized.trim().toLowerCase();
+  
+  // Entferne Satzzeichen und Kommas
+  text = text.replace(/[.,;:!?]/g, ' ');
+  text = text.replace(/\s+/g, ' ').trim();
+  
+  if (!text) return null;
+  
+  // Muster: "hau dem/den/der/die <NAME> ... mail"
+  // Muster: "schreib dem/den <NAME> ... mail"
+  const patterns = [
+    /^(?:hau|schreib|schreibe|mach|mache)\s+(?:dem|den|der|die|das|einem|einen|an)\s+([^]+?)(?:\s+(?:ne|eine)\s+mail|\s+mail\s+|\s+e-mail|\s+email|\s+aber\s+|\s+und\s+|\s+bitte\s+|\s+nur\s+|\s+sofort\s+|\s+schick\s+)/i,
+    /^(?:hau|schreib|schreibe|mach|mache)\s+(?:dem|den|der|die|das|einem|einen|an)\s+([^]+?)$/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      let name = match[1].trim();
+      
+      // Entferne führende Artikel/Stopwords
+      name = name.replace(/^(dem|den|der|die|das|einem|einen|an)\s+/i, '');
+      
+      // Schneide an Konnektoren ab
+      const connectors = [' aber ', ' und ', ' bitte ', ' nur ', ' sofort ', ' schick ', ' schicken ', ' raus ', ' rausschicken ', ' sie ', ' kurz ', ' kurze ', ' kurzen ', ' kurzne ', ' eben ', ' ne mail', ' eine mail', ' mail ', ' e mail ', ' e-mail ', ' email ', ' email'];
+      for (const conn of connectors) {
+        const idx = name.indexOf(conn);
+        if (idx !== -1) {
+          name = name.substring(0, idx);
+        }
+      }
+      
+      name = name.trim();
+      if (name.length >= 2) {
+        return name;
+      }
+    }
+  }
+  
+  // Fallback: Muster "mail an <NAME>"
+  const mailAnPattern = /mail\s+an\s+(?:dem|den|der|die|das|einem|einen)?\s*([^]+?)(?:\s+aber\s+|\s+und\s+|\s+bitte\s+|\s+nur\s+|\s+sofort\s+|$)/i;
+  const mailAnMatch = text.match(mailAnPattern);
+  if (mailAnMatch && mailAnMatch[1]) {
+    let name = mailAnMatch[1].trim();
+    name = name.replace(/^(dem|den|der|die|das|einem|einen)\s+/i, '');
+    
+    const connectors = [' aber ', ' und ', ' bitte ', ' nur ', ' sofort ', ' schick ', ' schicken ', ' raus ', ' rausschicken ', ' sie ', ' kurz ', ' kurze ', ' kurzen ', ' kurzne ', ' eben ', ' mail ', ' e mail ', ' e-mail ', ' email '];
+    for (const conn of connectors) {
+      const idx = name.indexOf(conn);
+      if (idx !== -1) {
+        name = name.substring(0, idx);
+      }
+    }
+    
+    name = name.trim();
+    if (name.length >= 2) {
+      return name;
+    }
+  }
+  
+  return null;
+}
+
 interface Wizard3ParseResult {
   to: string | null;
   subject: string | null;
@@ -559,6 +643,22 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       );
     }
     
+    // Prüfe ob toName ein Pronomen ist und setze auf null
+    if (wizard4Draft && wizard4Draft.toName && isInvalidRecipientToken(wizard4Draft.toName)) {
+      wizard4Draft.toName = null;
+      console.log('[fm-voice][wizard4][debug] toName invalid (pronoun) -> cleared');
+    }
+    
+    // Fallback: Empfängername aus Transcript extrahieren, wenn intent.toRaw fehlt und draft.toName null
+    if (wizard4Draft && (!(intent as any)?.toRaw || !(intent as any).toRaw.trim()) && (!wizard4Draft.toName || !wizard4Draft.toName.trim())) {
+      const normalizedTranscript = (lastTranscript || "").toLowerCase().replace(/[.,;:!?]/g, ' ').replace(/\s+/g, ' ').trim();
+      const candidateName = extractRecipientNameFromTranscript(normalizedTranscript);
+      if (candidateName) {
+        wizard4Draft.toName = candidateName;
+        console.log('[fm-voice][wizard4][debug] extracted toName fallback:', candidateName);
+      }
+    }
+    
     // -----------------------------
     // Wizard4: ALWAYS-RUN To-Resolver
     // -----------------------------
@@ -570,17 +670,74 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const fromIntentTo = (intent && typeof (intent as any).to === 'string') ? String((intent as any).to).trim() : '';
       const fromToRaw = (intent && typeof (intent as any).toRaw === 'string') ? String((intent as any).toRaw).trim() : '';
       
-      // Reihenfolge: intent.to > draft.toEmail > toRaw
-      const primary = fromIntentTo || fromDraft || fromToRaw;
+      // Resolver-Pipeline:
+      // 1) intent.toEmail (falls im Intent direkt erkannt) -> direkt verwenden
+      // 2) draft.toEmail (falls vorhanden) -> verwenden
+      // 3) resolveContact(toName) via JSON -> verwenden
+      // 4) sonst: kein AutoSend, Draft bleibt offen
       
+      // Schritt 1 & 2: Prüfe auf vorhandene E-Mail
+      const primary = fromIntentTo || fromDraft || fromToRaw;
       const extracted = primary ? extractEmailFromText(primary) : null;
       
       if (extracted && isStrictValidEmail(extracted)) {
         finalToEmail = extracted;
       }
       
+      // Schritt 3: Contact Resolver (nur wenn noch keine E-Mail vorhanden)
+      if (!finalToEmail && wizard4Draft && wizard4Draft.toName && wizard4Draft.toName.trim()) {
+        const toName = wizard4Draft.toName.trim();
+        console.log('[fm-voice][wizard4][contact-resolver] Versuche Kontakt aufzulösen:', toName);
+        
+        (async () => {
+          try {
+            const resolveUrl = `/api/contacts/resolve?name=${encodeURIComponent(toName)}`;
+            const resolveResponse = await fetch(resolveUrl);
+            
+            if (resolveResponse.ok) {
+              const resolveData = await resolveResponse.json();
+              console.log('[fm-voice][wizard4][contact-resolver] Response:', resolveData);
+              
+              if (resolveData.ok && resolveData.email && isStrictValidEmail(resolveData.email)) {
+                finalToEmail = resolveData.email;
+                console.log('[fm-voice][wizard4][contact-resolver] Kontakt aufgelöst:', toName, '->', finalToEmail);
+                
+                // Draft-Felder setzen, damit AutoSend-Guard die E-Mail erkennt
+                if (wizard4Draft) {
+                  wizard4Draft.toEmail = resolveData.email;
+                  if ((wizard4Draft as any).to !== undefined) {
+                    (wizard4Draft as any).to = resolveData.email;
+                  }
+                  console.log('[fm-voice][wizard4][debug] resolver applied:', {
+                    toEmail: wizard4Draft.toEmail,
+                    to: (wizard4Draft as any).to
+                  });
+                  
+                  // safeAutoSendEmail aktualisieren, damit der Guard die E-Mail erkennt
+                  safeAutoSendEmail = normalizeEmailForAutoSend(resolveData.email);
+                  
+                  // Debug-Info in Draft speichern (optional, für spätere UI-Anzeige)
+                  (wizard4Draft as any).toResolvedFrom = toName;
+                  (wizard4Draft as any).contactResolution = {
+                    matchedContact: resolveData.matchedContact,
+                    debug: resolveData.debug
+                  };
+                }
+              } else {
+                console.log('[fm-voice][wizard4][contact-resolver] Kein Match gefunden für:', toName, resolveData.debug?.result);
+              }
+            } else {
+              console.warn('[fm-voice][wizard4][contact-resolver] API-Fehler:', resolveResponse.status);
+            }
+          } catch (err) {
+            console.error('[fm-voice][wizard4][contact-resolver] Fehler beim Auflösen:', err);
+            // Fehler nicht blockierend, wir versuchen es einfach nicht
+          }
+        })();
+      }
+      
       // AutoSend-safe Normalisierung
-      safeAutoSendEmail = normalizeEmailForAutoSend(primary || '');
+      safeAutoSendEmail = normalizeEmailForAutoSend(finalToEmail || primary || '');
       
       console.log('[fm-voice][wizard4][debug] to-resolver', {
         fromIntentTo,
@@ -590,6 +747,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         extracted,
         finalToEmail,
         safeAutoSendEmail,
+        resolvedViaContactResolver: finalToEmail && wizard4Draft && wizard4Draft.toName && !fromIntentTo && !fromDraft,
       });
     } catch (err) {
       console.error('[fm-voice][wizard4][debug] to-resolver error', err);
@@ -619,6 +777,24 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       } else {
         // Verwende draft.body (auch wenn leer - das ist korrekt)
         body = wizard4Draft.body || '';
+        
+        // Body-Cleaning: Entferne SendNow-Phrasen am Ende
+        const normalizedTranscript = (lastTranscript || "").toLowerCase().replace(/[.,;:!?]/g, ' ').replace(/\s+/g, ' ').trim();
+        const bodyLower = (body || "").toLowerCase().trim();
+        if (normalizedTranscript.includes('schick') && normalizedTranscript.includes('sofort raus')) {
+          // Wenn Body hauptsächlich aus SendNow-Phrasen besteht, leeren
+          if (bodyLower.includes('sie sofort raus') || bodyLower.includes('sofort raus') || bodyLower.split(/\s+/).length <= 3) {
+            body = '';
+          }
+        }
+        
+        // Default-Body für sendNow wenn leer (damit AutoSend nicht wegen leerem Text scheitert)
+        const trimmedBody = (body ?? '').trim();
+        if (wizard4Draft.sendMode === 'sendNow' && trimmedBody.length === 0) {
+          body = 'Moin, kurze Info.';
+          wizard4Draft.body = body;
+          console.log('[fm-voice][wizard4] Default-Body gesetzt (sendNow, body leer)');
+        }
       }
     } else {
       // Nur wenn kein Draft vorhanden, bodyHint als Fallback (sollte nicht passieren)
