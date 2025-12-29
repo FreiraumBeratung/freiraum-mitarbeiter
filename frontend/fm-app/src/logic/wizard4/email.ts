@@ -42,6 +42,291 @@ export interface Wizard4EmailDraft {
   
   /** Der vollständige geparste Intent (für Debugging/Erweiterungen) */
   intent: Wizard4IntentResult;
+  
+  /** Originaler vom Nutzer gesprochener Satz (Rohtext) */
+  sourceText?: string;
+}
+
+// ============================================================
+// HELPER-FUNKTIONEN FÜR BODY-AUS UMGANGSSPRACHE
+// ============================================================
+
+/**
+ * Normalisiert Text für die Verarbeitung
+ */
+function normalizeText(text: string): string {
+  let normalized = text.toLowerCase();
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+  return normalized;
+}
+
+/**
+ * Entfernt SendNow-Phrasen aus dem Text
+ */
+function stripSendNowPhrases(text: string): string {
+  if (!text) {
+    return "";
+  }
+
+  let result = text;
+
+  const patterns: RegExp[] = [
+    /[,.\s]*schick sie sofort raus[.!]?/gi,
+    /[,.\s]*schick sie raus[.!]?/gi,
+    /[,.\s]*schick sie[.!]?/gi,
+    /[,.\s]*sofort raus[.!]?/gi,
+    /[,.\s]*hau sie raus[.!]?/gi,
+    /[,.\s]*hau raus[.!]?/gi,
+  ];
+
+  for (const pattern of patterns) {
+    result = result.replace(pattern, "");
+  }
+
+  return result.trim();
+}
+
+type SourceMarker = "dass" | "wegen" | "free" | null;
+
+/**
+ * Extrahiert den Kern-Inhalt aus dem Source-Text
+ */
+function extractContentFromSource(source: string): { core: string | null; marker: SourceMarker } {
+  if (!source) {
+    return { core: null, marker: null };
+  }
+
+  const original = source;
+  const normalized = normalizeText(source);
+
+  // a) "dass ..."
+  const idxDass = normalized.indexOf("dass ");
+  if (idxDass >= 0) {
+    // Index im ORIGINAL bestimmen
+    const prefixNorm = normalized.slice(0, idxDass + 5); // "dass "
+    const prefixOrigLength = original.length * (prefixNorm.length / normalized.length);
+    // zur Vereinfachung: wir suchen "dass " im Original
+    const originalIdxDass = original.toLowerCase().indexOf("dass ");
+    const coreOrig = originalIdxDass >= 0 ? original.slice(originalIdxDass + "dass ".length) : original.slice(idxDass + 5);
+
+    const stripped = stripSendNowPhrases(coreOrig);
+    const cleaned = stripped.trim();
+    if (!cleaned) {
+      return { core: null, marker: null };
+    }
+
+    return { core: cleaned, marker: "dass" };
+  }
+
+  // b) "wegen ..."
+  const idxWegen = normalized.indexOf("wegen ");
+  if (idxWegen >= 0) {
+    const originalIdxWegen = original.toLowerCase().indexOf("wegen ");
+    const coreOrig = originalIdxWegen >= 0 ? original.slice(originalIdxWegen) : original.slice(idxWegen);
+
+    const stripped = stripSendNowPhrases(coreOrig);
+    const cleaned = stripped.trim();
+    if (!cleaned) {
+      return { core: null, marker: null };
+    }
+
+    return { core: cleaned, marker: "wegen" };
+  }
+
+  // c) ":" im Original
+  const colonIdx = original.indexOf(":");
+  if (colonIdx >= 0 && colonIdx < original.length - 1) {
+    const coreOrig = original.slice(colonIdx + 1);
+    const stripped = stripSendNowPhrases(coreOrig);
+    const cleaned = stripped.trim();
+    if (!cleaned) {
+      return { core: null, marker: null };
+    }
+
+    return { core: cleaned, marker: "free" };
+  }
+
+  // d) Inhalt hinter "mail"/"email"/"e-mail"
+  const mailMatch = /(mail|email|e-mail)/i.exec(normalized);
+  if (mailMatch) {
+    const idxMail = mailMatch.index + mailMatch[0].length;
+    // Mapping Normalized -> Original über Länge
+    const approxStart = Math.floor((idxMail / normalized.length) * original.length);
+    const coreOrig = original.slice(approxStart);
+
+    const stripped = stripSendNowPhrases(coreOrig);
+    const cleaned = stripped.trim().replace(/^[,.\s]+/, "");
+    if (!cleaned) {
+      return { core: null, marker: null };
+    }
+
+    return { core: cleaned, marker: "free" };
+  }
+
+  return { core: null, marker: null };
+}
+
+/**
+ * Formatiert einen Empfängernamen für die Anrede
+ */
+function formatRecipientName(raw?: string | null): string {
+  if (!raw) return "dir";
+  
+  // Trim und in lowercase umwandeln
+  let text = raw.trim().toLowerCase();
+  
+  if (!text) return "dir";
+  
+  // Mehrfach-Spaces reduzieren
+  text = text.replace(/\s+/g, " ");
+  
+  // Spezielle Fälle mappen
+  if (text === "freiraum beratung") {
+    return "Freiraum Beratung";
+  }
+  if (text === "freiraumberatung") {
+    return "Freiraumberatung";
+  }
+  
+  // Standard: jedes Wort erster Buchstabe groß
+  const parts = text.split(" ");
+  const formatted = parts
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+  
+  return formatted || "dir";
+}
+
+/**
+ * Stellt sicher, dass ein Satz mit einem Satzzeichen endet
+ */
+function ensureSentenceEnds(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+  const last = trimmed[trimmed.length - 1];
+  if ([".", "!", "?"].includes(last)) {
+    return trimmed;
+  }
+  return `${trimmed}.`;
+}
+
+/**
+ * Prüft, ob ein Body bereits sinnvollen Inhalt hat
+ */
+function hasMeaningfulBody(body?: string | null): boolean {
+  if (!body) return false;
+  const trimmed = body.trim();
+  if (trimmed.length < 5) return false;
+
+  const lower = trimmed.toLowerCase();
+
+  // Phrasen, die wir NICHT als sinnvollen Inhalt werten
+  const trivialPatterns = [
+    "sofort raus",
+    "sie sofort raus",
+    "schick sie sofort raus",
+    "schick sofort raus",
+    "schick raus",
+    "hau raus"
+  ];
+
+  if (trivialPatterns.some((p) => lower === p || lower.includes(p))) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Baut einen Body-Text aus dem Source-Text
+ */
+function buildBodyFromSource(sourceText: string, toName?: string): string | null {
+  if (!sourceText) {
+    return null;
+  }
+
+  const { core, marker } = extractContentFromSource(sourceText);
+  if (!core || !marker) {
+    return null;
+  }
+
+  // freundlicher Name
+  const rawName = (toName || "").trim();
+  const name =
+    rawName && !/^(dem|der|die|den|das)\b/i.test(rawName)
+      ? rawName
+      : "dir";
+
+  const ensureSentence = (text: string): string => {
+    const trimmed = text.trim();
+    if (!trimmed) return "";
+    if (/[.!?]$/.test(trimmed)) {
+      return trimmed;
+    }
+    return `${trimmed}.`;
+  };
+
+  let bodyMain: string;
+
+  if (marker === "dass") {
+    bodyMain = `ich wollte dir nur kurz Bescheid geben, dass ${core}`;
+  } else if (marker === "wegen") {
+    bodyMain = `ich wollte dir kurz wegen ${core} schreiben`;
+  } else {
+    // free
+    bodyMain = core;
+  }
+
+  const sentence = ensureSentence(bodyMain);
+
+  const greetingLine = name === "dir" ? "Hi," : `Hi ${name},`;
+
+  return `${greetingLine}\n\n${sentence}`;
+}
+
+/**
+ * Generiert den Body für einen Wizard4-Draft
+ */
+function generateWizard4Body(draft: Wizard4EmailDraft): string {
+  const currentBody =
+    typeof draft.body === "string" ? draft.body : draft.body ? String(draft.body) : "";
+
+  let body = currentBody.trim();
+
+  // 1) Wenn wir sourceText haben, versuchen wir IMMER zuerst,
+  //    einen schönen Body daraus zu bauen.
+  if (draft.sourceText) {
+    const built = buildBodyFromSource(draft.sourceText, draft.toName ?? undefined);
+    if (built && built.trim().length > 0) {
+      body = built.trim();
+    }
+  }
+
+  // 2) Wenn nach dem Versuch noch kein Text da ist, nehmen wir evtl. existing body
+  if (!body && currentBody) {
+    body = currentBody.trim();
+  }
+
+  // 3) Wenn immer noch nichts Sinnvolles da ist, aber sendMode == sendNow,
+  //    setzen wir einen neutralen Standardtext.
+  if (!body && draft.sendMode === "sendNow") {
+    body = "Moin,\n\nkurze Info.";
+  }
+
+  // 4) Body im Draft aktualisieren und zurückgeben
+  draft.body = body;
+  return body;
+}
+
+/**
+ * Generiert/ensured den Body für einen Wizard4-Draft
+ */
+export function ensureWizard4Body(draft: Wizard4EmailDraft): void {
+  // ruft nur generateWizard4Body auf, wenn der Body noch nicht gebaut wurde
+  if (!draft.body || `${draft.body}`.trim().length === 0 || draft.sourceText) {
+    generateWizard4Body(draft);
+  }
 }
 
 // ============================================================
@@ -81,7 +366,7 @@ export function buildWizard4EmailFromInput(rawInput: string): Wizard4EmailDraft 
   const subject = generateWizard4Subject(intent);
   
   // 3) Body generieren
-  const body = generateWizard4Body(intent);
+  let body = generateWizard4Body(intent);
   
   // 4) Empfängerfelder bestimmen
   const toName = intent.recipientName;
@@ -90,15 +375,22 @@ export function buildWizard4EmailFromInput(rawInput: string): Wizard4EmailDraft 
   // 5) Sende-Modus bestimmen
   const sendMode = intent.sendMode;
   
-  // 6) Fertigen Entwurf zurückgeben
-  return {
+  // 6) Draft-Objekt erstellen
+  const draft: Wizard4EmailDraft = {
     toName,
     toEmail,
     subject,
     body,
     sendMode,
     intent,
+    sourceText: rawInput,
   };
+  
+  // 7) Body generieren/ensuren (unabhängig vom sendMode)
+  ensureWizard4Body(draft);
+  
+  // 8) Fertigen Entwurf zurückgeben
+  return draft;
 }
 
 // ============================================================
@@ -170,6 +462,8 @@ export function buildWizard4EmailFromInput(rawInput: string): Wizard4EmailDraft 
 //   sendMode: "previewOnly",
 //   intent: { contextRef: "dem kunden", ... }
 // }
+
+
 
 
 

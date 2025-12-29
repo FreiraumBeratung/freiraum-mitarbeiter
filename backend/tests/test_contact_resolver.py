@@ -192,3 +192,5 @@ def test_auto_reload(temp_contacts_file):
     # Prüfe, ob neuer Kontakt geladen wurde
     assert len(resolver.contacts) > initial_count
 
+
+

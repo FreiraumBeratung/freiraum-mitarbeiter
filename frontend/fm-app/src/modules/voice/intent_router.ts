@@ -1041,6 +1041,63 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
   }
 
+  // ============================================================
+  // INTENT 4.2 ERWEITERUNG: "schreib" ohne "Mail"-Wort erkennen
+  // ============================================================
+  // Erkennt auch Sätze wie "Schreib dem Thomas, dass ich später komme."
+  // die keine explizite Mail-Erwähnung haben, aber klar E-Mail-Intents sind.
+  {
+    // Prüfe, ob Text mit "schreib" beginnt
+    const startsWithSchreib = /^schreib(e)?(\s+(mal|bitte|kurz|eben))?\s+/i.test(text);
+    
+    if (startsWithSchreib) {
+      // Prüfe auf Content-Marker, die auf eine E-Mail-Nachricht hindeuten
+      const contentMarkers = [
+        'dass ',
+        'wegen ',
+        'bin unterwegs',
+        'melde mich',
+        'termin',
+        'später'
+      ];
+      
+      const hasContentMarker = contentMarkers.some(marker => {
+        const re = new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        return re.test(text);
+      });
+      
+      // Prüfe auch auf Doppelpunkt im ORIGINAL-Text
+      const hasColon = original.includes(':');
+      
+      if (hasContentMarker || hasColon) {
+        console.log(
+          "[intent-router][intent-4.2] Umgangssprache-Mail erkannt (no-mail):",
+          text
+        );
+        
+        // Versuche, Empfänger und Body-Hint zu extrahieren
+        const emailParsed = parseEmailCompose(original);
+        const extractedEmail = extractEmailAddress(original);
+        
+        // Erstelle email-compose Intent
+        const intent: VoiceIntent = {
+          type: "email-compose",
+          toRaw: emailParsed?.toRaw,
+          subjectHint: undefined,
+          bodyHint: emailParsed?.bodyHint,
+        };
+        
+        // Wenn eine E-Mail-Adresse per Regex gefunden wurde, diese als 'to' setzen
+        if (extractedEmail) {
+          intent.to = extractedEmail;
+          console.log("[intent-router][intent-4.2] E-Mail-Adresse extrahiert:", extractedEmail);
+        }
+        
+        return intent;
+      }
+    }
+  }
+
   // Fallback: alles, was nicht gematcht wurde, geht an die KI
   // (Wir erlauben der KI damit, freie Fragen, Smalltalk und komplexe Aufgaben zu beantworten.)
   return {

@@ -15,3 +15,5 @@ Write-Host "Backend und Frontend wurden in separaten Fenstern gestartet."
 Write-Host "Backend läuft auf Port 30541"
 Write-Host "Frontend läuft auf Port 5173"
 
+
+
