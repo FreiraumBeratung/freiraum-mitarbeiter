@@ -504,6 +504,34 @@ export class VoiceController {
 export const voice = new VoiceController();
 
 /**
+ * Entfernt Sende-Phrasen aus dem Body-Text (z.B. "Schick sie." am Ende)
+ */
+function stripSendPhraseFromBody(body: string | null | undefined): string {
+  if (body == null) {
+    return "";
+  }
+
+  const raw = String(body);
+
+  if (!raw.trim()) {
+    return raw;
+  }
+
+  // Entfernt End-Phrasen wie:
+  // "Schick sie."
+  // "schick sie raus."
+  // "schick sie sofort raus."
+  const cleaned = raw.replace(
+    /\s*schick sie(\s+(sofort\s+raus|raus))?[.!]?\s*$/i,
+    ""
+  );
+
+  // Überflüssige Leerzeichen/Zeilenumbrüche am Ende weg,
+  // normale Formatierung bleibt.
+  return cleaned.replace(/\s+$/s, "");
+}
+
+/**
  * Helper-Funktion zum Setzen der E-Mail-Daten in der MailCompose-UI.
  * Kann sowohl von email-compose als auch von wizard3-one-shot verwendet werden.
  */
@@ -537,8 +565,9 @@ function applyEmailToComposeUI(params: {
   // Body setzen (auch wenn leer - wichtig für previewOnly)
   // body kann null, "" oder ein String sein - nur null sollte ignoriert werden
   if (body !== null && typeof window !== "undefined" && (window as any).__fm_set_mail_body) {
-    console.log(`${logPrefix}: __fm_set_mail_body gesetzt`, body === '' ? '(leer)' : body);
-    (window as any).__fm_set_mail_body(body);
+    const cleanedBody = stripSendPhraseFromBody(body);
+    console.log(`${logPrefix}: __fm_set_mail_body gesetzt`, cleanedBody === '' ? '(leer)' : cleanedBody);
+    (window as any).__fm_set_mail_body(cleanedBody);
   }
 }
 
@@ -1071,39 +1100,21 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // Betreff bestimmen (Wizard4 hat Vorrang - IMMER draft.subject verwenden wenn vorhanden)
       const subject = (wizard4Draft && wizard4Draft.subject) || intent.subjectHint || null;
       
-      // Body bestimmen (Wizard4 hat Vorrang - IMMER draft.body verwenden, NIEMALS bodyHint als Fallback)
-      // Wenn draft vorhanden, verwende draft.body (auch wenn leer)
-      // Wenn draft.sendMode === "previewOnly", Body auf "" setzen
-      let body: string | null = null;
-      if (wizard4Draft) {
-        // Wenn previewOnly, Body immer leer
-        if (wizard4Draft.sendMode === 'previewOnly') {
-          body = '';
-        } else {
-          // Verwende draft.body (auch wenn leer - das ist korrekt)
-          body = wizard4Draft.body || '';
-          
-          // Body-Cleaning: Entferne SendNow-Phrasen am Ende
-          const normalizedTranscript = (lastTranscript || "").toLowerCase().replace(/[.,;:!?]/g, ' ').replace(/\s+/g, ' ').trim();
-          const bodyLower = (body || "").toLowerCase().trim();
-          if (normalizedTranscript.includes('schick') && normalizedTranscript.includes('sofort raus')) {
-            // Wenn Body hauptsächlich aus SendNow-Phrasen besteht, leeren
-            if (bodyLower.includes('sie sofort raus') || bodyLower.includes('sofort raus') || bodyLower.split(/\s+/).length <= 3) {
-              body = '';
-            }
-          }
-          
-          // Default-Body für sendNow wenn leer (damit AutoSend nicht wegen leerem Text scheitert)
-          const trimmedBody = (body ?? '').trim();
-          if (wizard4Draft.sendMode === 'sendNow' && trimmedBody.length === 0) {
-            body = 'Moin, kurze Info.';
-            wizard4Draft.body = body;
-            console.log('[fm-voice][wizard4] Default-Body gesetzt (sendNow, body leer)');
-          }
-        }
+      // Body-Prio: 1) Wizard4-Body, 2) bodyHint, 3) leerer String
+      // Body IMMER aus dem Draft übernehmen, wenn vorhanden (unabhängig von sendMode)
+      const bodyForUi =
+        typeof wizard4Draft?.body === "string" && wizard4Draft.body.trim().length > 0
+          ? wizard4Draft.body
+          : (intent.bodyHint ?? "").trim();
+      
+      // Default-Body für sendNow wenn leer (damit AutoSend nicht wegen leerem Text scheitert)
+      let body: string | null = bodyForUi;
+      if (wizard4Draft?.sendMode === 'sendNow' && (!body || body.trim().length === 0)) {
+        body = 'Moin, kurze Info.';
+        wizard4Draft.body = body;
+        console.log('[fm-voice][wizard4] Default-Body gesetzt (sendNow, body leer)');
       } else {
-        // Nur wenn kein Draft vorhanden, bodyHint als Fallback (sollte nicht passieren)
-        body = intent.bodyHint || null;
+        body = bodyForUi || null;
       }
       
       // ============================================================

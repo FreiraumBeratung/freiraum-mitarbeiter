@@ -286,6 +286,32 @@ function buildBodyFromSource(sourceText: string, toName?: string): string | null
 }
 
 /**
+ * Bereinigt den finalen Body von Sende-Phrasen-Markern (z.B. "Schick sie." am Ende)
+ */
+function cleanupSendMarkersInBody(text: string | undefined | null): string {
+  if (text == null) {
+    return "";
+  }
+
+  const raw = String(text);
+
+  if (!raw.trim()) {
+    return raw;
+  }
+
+  // Sende-Phrasen am Ende abschneiden,
+  // z.B. "Schick sie.", "schick sie raus.", "schick sie sofort raus."
+  const cleaned = raw.replace(
+    /\s*schick sie(\s+(sofort\s+raus|raus))?[.!]?\s*$/i,
+    ""
+  );
+
+  // Überflüssige Leerzeichen/Zeilenumbrüche am Ende entfernen,
+  // aber normale Formatierung sonst unangetastet lassen
+  return cleaned.replace(/\s+$/s, "");
+}
+
+/**
  * Generiert den Body für einen Wizard4-Draft
  */
 function generateWizard4Body(draft: Wizard4EmailDraft): string {
@@ -389,7 +415,11 @@ export function buildWizard4EmailFromInput(rawInput: string): Wizard4EmailDraft 
   // 7) Body generieren/ensuren (unabhängig vom sendMode)
   ensureWizard4Body(draft);
   
-  // 8) Fertigen Entwurf zurückgeben
+  // 8) Finalen Body von Sende-Phrasen wie "schick sie ..." säubern
+  const safeBody = cleanupSendMarkersInBody(draft.body);
+  draft.body = safeBody;
+  
+  // 9) Fertigen Entwurf zurückgeben
   return draft;
 }
 

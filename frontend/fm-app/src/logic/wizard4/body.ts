@@ -291,6 +291,115 @@ function stripSendModePhrases(text: string): string {
 }
 
 /**
+ * Entfernt SendNow-Phrasen aus dem Text (z.B. "schick sie sofort raus")
+ */
+const AUTOSEND_PATTERNS: string[] = [
+  // längere Phrasen zuerst
+  "schick sie sofort raus",
+  "schick sie direkt raus",
+  "schick sie raus",
+  "schick sie",
+  "schick sofort raus",
+  "schick direkt raus",
+  "schick raus",
+  "sofort raus",
+  "direkt raus",
+  "hau raus",
+];
+
+export function stripSendNowPhrases(text: string): string {
+  if (!text) {
+    return text;
+  }
+
+  const lower = text.toLowerCase();
+  let cutIndex = text.length;
+
+  for (const phrase of AUTOSEND_PATTERNS) {
+    const idx = lower.indexOf(phrase);
+    if (idx !== -1 && idx < cutIndex) {
+      cutIndex = idx;
+    }
+  }
+
+  if (cutIndex === text.length) {
+    // keine Phrase gefunden
+    return text.trim();
+  }
+
+  return text.slice(0, cutIndex).trim();
+}
+
+/**
+ * Bereinigt den finalen Body von Sende-Phrasen-Markern (z.B. "Schick sie." am Ende)
+ */
+function cleanupSendMarkersInBody(text: string): string {
+  if (text == null) {
+    return text as unknown as string;
+  }
+
+  const raw = String(text);
+  if (!raw.trim()) {
+    return raw;
+  }
+
+  // Erst die vorhandene Logik nutzen, die Sende-Phrasen aus dem Text schneidet
+  const stripped = stripSendNowPhrases(raw);
+
+  // Zusätzlich hart alle Varianten von "schick sie ..." am Satzende entfernen
+  // Beispiele:
+  //  - "Schick sie."
+  //  - "schick sie sofort raus."
+  //  - "schick sie raus"
+  //  - mit oder ohne Punkt/Leerzeichen
+  const cleaned = stripped.replace(
+    /\s*schick sie(\s+(sofort\s+raus|raus))?[.!]?\s*$/i,
+    ""
+  );
+
+  // Eventuelle überflüssige Whitespaces/Zeilenumbrüche am Ende entfernen,
+  // den Rest aber unverändert lassen (Zeilenumbrüche im Body bleiben also erhalten)
+  return cleaned.replace(/\s+$/s, "");
+}
+
+/**
+ * Entfernt Send-Phrasen aus einem bodyHint
+ */
+function stripSendPhrasesFromHint(hint: string | undefined | null): string {
+  if (!hint) return "";
+
+  const text = hint.trim();
+  if (!text) return "";
+
+  const lower = text.toLowerCase();
+
+  const patterns = [
+    "schick sie sofort raus",
+    "schick sie raus",
+    "schick sie direkt raus",
+    "schick sie",
+    "schick sofort raus",
+    "sofort raus",
+    "direkt raus",
+    "hau sie raus",
+    "hau raus",
+    "raus damit",
+  ];
+
+  let cutIndex = text.length;
+  for (const pattern of patterns) {
+    const idx = lower.indexOf(pattern);
+    if (idx >= 0 && idx < cutIndex) {
+      cutIndex = idx;
+    }
+  }
+
+  const core = text.slice(0, cutIndex).trim();
+
+  return core;
+}
+
+/**
  * BODY 4.5: Bereinigt Satzzeichen (führende, doppelte, etc.)
  */
 function cleanupPunctuation(text: string): string {
@@ -567,10 +676,17 @@ export function generateWizard4Body(intent: Wizard4IntentResult): string {
 
   const tone = intent.tone;
   
-  // 2) Body-Quelle strikt festlegen: rawInput || message || bodyHint || ""
+  // 2) Body-Quelle strikt festlegen: rawInput || message || bereinigter bodyHint || ""
   // bodyHint ist optional und kann in Wizard4IntentResult fehlen, daher mit ?? prüfen
-  const bodyHint = (intent as any).bodyHint;
-  let raw = (intent.rawInput ?? '').trim() || (intent.message ?? '').trim() || (bodyHint ?? '').trim() || '';
+  const rawBodyHint = (intent as any).bodyHint;
+  const cleanedBodyHint = rawBodyHint ? stripSendPhrasesFromHint(rawBodyHint) : '';
+  
+  // Priorität: rawInput > message > bodyHint
+  // Bei sendMode === "sendNow" und vorhandenem rawInput/message: bodyHint komplett ignorieren
+  const hasRawInputOrMessage = !!(intent.rawInput?.trim() || intent.message?.trim());
+  const shouldIgnoreBodyHint = intent.sendMode === 'sendNow' && hasRawInputOrMessage;
+  
+  let raw = (intent.rawInput ?? '').trim() || (intent.message ?? '').trim() || (shouldIgnoreBodyHint ? '' : cleanedBodyHint) || '';
 
   // Wenn keine Basis vorhanden, sofort "" zurückgeben
   if (!raw || raw.length === 0) {
@@ -584,11 +700,17 @@ export function generateWizard4Body(intent: Wizard4IntentResult): string {
   // Schritt 1: Whitespace normalisieren
   let text = normalizeWhitespace(raw);
   
+  // ursprünglichen Body als Fallback merken (nach Whitespace-Normalisierung, aber vor allen Entfernungen)
+  const originalBody = text.trim();
+  
   // Schritt 2: E-Mail-Command-Phrasen entfernen
   text = stripEmailCommandPhrases(text);
   
   // Schritt 3: Send-Mode-Phrasen entfernen
   text = stripSendModePhrases(text);
+  
+  // Schritt 3.5: SendNow-Phrasen entfernen (z.B. "schick sie sofort raus")
+  text = stripSendNowPhrases(text);
   
   // Schritt 4: Satzzeichen bereinigen
   text = cleanupPunctuation(text);
@@ -683,7 +805,19 @@ export function generateWizard4Body(intent: Wizard4IntentResult): string {
     text = text + '.';
   }
 
-  return text;
+  // Fallback: wenn der Body nach der Bearbeitung leer ist,
+  // aber vorher schon Inhalt hatte, nehmen wir den ursprünglichen Body.
+  const finalBody = text.trim();
+
+  if (!finalBody && originalBody.trim()) {
+    // NEU: finalen Body von Sende-Phrasen wie "schick sie ..." säubern
+    const cleanedBody = cleanupSendMarkersInBody(originalBody);
+    return cleanedBody;
+  }
+
+  // NEU: finalen Body von Sende-Phrasen wie "schick sie ..." säubern
+  const cleanedBody = cleanupSendMarkersInBody(text);
+  return cleanedBody;
 }
 
 // ============================================================
