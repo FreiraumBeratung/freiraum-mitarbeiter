@@ -16,6 +16,7 @@ import type { Wizard4IntentResult, Wizard4SendMode } from './intent';
 import { parseWizard4Intent } from './intent';
 import { generateWizard4Subject } from './subject';
 import { generateWizard4Body } from './body';
+import { buildStatusEmailBody } from './status_brain';
 
 // ============================================================
 // TYP-DEFINITIONEN
@@ -320,27 +321,49 @@ function generateWizard4Body(draft: Wizard4EmailDraft): string {
 
   let body = currentBody.trim();
 
-  // 1) Wenn wir sourceText haben, versuchen wir IMMER zuerst,
-  //    einen schönen Body daraus zu bauen.
-  if (draft.sourceText) {
-    const built = buildBodyFromSource(draft.sourceText, draft.toName ?? undefined);
-    if (built && built.trim().length > 0) {
-      body = built.trim();
+  // 1) Prüfe, ob es eine Status-Mail ist (via meta.statusEmail)
+  const statusMeta = (draft.intent as any)?.meta?.statusEmail;
+  if (statusMeta?.isStatus && draft.sourceText) {
+    // Verwende das neue Status-Gehirn für Status-Mails
+    const statusResult = buildStatusEmailBody({
+      rawText: statusMeta.rawText || draft.sourceText,
+      statusText: statusMeta.statusText || null,
+      toDisplayName: null, // Anrede wird später vom Contact-Resolver gesetzt
+    });
+    
+    if (statusResult && statusResult.trim().length > 0) {
+      body = statusResult.trim();
+    }
+  }
+  // 2) Fallback: Alte Logik für non-Status-Mails
+  else if (draft.sourceText) {
+    // Extrahiere bodyHint aus dem Intent (message-Feld)
+    const bodyHint = draft.intent?.message || null;
+    
+    // Verwende das Status-Gehirn für die Body-Generierung
+    const statusResult = buildStatusEmailBody({
+      rawText: draft.sourceText,
+      statusText: bodyHint || null,
+      toDisplayName: null, // Anrede wird später vom Contact-Resolver gesetzt
+    });
+    
+    if (statusResult && statusResult.trim().length > 0) {
+      body = statusResult.trim();
     }
   }
 
-  // 2) Wenn nach dem Versuch noch kein Text da ist, nehmen wir evtl. existing body
+  // 3) Wenn nach dem Versuch noch kein Text da ist, nehmen wir evtl. existing body
   if (!body && currentBody) {
     body = currentBody.trim();
   }
 
-  // 3) Wenn immer noch nichts Sinnvolles da ist, aber sendMode == sendNow,
+  // 4) Wenn immer noch nichts Sinnvolles da ist, aber sendMode == sendNow,
   //    setzen wir einen neutralen Standardtext.
   if (!body && draft.sendMode === "sendNow") {
     body = "Moin,\n\nkurze Info.";
   }
 
-  // 4) Body im Draft aktualisieren und zurückgeben
+  // 5) Body im Draft aktualisieren und zurückgeben
   draft.body = body;
   return body;
 }

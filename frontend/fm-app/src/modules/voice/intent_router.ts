@@ -4,7 +4,7 @@ export type Wizard3OneShotPayload = {
 
 export type VoiceIntent =
   | { type: "navigate"; target: "control-center" | "lead-radar" | "leads" | "mail-compose" | "voice-diagnostics" }
-  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string }
+  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean } } }
   | { type: "wizard3-one-shot"; payload: Wizard3OneShotPayload }
   | { type: "wizard2-edit-anrede"; newAnrede: string }
   | { type: "wizard2-edit-subject"; newSubject: string }
@@ -195,6 +195,115 @@ function detectWizard3OneShot(raw: string, normalized: string): VoiceIntent | nu
       rawText: raw.trim(),
     },
   };
+}
+
+/**
+ * Parst umgangssprachliche Status-E-Mail-Befehle.
+ * Erwartet z.B.: "schreib dem thomas dass ich spater komme"
+ * Entfernt führende Verben, Artikel und extrahiert Name + Status-Text.
+ */
+function parseColloquialStatusEmailCommand(normalized: string): {
+  toNameRaw: string | null;
+  statusText: string | null;
+} {
+  // Erwartet z.B.: "schreib dem thomas dass ich spater komme"
+  let text = normalized.trim();
+
+  // Führende Schlüsselwörter entfernen
+  const prefixes = ["schreib ", "schreibe ", "schreib mal ", "schreibe mal "];
+  for (const prefix of prefixes) {
+    if (text.startsWith(prefix)) {
+      text = text.slice(prefix.length);
+      break;
+    }
+  }
+
+  // Kommas durch Leerzeichen ersetzen, damit das Tokenizing einfacher ist
+  text = text.replace(/,/g, " ");
+
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) {
+    return { toNameRaw: null, statusText: null };
+  }
+
+  const articles = new Set(["dem", "den", "der", "die", "das"]);
+
+  let idx = 0;
+
+  // Optionalen Artikel wegwerfen (dem/den/der/...)
+  if (idx < tokens.length && articles.has(tokens[idx])) {
+    idx++;
+  }
+
+  // Name-Tokens sammeln bis "mail" / "email" / "e-mail" / "dass"
+  const mailWords = new Set(["mail", "email", "e-mail", "e-mail.", "mail.", "email."]);
+  const nameTokens: string[] = [];
+  while (
+    idx < tokens.length &&
+    !mailWords.has(tokens[idx]) &&
+    tokens[idx] !== "dass"
+  ) {
+    nameTokens.push(tokens[idx]);
+    idx++;
+  }
+
+  // Falls ein "mail"/"email" kommt → überspringen
+  while (idx < tokens.length && mailWords.has(tokens[idx])) {
+    idx++;
+  }
+
+  // Falls Komma oder "dass" nach dem Namen kommt
+  if (idx < tokens.length && tokens[idx] === "dass") {
+    idx++;
+  }
+
+  const statusTokens = tokens.slice(idx);
+  const toNameRaw = nameTokens.join(" ").trim() || null;
+  const statusText = statusTokens.join(" ").trim() || null;
+
+  return { toNameRaw, statusText };
+}
+
+/**
+ * Erkennt AutoSend-Trigger im normalisierten Text.
+ */
+function detectAutoSendFromText(normalized: string): boolean {
+  const autoSendTriggers = [
+    "schick sie sofort raus",
+    "schicke sie sofort raus",
+    "schick die mail sofort raus",
+    "schick die nachricht sofort raus",
+    "sende die mail direkt raus",
+    "sende die nachricht direkt raus",
+    "direkt rausschicken",
+    "sofort senden",
+    "direkt senden",
+    "schick sie los",
+    "schick die nachricht los",
+    "schick die mail los",
+    "und schick sie los",
+    "und sende sie los",
+    "bitte direkt rausschicken",
+    "bitte direkt senden",
+    "schick die mail direkt raus",
+    "schick die nachricht direkt raus",
+    // >>> NEU für Varianten mit "direkt los" <<<
+    "schick die nachricht direkt los",
+    "schick die mail direkt los",
+    "schick sie direkt los",
+    // >>> NEU für "abschicken" Varianten <<<
+    "bitte abschicken",
+    "abschicken",
+    "direkt abschicken",
+    "bitte direkt abschicken"
+  ];
+
+  for (const trigger of autoSendTriggers) {
+    if (normalized.includes(trigger)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -790,6 +899,55 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     return { type: "unknown" };
   }
 
+  // Spezial-Route: ALLE Sätze mit "schreib ..."
+  // Diese Route muss FRÜH kommen, damit sie vor anderen email-compose-Intents greift
+  // Erkennt ALLE Varianten: "schreib dem ...", "schreib Freiraum ...", "schreib thomas ...", etc.
+  if (
+    text.startsWith("schreib ") ||
+    text.startsWith("schreibe ") ||
+    text.startsWith("schreib mal ") ||
+    text.startsWith("schreibe mal ")
+  ) {
+    console.log(
+      "[intent-router][intent-4.2] Umgangssprache-Mail erkannt:",
+      text
+    );
+
+    const parsed = parseColloquialStatusEmailCommand(text);
+    const toNameRaw = parsed.toNameRaw;
+    const statusText = parsed.statusText;
+    const autoSend = detectAutoSendFromText(text);
+
+    // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+    const extractedEmail = extractEmailAddress(original);
+
+    const meta: any = {
+      statusEmail: {
+        isStatus: true,
+        rawText: text,
+        toNameRaw: toNameRaw,
+        statusText: statusText,
+        autoSend: autoSend,
+      },
+    };
+
+    const intent: VoiceIntent = {
+      type: "email-compose",
+      toRaw: toNameRaw || undefined,
+      subjectHint: undefined,
+      bodyHint: statusText || undefined,
+      meta,
+    };
+
+    // Wenn eine E-Mail-Adresse per Regex gefunden wurde, diese als 'to' setzen
+    if (extractedEmail) {
+      intent.to = extractedEmail;
+      console.log("[intent-router][intent-4.2] E-Mail-Adresse extrahiert:", extractedEmail);
+    }
+
+    return intent;
+  }
+
   // 1) Wizard3-OneShot: E-Mail mit Inhalt erkennen (VOR email-compose)
   if (!DISABLE_WIZARD3_ONESHOT_FOR_TESTING) {
     const wizard3 = detectWizard3OneShot(original, text);
@@ -992,14 +1150,11 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   }
 
   // ============================================================
-  // INTENT 4.2: Umgangssprachliche E-Mail-Befehle erkennen
+  // INTENT 4.2: Umgangssprachliche E-Mail-Befehle erkennen (Fallback)
   // ============================================================
-  // Diese Regel MUSS vor ai-chat greifen, um umgangssprachliche
-  // E-Mail-Befehle zuverlässig zu erkennen, bevor sie als allgemeine
-  // KI-Anfragen interpretiert werden.
-  // 
-  // Regel: Wenn mindestens EIN Mail-Verb UND mindestens EIN Mail-Nomen
-  // enthalten sind, dann handelt es sich um einen E-Mail-Befehl.
+  // Diese Regel greift für Fälle, die nicht mit "schreib ..." beginnen,
+  // aber trotzdem Mail-Verb + Mail-Nomen enthalten.
+  // Beispiel: "Hau dem Thomas eine Mail raus"
   {
     const hasMailVerb = MAIL_VERBS.some(verb => {
       // Prüfe, ob das Verb als Wortgrenze vorkommt (nicht als Teil eines anderen Wortes)
@@ -1013,9 +1168,12 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       return re.test(text);
     });
     
-    if (hasMailVerb && hasMailNoun) {
+    // Nur wenn NICHT mit "schreib" beginnt (dann hätte der frühe Block schon gegriffen)
+    const startsWithSchreib = /^schreib(e)?(\s+(mal|bitte|kurz|eben))?\s+/i.test(text);
+    
+    if (hasMailVerb && hasMailNoun && !startsWithSchreib) {
       console.log(
-        "[intent-router][intent-4.2] Umgangssprache-Mail erkannt:",
+        "[intent-router][intent-4.2] Umgangssprache-Mail erkannt (Fallback):",
         text
       );
       
@@ -1038,63 +1196,6 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       }
       
       return intent;
-    }
-  }
-
-  // ============================================================
-  // INTENT 4.2 ERWEITERUNG: "schreib" ohne "Mail"-Wort erkennen
-  // ============================================================
-  // Erkennt auch Sätze wie "Schreib dem Thomas, dass ich später komme."
-  // die keine explizite Mail-Erwähnung haben, aber klar E-Mail-Intents sind.
-  {
-    // Prüfe, ob Text mit "schreib" beginnt
-    const startsWithSchreib = /^schreib(e)?(\s+(mal|bitte|kurz|eben))?\s+/i.test(text);
-    
-    if (startsWithSchreib) {
-      // Prüfe auf Content-Marker, die auf eine E-Mail-Nachricht hindeuten
-      const contentMarkers = [
-        'dass ',
-        'wegen ',
-        'bin unterwegs',
-        'melde mich',
-        'termin',
-        'später'
-      ];
-      
-      const hasContentMarker = contentMarkers.some(marker => {
-        const re = new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        return re.test(text);
-      });
-      
-      // Prüfe auch auf Doppelpunkt im ORIGINAL-Text
-      const hasColon = original.includes(':');
-      
-      if (hasContentMarker || hasColon) {
-        console.log(
-          "[intent-router][intent-4.2] Umgangssprache-Mail erkannt (no-mail):",
-          text
-        );
-        
-        // Versuche, Empfänger und Body-Hint zu extrahieren
-        const emailParsed = parseEmailCompose(original);
-        const extractedEmail = extractEmailAddress(original);
-        
-        // Erstelle email-compose Intent
-        const intent: VoiceIntent = {
-          type: "email-compose",
-          toRaw: emailParsed?.toRaw,
-          subjectHint: undefined,
-          bodyHint: emailParsed?.bodyHint,
-        };
-        
-        // Wenn eine E-Mail-Adresse per Regex gefunden wurde, diese als 'to' setzen
-        if (extractedEmail) {
-          intent.to = extractedEmail;
-          console.log("[intent-router][intent-4.2] E-Mail-Adresse extrahiert:", extractedEmail);
-        }
-        
-        return intent;
-      }
     }
   }
 

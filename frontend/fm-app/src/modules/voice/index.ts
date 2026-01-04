@@ -14,6 +14,7 @@ import { parseWizard4Intent } from "../../logic/wizard4/intent";
 import { generateWizard4Subject } from "../../logic/wizard4/subject";
 import { generateWizard4Body } from "../../logic/wizard4/body";
 import { buildWizard4EmailFromInput } from "../../logic/wizard4/email";
+import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 
 declare global {
   interface Window {
@@ -106,20 +107,57 @@ function shouldSendNowFromSourceText(sourceText?: string): boolean {
     .replace(/\s+/g, " ")
     .trim();
 
-  // KLARE SEND-PHRASEN – NUR WENN DIESE VORKOMMEN, ERLAUBEN WIR sendNow
-  const sendNowPhrases = [
+  // KLARE SEND-PHRASEN – MASSIV ERWEITERT FÜR ROBUSTE ERKENNUNG
+  // Wenn einer dieser Begriffe im gesamten erkannten Text vorkommt: sendMode = "sendNow"
+  const autoSendTriggers = [
+    // Basis-Varianten
+    "sende",
+    "senden",
+    "schick sie",
+    "schick die mail",
+    "direkt raus",
     "sofort raus",
+    "sofort senden",
+    "direkt senden",
+    "bitte abschicken",
+    "nachricht direkt los",
+    "nachricht direkt raus",
+    "mail direkt raus",
+    "ohne vorschau senden",
+    // Erweiterte Varianten
     "schick sie sofort raus",
+    "schicke sie sofort raus",
+    "schick die mail sofort raus",
+    "schick die nachricht sofort raus",
+    "direkt rausschicken",
+    "sende die mail direkt raus",
+    "sende die nachricht direkt raus",
+    "schick sie los",
+    "schick die nachricht los",
+    "schick die mail los",
+    "und schick sie los",
+    "und sende sie los",
+    "einfach direkt senden",
+    "bitte direkt rausschicken",
     "schick die sofort raus",
     "schick sofort raus",
     "schick direkt raus",
     "direkt raushauen",
     "direkt losschicken",
-    "ohne vorschau senden",
-    "hau raus"
+    "hau raus",
+    "schick die nachricht direkt los",
+    "schick die mail direkt los",
+    "schick sie direkt los"
   ];
 
-  return sendNowPhrases.some((phrase) => normalized.includes(phrase));
+  for (const trigger of autoSendTriggers) {
+    if (normalized.includes(trigger)) {
+      console.log("[autosend] klare Autosend-Phrase erkannt:", trigger);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -135,7 +173,8 @@ function isInvalidRecipientToken(name: string): boolean {
 
 /**
  * Bereinigt einen Namen für die Contact-Resolver-Anfrage
- * Entfernt führende Artikel/Präpositionen und nachgestellte Füllwörter
+ * Entfernt führende Artikel/Präpositionen, nachgestellte Füllwörter, Kommata
+ * Normalisiert für toleranteres Matching (z.B. "freiraum beratung" -> "freiraumberatung")
  */
 function cleanNameForResolver(raw?: string | null): string | null {
   if (!raw) return null;
@@ -145,14 +184,17 @@ function cleanNameForResolver(raw?: string | null): string | null {
 
   if (!text) return null;
 
+  // Kommata und Sonderzeichen entfernen (außer Leerzeichen)
+  text = text.replace(/[,.;:!?]/g, " ");
+
   // Mehrfach-Spaces reduzieren
   text = text.replace(/\s+/g, " ");
 
   // Führende und nachgestellte Füllwörter entfernen
-  const leadingStopWords = ["dem", "den", "der", "die", "das", "bei", "an", "am", "im", "in", "vom", "zum", "zur"];
-  const trailingStopWords = ["eine", "einen", "ein", "ne", "nen", "kurze", "kurzen", "kurz", "mail", "email", "e-mail"];
+  const leadingStopWords = ["dem", "den", "der", "die", "das", "bei", "an", "am", "im", "in", "vom", "zum", "zur", "bitte"];
+  const trailingStopWords = ["eine", "einen", "ein", "ne", "nen", "kurze", "kurzen", "kurz", "mail", "email", "e-mail", "bitte"];
 
-  let parts = text.split(" ");
+  let parts = text.split(" ").filter(Boolean);
 
   // Vorne Stopwörter entfernen
   while (parts.length > 0 && leadingStopWords.includes(parts[0])) {
@@ -171,7 +213,23 @@ function cleanNameForResolver(raw?: string | null): string | null {
   const cleaned = parts.join(" ").trim();
   if (!cleaned) return null;
 
-  return cleaned;
+  // Normalisierung für toleranteres Matching:
+  // "freiraum beratung" -> "freiraumberatung" (Leerzeichen entfernen für besseres Matching)
+  // ABER: nur wenn es ein zusammengesetzter Name ist (mehrere Wörter)
+  // Für einzelne Namen wie "thomas" bleibt es bei "thomas"
+  const normalizedForMatching = cleaned.replace(/\s+/g, "");
+
+  // Log für Debugging
+  console.log('[fm-voice][wizard4][contact-resolver] Name bereinigt:', {
+    original: raw,
+    cleaned: cleaned,
+    normalizedForMatching: normalizedForMatching
+  });
+
+  // Wir geben beide Varianten zurück - der Resolver kann beide versuchen
+  // Für jetzt geben wir die normalisierte Version zurück (ohne Leerzeichen)
+  // Das ermöglicht "freiraum beratung" -> "freiraumberatung" Matching
+  return normalizedForMatching;
 }
 
 /**
@@ -763,23 +821,32 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
       
       // ============================================================
-      // SENDMODE-LOGIK: Nur bei klaren Send-Phrasen erlauben wir sendNow
+      // SENDMODE-LOGIK: Priorität 1) Intent-Meta, 2) Text-Trigger
       // ============================================================
       if (wizard4Draft) {
+        const emailIntent: any = intent;
+        const statusMeta = emailIntent?.meta?.statusEmail;
+        
         // Standard: immer erstmal auf "previewOnly"
         let sendMode: "previewOnly" | "sendNow" = "previewOnly";
         
-        // Nur wenn eine klare Send-Phrase im sourceText vorkommt, erlauben wir sendNow
-        if (shouldSendNowFromSourceText(wizard4Draft.sourceText)) {
+        // 1. Prio: explizites AutoSend aus dem Intent-Meta
+        if (statusMeta?.autoSend) {
           sendMode = "sendNow";
-          console.log('[fm-voice][wizard4][debug] sendMode auf "sendNow" gesetzt (klare Send-Phrase erkannt)');
+          console.log('[autosend] sendMode = sendNow (AutoSend aus Intent-Meta erkannt)');
         } else {
-          sendMode = "previewOnly";
-          console.log('[fm-voice][wizard4][debug] sendMode auf "previewOnly" gesetzt (keine klare Send-Phrase)');
+          // 2. Prio: bestehende Text-Trigger-Logik (massiv erweitert)
+          if (shouldSendNowFromSourceText(wizard4Draft.sourceText)) {
+            sendMode = "sendNow";
+            console.log('[autosend] sendMode = sendNow (klare Send-Phrase im Text erkannt)');
+          } else {
+            sendMode = "previewOnly";
+            console.log('[autosend] sendMode = previewOnly (keine klare Send-Phrase)');
+          }
         }
         
         wizard4Draft.sendMode = sendMode;
-        console.log('[fm-voice][wizard4][debug] final sendMode:', wizard4Draft.sendMode, 'sourceText:', wizard4Draft.sourceText);
+        console.log('[autosend] final sendMode:', wizard4Draft.sendMode, 'sourceText:', wizard4Draft.sourceText);
       }
       
       // ============================================================
@@ -1068,20 +1135,64 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
       
       // JETZT Body neu bauen mit finalen toName/toEmail (nach Resolver)
-      // buildBodyFromSource hat Priorität - überschreibt den vorherigen Body
+      // Status-Gehirn hat Priorität - überschreibt den vorherigen Body mit korrekter Anrede
       if (wizard4Draft && wizard4Draft.sourceText) {
         const source = wizard4Draft.sourceText.trim();
         if (source) {
-          const styled = buildBodyFromSource(source, wizard4Draft.toName);
-          if (styled && styled.trim().length > 0) {
-            wizard4Draft.body = styled;
-            console.debug('[fm-voice][wizard4][body] styled from sourceText nach Resolver', { 
-              sourceText: wizard4Draft.sourceText, 
-              toName: wizard4Draft.toName, 
-              body: wizard4Draft.body 
+          // Prüfe, ob es eine Status-Mail ist (via meta.statusEmail)
+          const emailIntent: any = intent;
+          const statusMeta = emailIntent?.meta?.statusEmail;
+          
+          // Sicherstellen, dass Anrede NIEMALS "Hi dem," wird
+          // Priorität: 1) Resolver-Name, 2) StatusMeta.toNameRaw (sauber extrahiert), 3) leer
+          const resolvedContactName = wizard4Draft.toName || "";
+          const toDisplayName = 
+            resolvedContactName ||
+            (statusMeta?.toNameRaw && statusMeta.toNameRaw.trim()) ||
+            "";
+          
+          // Verwende das neue Status-Gehirn für Status-Mails
+          if (statusMeta?.isStatus) {
+            const statusResult = buildStatusEmailBody({
+              rawText: statusMeta.rawText || source,
+              statusText: statusMeta.statusText || undefined,
+              toDisplayName: toDisplayName || undefined,
             });
+            
+            if (statusResult && statusResult.trim().length > 0) {
+              wizard4Draft.body = statusResult.trim();
+              console.debug('[fm-voice][wizard4][body] styled from Status-Gehirn nach Resolver', { 
+                sourceText: wizard4Draft.sourceText, 
+                toName: wizard4Draft.toName, 
+                resolvedContactName,
+                toDisplayName,
+                body: wizard4Draft.body,
+                isStatus: true
+              });
+            }
           }
-          // Wenn styled null ist, bleibt der vorhandene Body erhalten (Fallback)
+          // Fallback: Alte Logik für non-Status-Mails
+          else {
+            // Extrahiere bodyHint aus dem Intent (message-Feld)
+            const bodyHint = wizard4Draft.intent?.message || null;
+            
+            const statusResult = buildStatusEmailBody({
+              rawText: source,
+              statusText: bodyHint || null,
+              toDisplayName: toDisplayName || undefined,
+            });
+            
+            if (statusResult && statusResult.trim().length > 0) {
+              wizard4Draft.body = statusResult.trim();
+              console.debug('[fm-voice][wizard4][body] styled from Status-Gehirn nach Resolver', { 
+                sourceText: wizard4Draft.sourceText, 
+                toName: wizard4Draft.toName,
+                toDisplayName,
+                body: wizard4Draft.body
+              });
+            }
+          }
+          // Wenn Body leer ist, bleibt der vorhandene Body erhalten (Fallback)
         }
       }
       
@@ -1098,7 +1209,16 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
       
       // Betreff bestimmen (Wizard4 hat Vorrang - IMMER draft.subject verwenden wenn vorhanden)
-      const subject = (wizard4Draft && wizard4Draft.subject) || intent.subjectHint || null;
+      // Bei Status-Mails: immer neutrale "Kurze Info" setzen
+      const emailIntentForSubject: any = intent;
+      const statusMetaForSubject = emailIntentForSubject?.meta?.statusEmail;
+      
+      let subject = (wizard4Draft && wizard4Draft.subject) || intent.subjectHint || null;
+      
+      // Wenn Status-Mail → Betreff auf neutrale Standardzeile setzen
+      if (statusMetaForSubject?.isStatus) {
+        subject = "Kurze Info";
+      }
       
       // Body-Prio: 1) Wizard4-Body, 2) bodyHint, 3) leerer String
       // Body IMMER aus dem Draft übernehmen, wenn vorhanden (unabhängig von sendMode)
