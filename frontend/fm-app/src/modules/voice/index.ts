@@ -162,12 +162,13 @@ function shouldSendNowFromSourceText(sourceText?: string): boolean {
 
 /**
  * Prüft, ob ein Token ein ungültiger Empfänger-Name ist (Pronomen, zu kurz, etc.)
+ * TASK 4: Extended to include "es" as pronoun
  */
 function isInvalidRecipientToken(name: string): boolean {
   if (!name || typeof name !== 'string') return true;
   const trimmed = name.trim().toLowerCase();
   if (trimmed.length < 2) return true;
-  const invalidTokens = ['sie', 'ihn', 'ihr', 'ihm', 'mir', 'mich', 'dir', 'dich', 'uns', 'euch', 'jemand', 'jemanden', 'irgendwen', 'irgendjemand'];
+  const invalidTokens = ['sie', 'ihn', 'ihr', 'ihm', 'mir', 'mich', 'dir', 'dich', 'uns', 'euch', 'es', 'jemand', 'jemanden', 'irgendwen', 'irgendjemand'];
   return invalidTokens.includes(trimmed);
 }
 
@@ -804,10 +805,21 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         );
       }
       
+      // TASK 4: Pronoun safety check
       // Prüfe ob toName ein Pronomen ist und setze auf null
       if (wizard4Draft && wizard4Draft.toName && isInvalidRecipientToken(wizard4Draft.toName)) {
         wizard4Draft.toName = null;
-        console.log('[fm-voice][wizard4][debug] toName invalid (pronoun) -> cleared');
+        console.log('[wizard4][safety-pronoun] toName invalid (pronoun) -> cleared:', wizard4Draft.toName);
+      }
+      
+      // TASK 4: Also check intent.toRaw for pronouns
+      if (intent && (intent as any).toRaw && isInvalidRecipientToken((intent as any).toRaw)) {
+        console.log('[wizard4][safety-pronoun] intent.toRaw is pronoun -> cleared:', (intent as any).toRaw);
+        (intent as any).toRaw = undefined;
+        // Clear wizard4Draft.toName as well if it was set from toRaw
+        if (wizard4Draft) {
+          wizard4Draft.toName = null;
+        }
       }
       
       // Fallback: Empfängername aus Transcript extrahieren, wenn intent.toRaw fehlt und draft.toName null
@@ -826,22 +838,54 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       if (wizard4Draft) {
         const emailIntent: any = intent;
         const statusMeta = emailIntent?.meta?.statusEmail;
+        const freeDictationMeta = emailIntent?.meta?.freeDictationMeta || null;
         
         // Standard: immer erstmal auf "previewOnly"
         let sendMode: "previewOnly" | "sendNow" = "previewOnly";
         
-        // 1. Prio: explizites AutoSend aus dem Intent-Meta
-        if (statusMeta?.autoSend) {
-          sendMode = "sendNow";
-          console.log('[autosend] sendMode = sendNow (AutoSend aus Intent-Meta erkannt)');
-        } else {
-          // 2. Prio: bestehende Text-Trigger-Logik (massiv erweitert)
-          if (shouldSendNowFromSourceText(wizard4Draft.sourceText)) {
+        // Generische AutoSend-Erkennung nur, wenn KEIN Free-Diktat
+        if (!freeDictationMeta) {
+          // 1. Prio: explizites AutoSend aus dem Intent-Meta
+          if (statusMeta?.autoSend) {
             sendMode = "sendNow";
-            console.log('[autosend] sendMode = sendNow (klare Send-Phrase im Text erkannt)');
+            console.log('[autosend] sendMode = sendNow (AutoSend aus Intent-Meta erkannt)');
+          } else {
+            // 2. Prio: bestehende Text-Trigger-Logik (massiv erweitert)
+            if (shouldSendNowFromSourceText(wizard4Draft.sourceText)) {
+              sendMode = "sendNow";
+              console.log('[autosend] sendMode = sendNow (klare Send-Phrase im Text erkannt)');
+            } else {
+              sendMode = "previewOnly";
+              console.log('[autosend] sendMode = previewOnly (keine klare Send-Phrase)');
+            }
+          }
+        }
+        
+        // A3.4 – Free-Dictation: AutoSend optional erlauben (nach allgemeiner Logik, damit es sich durchsetzt)
+        if (freeDictationMeta) {
+          // TASK 4: Pronoun safety - prevent AutoSend if toName is a pronoun
+          const currentToName = wizard4Draft?.toName || emailIntent?.toRaw || '';
+          if (freeDictationMeta.autoSend) {
+            // Check if toName or toRaw is a pronoun
+            if (currentToName && isInvalidRecipientToken(currentToName)) {
+              sendMode = "previewOnly";
+              console.log('[wizard4][safety-pronoun] AutoSend cancelled: pronoun detected in toName/toRaw:', currentToName);
+            } else {
+              sendMode = "sendNow";
+              console.log('[autosend][free-dictation] AutoSend aktiv (A3.4), sendMode = sendNow.');
+            }
           } else {
             sendMode = "previewOnly";
-            console.log('[autosend] sendMode = previewOnly (keine klare Send-Phrase)');
+            console.log('[autosend][free-dictation] Kein AutoSend-Wunsch erkannt, sendMode = previewOnly.');
+          }
+        }
+        
+        // TASK 4: Final pronoun safety check - prevent AutoSend if toName is still a pronoun
+        if (sendMode === "sendNow" && wizard4Draft) {
+          const finalToName = wizard4Draft.toName || emailIntent?.toRaw || '';
+          if (finalToName && isInvalidRecipientToken(finalToName)) {
+            sendMode = "previewOnly";
+            console.log('[wizard4][safety-pronoun] AutoSend cancelled (final check): pronoun detected:', finalToName);
           }
         }
         
@@ -1142,6 +1186,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           // Prüfe, ob es eine Status-Mail ist (via meta.statusEmail)
           const emailIntent: any = intent;
           const statusMeta = emailIntent?.meta?.statusEmail;
+          const freeDictationMeta = emailIntent?.meta?.freeDictationMeta;
           
           // Sicherstellen, dass Anrede NIEMALS "Hi dem," wird
           // Priorität: 1) Resolver-Name, 2) StatusMeta.toNameRaw (sauber extrahiert), 3) leer
@@ -1149,10 +1194,46 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           const toDisplayName = 
             resolvedContactName ||
             (statusMeta?.toNameRaw && statusMeta.toNameRaw.trim()) ||
+            (freeDictationMeta?.toNameRaw && freeDictationMeta.toNameRaw.trim()) ||
             "";
           
-          // Verwende das neue Status-Gehirn für Status-Mails
-          if (statusMeta?.isStatus) {
+          // A3.4 – Free-Diktat: Body 1:1 aus bodyHint übernehmen (kein Status-Gehirn)
+          // Free-Diktat hat IMMER Priorität vor Status-Logik
+          // Also handles "lass-uns" intents (which use the same freeDictationMeta structure)
+          if (freeDictationMeta) {
+            const freeDictationBody = freeDictationMeta.bodyText || intent.bodyHint || "";
+            if (freeDictationBody.trim().length > 0) {
+              wizard4Draft.body = freeDictationBody.trim();
+              const intentSource = (emailIntent as any)?.meta?.source || 'free-dictation';
+              console.debug('[fm-voice][wizard4][body] Free-Diktat Body 1:1 übernommen', { 
+                sourceText: wizard4Draft.sourceText, 
+                toName: wizard4Draft.toName, 
+                resolvedContactName,
+                toDisplayName,
+                body: wizard4Draft.body,
+                isFreeDictation: true,
+                intentSource: intentSource
+              });
+            }
+          }
+          // TASK 2: Also check for lass-uns intents that might not have freeDictationMeta
+          // (fallback for any edge cases)
+          else if ((emailIntent as any)?.meta?.source === 'lass-uns' && intent.bodyHint) {
+            const lassUnsBody = intent.bodyHint.trim();
+            if (lassUnsBody.length > 0) {
+              wizard4Draft.body = lassUnsBody;
+              console.debug('[fm-voice][wizard4][body] Lass-uns Body 1:1 übernommen', { 
+                sourceText: wizard4Draft.sourceText, 
+                toName: wizard4Draft.toName, 
+                resolvedContactName,
+                toDisplayName,
+                body: wizard4Draft.body,
+                isLassUns: true
+              });
+            }
+          }
+          // Verwende das neue Status-Gehirn für Status-Mails (nur wenn KEIN Free-Diktat)
+          else if (statusMeta?.isStatus && !freeDictationMeta) {
             const statusResult = buildStatusEmailBody({
               rawText: statusMeta.rawText || source,
               statusText: statusMeta.statusText || undefined,
@@ -1171,8 +1252,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               });
             }
           }
-          // Fallback: Alte Logik für non-Status-Mails
-          else {
+          // Fallback: Alte Logik für non-Status-Mails (nur wenn KEIN Free-Diktat)
+          else if (!freeDictationMeta) {
             // Extrahiere bodyHint aus dem Intent (message-Feld)
             const bodyHint = wizard4Draft.intent?.message || null;
             
@@ -1209,23 +1290,38 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
       
       // Betreff bestimmen (Wizard4 hat Vorrang - IMMER draft.subject verwenden wenn vorhanden)
-      // Bei Status-Mails: immer neutrale "Kurze Info" setzen
+      // Bei Status-Mails und Free-Diktat: immer neutrale "Kurze Info" setzen
       const emailIntentForSubject: any = intent;
       const statusMetaForSubject = emailIntentForSubject?.meta?.statusEmail;
+      const freeDictationMetaForSubject = emailIntentForSubject?.meta?.freeDictationMeta;
       
       let subject = (wizard4Draft && wizard4Draft.subject) || intent.subjectHint || null;
       
-      // Wenn Status-Mail → Betreff auf neutrale Standardzeile setzen
-      if (statusMetaForSubject?.isStatus) {
+      // Wenn Status-Mail oder Free-Diktat → Betreff auf neutrale Standardzeile setzen
+      if (statusMetaForSubject?.isStatus || freeDictationMetaForSubject) {
         subject = "Kurze Info";
       }
       
       // Body-Prio: 1) Wizard4-Body, 2) bodyHint, 3) leerer String
       // Body IMMER aus dem Draft übernehmen, wenn vorhanden (unabhängig von sendMode)
-      const bodyForUi =
+      // Bei Free-Diktat: Falls Draft-Body leer, bodyHint verwenden (1:1)
+      let bodyForUi =
         typeof wizard4Draft?.body === "string" && wizard4Draft.body.trim().length > 0
           ? wizard4Draft.body
           : (intent.bodyHint ?? "").trim();
+      
+      // Free-Diktat: Falls Body immer noch leer, direkt aus freeDictationMeta nehmen
+      // Also handles "lass-uns" intents (which use the same freeDictationMeta structure)
+      if (freeDictationMetaForSubject && (!bodyForUi || bodyForUi.trim().length === 0)) {
+        bodyForUi = freeDictationMetaForSubject.bodyText || intent.bodyHint || "";
+        const intentSource = (emailIntentForSubject as any)?.meta?.source || 'free-dictation';
+        console.log('[fm-voice][wizard4][free-dictation] Body aus meta.freeDictationMeta.bodyText übernommen:', bodyForUi.substring(0, 80), 'source:', intentSource);
+      }
+      // TASK 2: Fallback for lass-uns intents without freeDictationMeta (edge case)
+      else if ((emailIntentForSubject as any)?.meta?.source === 'lass-uns' && intent.bodyHint && (!bodyForUi || bodyForUi.trim().length === 0)) {
+        bodyForUi = intent.bodyHint;
+        console.log('[fm-voice][wizard4][lass-uns] Body aus intent.bodyHint übernommen:', bodyForUi.substring(0, 80));
+      }
       
       // Default-Body für sendNow wenn leer (damit AutoSend nicht wegen leerem Text scheitert)
       let body: string | null = bodyForUi;

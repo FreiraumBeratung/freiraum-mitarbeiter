@@ -1,10 +1,15 @@
+import {
+  FreeDictationMeta,
+  parseFreeDictation,
+} from "../../logic/wizard4/free_dictation";
+
 export type Wizard3OneShotPayload = {
   rawText: string; // komplette Original-Sprachnachricht
 };
 
 export type VoiceIntent =
   | { type: "navigate"; target: "control-center" | "lead-radar" | "leads" | "mail-compose" | "voice-diagnostics" }
-  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean } } }
+  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean }; freeDictationMeta?: FreeDictationMeta } }
   | { type: "wizard3-one-shot"; payload: Wizard3OneShotPayload }
   | { type: "wizard2-edit-anrede"; newAnrede: string }
   | { type: "wizard2-edit-subject"; newSubject: string }
@@ -201,6 +206,9 @@ function detectWizard3OneShot(raw: string, normalized: string): VoiceIntent | nu
  * Parst umgangssprachliche Status-E-Mail-Befehle.
  * Erwartet z.B.: "schreib dem thomas dass ich spater komme"
  * Entfernt führende Verben, Artikel und extrahiert Name + Status-Text.
+ * 
+ * TASK 3: Improved name extraction to prevent garbage strings like
+ * "folgendenachrichtanthomashithomas..."
  */
 function parseColloquialStatusEmailCommand(normalized: string): {
   toNameRaw: string | null;
@@ -209,6 +217,52 @@ function parseColloquialStatusEmailCommand(normalized: string): {
   // Erwartet z.B.: "schreib dem thomas dass ich spater komme"
   let text = normalized.trim();
 
+  // TASK 3: Special handling for "folgende nachricht an <name>" patterns
+  // Extract name directly after "an" to prevent garbage strings
+  const folgendeNachrichtAnMatch = text.match(/\bfolgende\s+nachricht\s+an\s+([a-z0-9äöüß]+)\b/i);
+  if (folgendeNachrichtAnMatch && folgendeNachrichtAnMatch[1]) {
+    const name = folgendeNachrichtAnMatch[1].trim();
+    // Extract body: everything after the matched pattern
+    const bodyStart = folgendeNachrichtAnMatch[0].length;
+    const bodyText = text.slice(bodyStart).trim();
+    
+    console.log('[intent-router][intent4.2][fixed-name] Extracted name from "folgende nachricht an":', name);
+    return {
+      toNameRaw: name,
+      statusText: bodyText || null,
+    };
+  }
+
+  // Similar pattern for "folgende email an <name>"
+  const folgendeEmailAnMatch = text.match(/\bfolgende\s+(?:email|mail|e-mail)\s+an\s+([a-z0-9äöüß]+)\b/i);
+  if (folgendeEmailAnMatch && folgendeEmailAnMatch[1]) {
+    const name = folgendeEmailAnMatch[1].trim();
+    const bodyStart = folgendeEmailAnMatch[0].length;
+    const bodyText = text.slice(bodyStart).trim();
+    
+    console.log('[intent-router][intent4.2][fixed-name] Extracted name from "folgende email/mail an":', name);
+    return {
+      toNameRaw: name,
+      statusText: bodyText || null,
+    };
+  }
+
+  // TASK 3: Pattern "an <name>"
+  const anNameMatch = text.match(/\ban\s+([a-z0-9äöüß]+)\b/i);
+  if (anNameMatch && anNameMatch[1]) {
+    const name = anNameMatch[1].trim();
+    // Extract body: everything after "an <name>"
+    const bodyStart = anNameMatch.index! + anNameMatch[0].length;
+    const bodyText = text.slice(bodyStart).trim();
+    
+    console.log('[intent-router][intent4.2][fixed-name] Extracted name from "an <name>":', name);
+    return {
+      toNameRaw: name,
+      statusText: bodyText || null,
+    };
+  }
+
+  // Original logic as fallback
   // Führende Schlüsselwörter entfernen
   const prefixes = ["schreib ", "schreibe ", "schreib mal ", "schreibe mal "];
   for (const prefix of prefixes) {
@@ -230,9 +284,35 @@ function parseColloquialStatusEmailCommand(normalized: string): {
 
   let idx = 0;
 
-  // Optionalen Artikel wegwerfen (dem/den/der/...)
+  // TASK 3: Pattern "dem <name>"
   if (idx < tokens.length && articles.has(tokens[idx])) {
     idx++;
+    // Next token should be the name
+    if (idx < tokens.length) {
+      const name = tokens[idx].trim();
+      // Skip to body (after "dass" or similar)
+      idx++;
+      while (idx < tokens.length && tokens[idx] !== "dass" && tokens[idx] !== "dass,") {
+        // Skip mail words
+        if (!["mail", "email", "e-mail"].includes(tokens[idx].toLowerCase())) {
+          idx++;
+        } else {
+          idx++;
+          break;
+        }
+      }
+      if (idx < tokens.length && (tokens[idx] === "dass" || tokens[idx] === "dass,")) {
+        idx++;
+      }
+      const statusTokens = tokens.slice(idx);
+      const statusText = statusTokens.join(" ").trim() || null;
+      
+      console.log('[intent-router][intent4.2][fixed-name] Extracted name from "dem <name>":', name);
+      return {
+        toNameRaw: name,
+        statusText: statusText,
+      };
+    }
   }
 
   // Name-Tokens sammeln bis "mail" / "email" / "e-mail" / "dass"
@@ -241,8 +321,13 @@ function parseColloquialStatusEmailCommand(normalized: string): {
   while (
     idx < tokens.length &&
     !mailWords.has(tokens[idx]) &&
-    tokens[idx] !== "dass"
+    tokens[idx] !== "dass" &&
+    tokens[idx] !== "dass,"
   ) {
+    // TASK 3: Stop if we hit common body-start words to prevent garbage
+    if (tokens[idx] === "folgende" || tokens[idx] === "nachricht" || tokens[idx] === "an") {
+      break;
+    }
     nameTokens.push(tokens[idx]);
     idx++;
   }
@@ -253,7 +338,7 @@ function parseColloquialStatusEmailCommand(normalized: string): {
   }
 
   // Falls Komma oder "dass" nach dem Namen kommt
-  if (idx < tokens.length && tokens[idx] === "dass") {
+  if (idx < tokens.length && (tokens[idx] === "dass" || tokens[idx] === "dass,")) {
     idx++;
   }
 
@@ -261,7 +346,420 @@ function parseColloquialStatusEmailCommand(normalized: string): {
   const toNameRaw = nameTokens.join(" ").trim() || null;
   const statusText = statusTokens.join(" ").trim() || null;
 
-  return { toNameRaw, statusText };
+  // TASK 3: Clean up toNameRaw - remove common garbage prefixes/suffixes
+  let cleanName = toNameRaw;
+  if (cleanName) {
+    // Remove patterns like "folgendenachrichtan" from the beginning
+    cleanName = cleanName.replace(/^folgendenachrichtan/i, '');
+    cleanName = cleanName.replace(/^folgendeemailan/i, '');
+    cleanName = cleanName.replace(/^folgendemailan/i, '');
+    // Only keep if it looks like a real name (at least 2 chars, not starting with numbers)
+    if (cleanName && cleanName.length >= 2 && !/^\d/.test(cleanName)) {
+      return { toNameRaw: cleanName, statusText };
+    }
+  }
+
+  return { toNameRaw: cleanName, statusText };
+}
+
+/**
+ * A3.1 – Parst Free-Diktat-E-Mail-Befehle.
+ * Erwartet z.B.: "schreib bitte folgendes an thomas: hi thomas, hier ist denis..."
+ * Extrahiert Name und Body-Text (1:1).
+ */
+/**
+ * A3.3 – Parse-Result für Free-Dictation-Commands.
+ */
+type FreeDictationParseResult = {
+  toNameRaw: string;
+  bodyText: string;
+  autoSend: boolean;
+};
+
+/**
+ * A3.3 – Parst Free-Dictation-Kommandos aus normalisiertem Text.
+ * Erkennt verschiedene Sprechweisen und entfernt AutoSend-Phrasen aus dem Kommando-Teil.
+ */
+function parseFreeDictationCommand(normalized: string): FreeDictationParseResult | null {
+  const text = normalized.trim();
+
+  // Schneller Exit: nichts mit "folgend..." drin => kein Freitext-Diktat
+  if (!text.includes("folgenden") && !text.includes("folgendes") && !text.includes("folgende nachricht") && !text.includes("folgende email") && !text.includes("folgende mail")) {
+    return null;
+  }
+
+  // 1. AutoSend-Phrasen aus dem Kommando entfernen (falls vorhanden)
+  const autosendPhrases = [
+    "und schick sie direkt raus",
+    "und schick sie sofort raus",
+    "und schickt sie direkt raus",
+    "und schickt sie sofort raus",
+    "und schick die nachricht direkt raus",
+    "und schick die nachricht sofort raus",
+    "und schickt die nachricht direkt raus",
+    "und schickt die nachricht sofort raus",
+    "und schick die mail direkt raus",
+    "und schick die mail sofort raus",
+    "und schickt die mail direkt raus",
+    "und schickt die mail sofort raus",
+    "und schick die email direkt raus",
+    "und schick die email sofort raus",
+    "und schickt die email direkt raus",
+    "und schickt die email sofort raus",
+  ];
+
+  let work = text;
+  let autoSend = false;
+
+  for (const phrase of autosendPhrases) {
+    const idx = work.indexOf(phrase);
+    if (idx !== -1) {
+      autoSend = true;
+      // AutoSend-Phrase aus dem String entfernen
+      work = (work.slice(0, idx) + work.slice(idx + phrase.length)).trim();
+      break;
+    }
+  }
+
+  // 2. Mögliche Mustervarianten definieren
+  // Achtung: Wir arbeiten hier mit bereits normalisierten Strings (nur a-z und Leerzeichen).
+  const patterns: RegExp[] = [
+    // "sende (bitte) folgende nachricht/email/mail an thomas <body>"
+    // Unterstützt auch mehrteilige Namen wie "freiraum beratung"
+    /^sende (?:bitte )?folgende (?:nachricht|email|mail) an ([a-z ]+?) (.+)$/u,
+
+    // "schreib bitte folgendes an thomas <body>"
+    // Unterstützt auch mehrteilige Namen
+    /^schreib bitte folgendes an ([a-z ]+?) (.+)$/u,
+
+    // "schreib thomas bitte folgendes <body>"
+    // Unterstützt auch mehrteilige Namen
+    /^schreib ([a-z ]+?) bitte folgendes (.+)$/u,
+
+    // "schreib thomas folgendes <body>"
+    // Unterstützt auch mehrteilige Namen
+    /^schreib ([a-z ]+?) folgendes (.+)$/u,
+
+    // "schreib bitte thomas folgendes <body>"
+    // Unterstützt auch mehrteilige Namen
+    /^schreib bitte ([a-z ]+?) folgendes (.+)$/u,
+  ];
+
+  for (const pattern of patterns) {
+    const match = work.match(pattern);
+    if (match && match[1] && match[2]) {
+      let toNameRaw = match[1].trim();
+      let bodyText = match[2].trim();
+
+      // Doppelpunkt am Ende des Namens entfernen (falls vorhanden)
+      if (toNameRaw.endsWith(":")) {
+        toNameRaw = toNameRaw.slice(0, -1).trim();
+      }
+
+      // Doppelpunkt am Anfang des Body-Texts entfernen (falls vorhanden)
+      if (bodyText.startsWith(":")) {
+        bodyText = bodyText.slice(1).trim();
+      }
+
+      if (!toNameRaw || !bodyText) {
+        continue;
+      }
+
+      return {
+        toNameRaw,
+        bodyText,
+        autoSend,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * A3.3 – Hilfsfunktion: Erkennt Body-Text und AutoSend-Wunsch aus rohem Body-Text.
+ * (Wird nicht mehr verwendet, bleibt für Rückwärtskompatibilität)
+ */
+function detectFreeDictationBodyAndAutoSend(rawBody: string): {
+  bodyText: string;
+  autoSendWanted: boolean;
+} {
+  const FREE_DICTATION_AUTOSEND_PHRASES = [
+    "und schick sie direkt raus",
+    "und schick sie sofort raus",
+    "und schick die nachricht direkt raus",
+    "und schick die nachricht sofort raus",
+    "und schick die mail direkt raus",
+    "und schick die mail sofort raus",
+    "und sende sie direkt raus",
+    "und sende sie sofort raus",
+    "und sende die nachricht direkt raus",
+    "und sende die nachricht sofort raus",
+  ];
+
+  const normalizedBody = (rawBody || "").toLowerCase().trim();
+  let autoSendWanted = false;
+
+  // Prüfe auf AutoSend-Phrasen
+  for (const phrase of FREE_DICTATION_AUTOSEND_PHRASES) {
+    if (normalizedBody.includes(phrase)) {
+      autoSendWanted = true;
+      break;
+    }
+  }
+
+  // Body bereinigen (AutoSend-Phrasen entfernen)
+  let bodyText = stripAutoSendPhrasesFromBody(rawBody);
+
+  return {
+    bodyText,
+    autoSendWanted,
+  };
+}
+
+function parseFreeDictationEmailCommand(normalized: string): {
+  toNameRaw: string | null;
+  bodyText: string | null;
+  autoSendWanted?: boolean;
+} {
+  let text = normalized.trim();
+
+  // A3.3 – Neue Patterns für erweiterte Alltagssprache
+  type FreeDictationPattern = {
+    kind: "schreib-name-bitte" | "schreib-name-nachricht" | "sende-email-an";
+    regex: RegExp;
+  };
+
+  const FREE_DICTATION_PATTERNS: FreeDictationPattern[] = [
+    {
+      kind: "schreib-name-bitte",
+      // z.B.: "schreib thomas bitte folgendes hi thomas ..."
+      regex: /^schreib(?:e)?\s+(?:dem\s+|der\s+|den\s+)?([a-zäöüß]+)\s+bitte\s+folgendes\s+(.*)$/i,
+    },
+    {
+      kind: "schreib-name-nachricht",
+      // z.B.: "schreib thomas folgende nachricht hi thomas ..."
+      regex: /^schreib(?:e)?\s+(?:dem\s+|der\s+|den\s+)?([a-zäöüß]+)\s+folgende(?:\s+nachricht)?\s+(.*)$/i,
+    },
+    {
+      kind: "sende-email-an",
+      // z.B.: "sende bitte folgende email an thomas hi thomas ..."
+      regex: /^sende(?:\s+bitte)?\s+folgende(?:\s+e[- ]?mail)?\s+an\s+(?:den\s+|die\s+|dem\s+)?([a-zäöüß]+)\s+(.*)$/i,
+    },
+  ];
+
+  // Prüfe zuerst neue Patterns
+  for (const pattern of FREE_DICTATION_PATTERNS) {
+    const m = text.match(pattern.regex);
+    if (!m) continue;
+
+    const toNameRaw = m[1]?.trim() || "";
+    const rawBody = m[2]?.trim() || "";
+
+    if (!toNameRaw) continue;
+
+    const { bodyText, autoSendWanted } = detectFreeDictationBodyAndAutoSend(rawBody);
+
+    console.log(
+      `[intent-router][free-dictation][pattern-${pattern.kind}] Pattern erkannt:`,
+      { toNameRaw, bodyText: bodyText.substring(0, 50), autoSendWanted }
+    );
+
+    return {
+      toNameRaw,
+      bodyText,
+      autoSendWanted,
+    };
+  }
+
+  // Bestehende Prefixe (Fallback für alte Kommandos - NICHT ändern)
+  const prefixes = [
+    "schreib bitte folgendes an ",
+    "schreibe bitte folgendes an ",
+    "schreib folgendes an ",
+    "schreibe folgendes an ",
+    "sende bitte folgende nachricht an ",
+    "sende folgende nachricht an ",
+  ];
+
+  let usedPrefix: string | null = null;
+  for (const prefix of prefixes) {
+    if (text.startsWith(prefix)) {
+      usedPrefix = prefix;
+      break;
+    }
+  }
+
+  if (!usedPrefix) {
+    return { toNameRaw: null, bodyText: null };
+  }
+
+  // Prefix entfernen
+  text = text.slice(usedPrefix.length).trim();
+
+  // Wir erwarten jetzt: "<name> ... <rest>"
+  // Name ist alles bis zu einem Doppelpunkt oder bis wir eine klare Trennung erkennen.
+  // Vereinfachung: Name = erstes Wort, wenn danach ein ":" kommt;
+  // oder Name bis zum ersten ":".
+  let namePart = text;
+  let bodyPart = "";
+
+  const colonIndex = text.indexOf(":");
+  if (colonIndex >= 0) {
+    namePart = text.slice(0, colonIndex).trim();
+    bodyPart = text.slice(colonIndex + 1).trim();
+  } else {
+    // Kein Doppelpunkt: heuristisch
+    // Name = erstes Wort, Body = Rest
+    const tokens = text.split(/\s+/);
+    if (tokens.length > 1) {
+      namePart = tokens[0];
+      bodyPart = tokens.slice(1).join(" ").trim();
+    } else {
+      namePart = text;
+      bodyPart = "";
+    }
+  }
+
+  // kleinere Bereinigung
+  namePart = namePart.replace(/,/g, " ").trim();
+
+  if (!namePart) {
+    return { toNameRaw: null, bodyText: null };
+  }
+
+  // Für bestehende Patterns: AutoSend-Wunsch auch erkennen
+  const { bodyText: cleanedBodyPart, autoSendWanted } = detectFreeDictationBodyAndAutoSend(bodyPart);
+
+  return {
+    toNameRaw: namePart || null,
+    bodyText: cleanedBodyPart || null,
+    autoSendWanted,
+  };
+}
+
+/**
+ * A3.2 – Erkennt AutoSend für Free-Diktat-Befehle.
+ * Prüft sowohl Prefixe ("sende folgende nachricht") als auch Endings ("und schick sie direkt raus").
+ */
+function detectFreeDictationAutoSend(normalized: string, bodyText?: string | null): boolean {
+  const text = (normalized || "").toLowerCase();
+
+  const sendPrefixes = [
+    "sende folgende nachricht an ",
+    "sende bitte folgende nachricht an ",
+    "sende bitte folgendes an ",
+  ];
+
+  const sendEndings = [
+    " und schick sie direkt raus",
+    " und schick sie sofort raus",
+    " und schick die nachricht direkt raus",
+    " und schick die nachricht sofort raus",
+    " und schick die mail direkt raus",
+    " und schick die mail sofort raus",
+    " und sende sie direkt raus",
+    " und sende sie sofort raus",
+    " und sende die nachricht direkt raus",
+    " und sende die nachricht sofort raus",
+    " bitte direkt abschicken",
+    " direkt abschicken",
+  ];
+
+  // 1) Prefix-Check
+  for (const prefix of sendPrefixes) {
+    if (text.startsWith(prefix)) {
+      return true;
+    }
+  }
+
+  // 2) Ending-Check in Normalized
+  for (const ending of sendEndings) {
+    if (text.endsWith(ending)) {
+      return true;
+    }
+  }
+
+  // 3) Optional: noch BodyText prüfen
+  if (bodyText) {
+    const body = bodyText.toLowerCase().trim();
+    for (const ending of sendEndings) {
+      if (body.endsWith(ending)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * A3.2 – Entfernt AutoSend-Phrasen aus dem Body-Text.
+ * Entfernt Phrasen sowohl am Anfang als auch am Ende des Body-Texts.
+ */
+function stripAutoSendPhrasesFromBody(body: string): string {
+  if (!body) return body;
+
+  const phrases = [
+    "und schick sie direkt raus",
+    "und schick sie sofort raus",
+    "und schick die nachricht direkt raus",
+    "und schick die nachricht sofort raus",
+    "und schick die mail direkt raus",
+    "und schick die mail sofort raus",
+    "und sende sie direkt raus",
+    "und sende sie sofort raus",
+    "und sende die nachricht direkt raus",
+    "und sende die nachricht sofort raus",
+    "bitte direkt abschicken",
+    "direkt abschicken",
+  ];
+
+  let result = body.trim();
+
+  // Wir arbeiten mit einer separaten lowerCase-Kopie für die Checks,
+  // schneiden aber immer am Originalstring.
+  const stripOnce = (input: string): string => {
+    let out = input.trim();
+    let lower = out.toLowerCase();
+
+    // 1) Am Anfang entfernen
+    for (const phrase of phrases) {
+      const p = phrase.toLowerCase();
+      if (lower.startsWith(p + " ")) {
+        out = out.slice(p.length + 1).trim();
+        lower = out.toLowerCase();
+        break;
+      }
+      if (lower.startsWith(p)) {
+        out = out.slice(p.length).trim();
+        lower = out.toLowerCase();
+        break;
+      }
+    }
+
+    // 2) Am Ende entfernen
+    for (const phrase of phrases) {
+      const p = phrase.toLowerCase();
+      if (lower.endsWith(" " + p)) {
+        out = out.slice(0, out.length - (p.length + 1)).trim();
+        lower = out.toLowerCase();
+        break;
+      }
+      if (lower.endsWith(p)) {
+        out = out.slice(0, out.length - p.length).trim();
+        lower = out.toLowerCase();
+        break;
+      }
+    }
+
+    return out.trim();
+  };
+
+  // Einmal vorne/hinten aufräumen
+  result = stripOnce(result);
+
+  return result.trim();
 }
 
 /**
@@ -875,6 +1373,270 @@ function parseEmailCompose(text: string): { toRaw: string; bodyHint?: string } |
 }
 
 /**
+ * A3.4 – Erweiterte Free-Dictation-Erkennung für Umgangssprache.
+ * Erkennt Varianten wie:
+ * - "schreib bitte folgendes an thomas ..."
+ * - "schreib dem thomas bitte folgende nachricht ..."
+ * - "sende bitte folgende email direkt an thomas ..."
+ * - "lass uns folgende nachricht an thomas schreiben ..."
+ * - "lass uns thomas eine email schreiben ..."
+ */
+type FreeDictationResultA34 = {
+  normalized: string;
+  toNameRaw: string;
+  bodyText: string;
+  autoSend: boolean;
+};
+
+/**
+ * TASK 3: Reusable extended AutoSend detection helper
+ * Detects AutoSend phrases like "sende sie direkt", "schick sie direkt raus", etc.
+ * Can be used by both A3.4 free-dictation and "lass-uns" intents.
+ */
+function detectExtendedAutoSend(normalized: string): boolean {
+  const text = normalized.toLowerCase();
+
+  // Exact phrase matches (fast check)
+  const autoSendPhrases = [
+    'schick sie direkt raus',
+    'schick die nachricht direkt los',
+    'sende sie direkt raus',
+    'sende die nachricht sofort raus',
+    'schick sie sofort los',
+    'schick die email direkt raus',
+    'sende sie dann auch direkt zu ihm',
+    'sende sie dann auch direkt zu ihr',
+    'schick sie dann auch direkt zu ihm',
+    'schick sie dann auch direkt zu ihr',
+    // Zusätzliche Varianten für bessere Abdeckung
+    'und schick sie direkt raus',
+    'und schicke sie direkt raus',
+    'und schick es direkt raus',
+    'und schicke es direkt raus',
+    'und schicke es dann auch direkt los',
+    'und schick es dann auch direkt los',
+    'und schick sie dann auch direkt los',
+    'und schicke sie dann auch direkt los',
+    'und sende sie dann auch direkt zu ihm',
+    'und sende sie direkt zu ihm',
+    'und sende sie direkt an ihn',
+    'und sende die email sofort raus',
+    'und sende die mail sofort raus',
+  ];
+
+  if (autoSendPhrases.some(p => text.includes(p))) {
+    return true;
+  }
+
+  // Extended regex-based patterns for more flexible detection
+  // - "sende sie direkt"
+  // - "sende sie dann direkt"
+  // - "sende sie direkt zu ihm/ihr"
+  // - "sende die nachricht direkt"
+  // - "schicke es direkt"
+  const extendedPatterns = [
+    /\bsende\s+sie\s+direkt\b/i,
+    /\bsende\s+sie\s+dann\s+direkt\b/i,
+    /\bsende\s+sie\s+direkt\s+zu\s+(?:ihm|ihr)\b/i,
+    /\bsende\s+die\s+nachricht\s+direkt\b/i,
+    /\bsende\s+es\s+direkt\b/i,
+    /\bsende\s+es\s+jetzt\s+direkt\b/i,
+    /\bschicke\s+es\s+direkt\b/i,
+    /\bschicke\s+sie\s+direkt\b/i,
+  ];
+
+  for (const pattern of extendedPatterns) {
+    if (pattern.test(text)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Legacy alias for backward compatibility
+ * @deprecated Use detectExtendedAutoSend instead
+ */
+function detectAutoSendFromTextA34(normalized: string): boolean {
+  return detectExtendedAutoSend(normalized);
+}
+
+function parseFreeDictationA34(normalized: string): VoiceIntent | null {
+  const text = normalized.trim().toLowerCase();
+
+  // AutoSend-Erkennung mit erweiterter Funktion
+  const hasAutoSendPhrase = detectExtendedAutoSend(text);
+
+  // ------------------------------------------------------------
+  // 2. Patterns für Freitext-Diktat
+  // ------------------------------------------------------------
+  // Wir unterscheiden zwei Gruppen:
+  //  A) Name NACH dem Trigger:
+  //     - "schreib bitte folgendes an thomas ..."
+  //     - "sende bitte folgende nachricht an thomas ..."
+  //     - "sende bitte folgende email direkt an thomas ..."
+  //
+  //  B) Name VOR dem Trigger:
+  //     - "schreib dem thomas bitte folgende nachricht ..."
+  //     - "schreib thomas bitte folgende nachricht ..."
+  //
+  // In beiden Fällen wollen wir:
+  //   - toNameRaw = "thomas"
+  //   - bodyText  = der komplette diktierte Text nach dem Trigger.
+
+  type MatchResult = {
+    toNameRaw: string;
+    bodyText: string;
+  };
+
+  const tryPatterns = (): MatchResult | null => {
+    // ---------------------------
+    // A) Trigger VOR Name
+    // ---------------------------
+    const patternsNameAfter: RegExp[] = [
+      // "schreib bitte folgende nachricht an thomas ..."
+      /^(?:schreib|schreibe)\s+(?:bitte\s+)?folgende nachricht an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+
+      // "schreib bitte folgendes an thomas ..."
+      /^(?:schreib|schreibe)\s+(?:bitte\s+)?folgendes an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+      /^(?:schreib|schreibe)\s+folgendes an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+
+      // "sende bitte folgende nachricht an thomas ..."
+      /^(?:sende|send)\s+(?:bitte\s+)?folgende nachricht an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+      /^(?:sende|send)\s+folgende nachricht an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+
+      // "sende bitte folgende email (direkt )?an thomas ..."
+      /^(?:sende|send)\s+(?:bitte\s+)?folgende email(?: direkt)? an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+      /^(?:sende|send)\s+folgende email(?: direkt)? an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+
+      // "sende bitte folgende mail (direkt )?an thomas ..."
+      /^(?:sende|send)\s+(?:bitte\s+)?folgende mail(?: direkt)? an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+      /^(?:sende|send)\s+folgende mail(?: direkt)? an\s+(?<name>[a-z0-9äöüß ]+?)\s+(?<body>.+)$/,
+
+      // NEU: "lass uns folgende nachricht an thomas schreiben ..."
+      /^lass uns\s+(?:bitte\s+)?folgende nachricht an\s+(?<name>[a-z0-9äöüß ]+?)\s+schreiben\s+(?<body>.+)$/,
+
+      // NEU: "lass uns thomas folgende nachricht schreiben ..."
+      /^lass uns\s+(?:bitte\s+)?(?<name>[a-z0-9äöüß ]+)\s+folgende nachricht\s+schreiben\s+(?<body>.+)$/,
+
+      // NEU: "lass uns thomas eine email schreiben ..."
+      /^lass uns\s+(?:bitte\s+)?(?<name>[a-z0-9äöüß ]+)\s+(?:eine\s+)?(?:email|e-mail)\s+schreiben\s+(?<body>.+)$/,
+
+      // NEU: "lass uns eine email an thomas schreiben ..."
+      /^lass uns\s+(?:bitte\s+)?(?:eine\s+)?(?:email|e-mail)\s+an\s+(?<name>[a-z0-9äöüß ]+)\s+schreiben\s+(?<body>.+)$/,
+
+      // NEU: "lass uns eine mail an thomas schreiben ..."
+      /^lass uns\s+(?:bitte\s+)?(?:eine\s+)?mail\s+an\s+(?<name>[a-z0-9äöüß ]+)\s+schreiben\s+(?<body>.+)$/,
+    ];
+
+    for (const pattern of patternsNameAfter) {
+      const m = text.match(pattern);
+      if (m && (m as any).groups) {
+        const g = (m as any).groups;
+        const toNameRaw = (g.name || '').trim();
+        const bodyText = (g.body || '').trim();
+
+        if (!toNameRaw || !bodyText) continue;
+
+        return { toNameRaw, bodyText };
+      }
+    }
+
+    // ---------------------------
+    // B) Name VOR Trigger
+    // ---------------------------
+    const patternsNameBefore: RegExp[] = [
+      // "schreib dem thomas bitte folgende nachricht ..."
+      // Unterstützt auch mehrteilige Namen wie "freiraum beratung"
+      /^(?:schreib|schreibe)\s+(?:dem\s+)?(?<name>[a-z0-9äöüß ]+)\s+(?:bitte\s+)?folgende nachricht(?:\.|\s+)(?<body>.+)$/,
+      /^(?:schreib|schreibe)\s+(?:dem\s+)?(?<name>[a-z0-9äöüß ]+)\s+(?:bitte\s+)?folgende email(?:\.|\s+)(?<body>.+)$/,
+      /^(?:schreib|schreibe)\s+(?:dem\s+)?(?<name>[a-z0-9äöüß ]+)\s+(?:bitte\s+)?folgende mail(?:\.|\s+)(?<body>.+)$/,
+
+      // etwas softer:
+      // "schreib (dem) thomas bitte folgendes ..."
+      /^(?:schreib|schreibe)\s+(?:dem\s+)?(?<name>[a-z0-9äöüß ]+)\s+(?:bitte\s+)?folgendes\s+(?<body>.+)$/,
+    ];
+
+    for (const pattern of patternsNameBefore) {
+      const m = text.match(pattern);
+      if (m && (m as any).groups) {
+        const g = (m as any).groups;
+        const toNameRaw = (g.name || '').trim();
+        const bodyText = (g.body || '').trim();
+
+        if (!toNameRaw || !bodyText) continue;
+
+        return { toNameRaw, bodyText };
+      }
+    }
+
+    return null;
+  };
+
+  const match = tryPatterns();
+  if (!match) {
+    // Kein Freitext-Match → A3.4 hier nicht zuständig
+    return null;
+  }
+
+  const toNameRaw = match.toNameRaw;
+  let bodyText = match.bodyText;
+
+  // Minimale Sicherheitschecks
+  if (!toNameRaw || bodyText.length < 5) {
+    return null;
+  }
+
+  // AutoSend-Phrasen aus dem Body entfernen (falls sie dort stehen)
+  // Entferne alle Varianten der AutoSend-Phrasen
+  const autosendPhrasePatterns = [
+    /\s*und\s+(?:schick|schicke|schickt|sende)\s+(?:sie|es|die\s+(?:email|mail|nachricht))?\s+(?:dann\s+)?(?:auch\s+)?(?:direkt|sofort)\s+(?:raus|los|weg|zu\s+(?:ihm|ihr|ihn))\s*/gi,
+    /\s*schick\s+sie\s+(?:direkt|sofort)\s+(?:raus|los)\s*/gi,
+    /\s*schick\s+die\s+nachricht\s+(?:direkt|sofort)\s+(?:raus|los)\s*/gi,
+    /\s*sende\s+sie\s+(?:direkt|sofort)\s+(?:raus|los)\s*/gi,
+    /\s*sende\s+die\s+nachricht\s+(?:direkt|sofort)\s+(?:raus|los)\s*/gi,
+    /\s*schick\s+die\s+email\s+(?:direkt|sofort)\s+(?:raus|los)\s*/gi,
+    /\s*sende\s+sie\s+dann\s+(?:auch\s+)?(?:direkt|sofort)\s+zu\s+(?:ihm|ihr)\s*/gi,
+    /\s*schick\s+sie\s+dann\s+(?:auch\s+)?(?:direkt|sofort)\s+zu\s+(?:ihm|ihr)\s*/gi,
+  ];
+
+  for (const pattern of autosendPhrasePatterns) {
+    bodyText = bodyText.replace(pattern, " ").trim();
+  }
+
+  bodyText = bodyText.replace(/\s+/g, " ").trim();
+
+  const autoSend = hasAutoSendPhrase;
+
+  // Wir liefern ein Email-Intent-Objekt zurück
+  // Wichtig: toRaw enthält NUR den Namen (z.B. "thomas"), NICHT "folgende nachricht an thomas"
+  // Der Contact Resolver erhält damit nur den reinen Namen
+  const intent: VoiceIntent = {
+    type: "email-compose",
+    toRaw: toNameRaw,
+    subjectHint: undefined,
+    bodyHint: bodyText,
+    meta: {
+      freeDictationMeta: {
+        normalized: text,
+        toNameRaw,
+        bodyText,
+        autoSend,
+      },
+      source: 'free-dictation-a3.4',
+      autoSend: autoSend,
+    },
+  };
+
+  if (autoSend) {
+    console.log('[intent-router][A3.4][autosend-extended] AutoSend detected for Free-Dictation');
+  }
+
+  return intent;
+}
+
+/**
  * Routet Voice-Intents basierend auf dem gesprochenen Text.
  * 
  * Reihenfolge:
@@ -897,6 +1659,67 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
   if (!text) {
     return { type: "unknown" };
+  }
+
+  // --------------------------------------------------
+  // A3.4: Free-Dictation-Parser (Freitext-Sprachdiktat) - Erweiterte Umgangssprache
+  // Versucht, Sätze wie
+  // - "sende bitte folgende nachricht an thomas ..."
+  // - "sende bitte folgende email direkt an thomas ..."
+  // - "schreib bitte folgendes an thomas ..."
+  // - "schreib thomas bitte folgendes ..."
+  // - "schreib dem thomas bitte folgende nachricht ..."
+  // als Freitext-Diktat zu interpretieren.
+  // --------------------------------------------------
+  const fdIntent = parseFreeDictationA34(text);
+  if (fdIntent) {
+    const freeDictationData = fdIntent.meta?.freeDictationMeta;
+    console.log(
+      "[intent-router][free-dictation][A3.4] Freitext-Diktat erkannt:",
+      {
+        normalized: text,
+        toNameRaw: fdIntent.toRaw,
+        bodyText: fdIntent.bodyHint?.substring(0, 50),
+        autoSend: freeDictationData?.autoSend || (fdIntent.meta as any)?.autoSend || false
+      }
+    );
+
+    // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+    const extractedEmail = extractEmailAddress(original);
+    if (extractedEmail) {
+      fdIntent.to = extractedEmail;
+      console.log("[intent-router][free-dictation][A3.4] E-Mail-Adresse extrahiert:", extractedEmail);
+    }
+
+    return fdIntent;
+  }
+
+  // Fallback: Bisherige parseFreeDictation aus free_dictation.ts
+  const freeDictation = parseFreeDictation(text);
+  if (freeDictation) {
+    console.log(
+      "[intent-router][free-dictation][A3.4] Freitext-Diktat erkannt (Fallback):",
+      { normalized: freeDictation.normalized, toNameRaw: freeDictation.toNameRaw, bodyText: freeDictation.bodyText.substring(0, 50), autoSend: freeDictation.autoSend }
+    );
+
+    const emailIntent: VoiceIntent = {
+      type: "email-compose",
+      toRaw: freeDictation.toNameRaw,
+      subjectHint: undefined,
+      bodyHint: freeDictation.bodyText,
+      meta: {
+        freeDictationMeta: freeDictation,
+      },
+    };
+
+    // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+    const extractedEmail = extractEmailAddress(original);
+    if (extractedEmail) {
+      emailIntent.to = extractedEmail;
+      console.log("[intent-router][free-dictation][A3.4] E-Mail-Adresse extrahiert:", extractedEmail);
+    }
+
+    return emailIntent;
   }
 
   // Spezial-Route: ALLE Sätze mit "schreib ..."
@@ -1147,6 +1970,145 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   if (wizard2Fallback) {
     console.log("[fm-voice] routeVoiceIntent -> Wizard2 (Fallback)");
     return wizard2Fallback;
+  }
+
+  // ============================================================
+  // "Lass uns ... schreiben" Email Intent Detection
+  // MUST run BEFORE intent-4.2 fallback to catch "lass thomas eine mail schreiben"
+  // ============================================================
+  // Detects collaboration phrases like:
+  // - "lass uns folgende nachricht an thomas schreiben..."
+  // - "lass uns thomas eine mail schreiben..."
+  // - "lass thomas eine mail schreiben..." (STT-damaged, missing "uns")
+  {
+    const normalized = text.toLowerCase();
+    
+    // Extended detection logic
+    // Check if sentence starts with "lass " and contains email-related keywords
+    const startsWithLass = normalized.startsWith('lass ');
+    const hasNachrichtAn = normalized.includes('nachricht an ');
+    const hasMailAn = normalized.includes('mail an ') || normalized.includes('eine mail an ');
+    const hasEineMailSchreib = normalized.includes(' eine mail schreiben');
+    
+    // Condition a): "lass uns folgende nachricht an thomas schreiben"
+    const conditionA = startsWithLass && (hasNachrichtAn || hasMailAn);
+    
+    // Condition b): "lass thomas eine mail schreiben" (STT-damaged, missing "uns")
+    const conditionB = startsWithLass && hasEineMailSchreib;
+    
+    if (conditionA || conditionB) {
+      console.log('[intent-router][lass-uns] Email collaboration phrase detected');
+      
+      // Determine toNameRaw with improved extraction
+      let toNameRaw: string | undefined;
+      
+      // Priority 1: "nachricht an <name>"
+      const matchNachrichtAn = /nachricht\s+an\s+([a-zäöüß]+)/.exec(normalized);
+      if (matchNachrichtAn && matchNachrichtAn[1]) {
+        toNameRaw = matchNachrichtAn[1].trim();
+      }
+      
+      // Priority 2: "mail an <name>"
+      if (!toNameRaw) {
+        const matchMailAn = /mail\s+an\s+([a-zäöüß]+)/.exec(normalized);
+        if (matchMailAn && matchMailAn[1]) {
+          toNameRaw = matchMailAn[1].trim();
+        }
+      }
+      
+      // Priority 3: "lass <name> eine mail schreiben" (STT-damaged variant)
+      if (!toNameRaw) {
+        const matchLassMail = /^lass\s+([a-zäöüß]+)\s+eine\s+mail\s+schreiben/.exec(normalized);
+        if (matchLassMail && matchLassMail[1]) {
+          const candidate = matchLassMail[1].trim();
+          // Exclude common words
+          if (!['uns', 'eine', 'der', 'die', 'das', 'dem', 'den'].includes(candidate.toLowerCase())) {
+            toNameRaw = candidate;
+          }
+        }
+      }
+      
+      // If we still don't have a name, don't create "lass-uns" intent
+      // Let the fallback logic handle it
+      if (!toNameRaw) {
+        // Continue to next intent handler
+      } else {
+        console.log('[intent-router][lass-uns] toNameRaw:', toNameRaw);
+        
+        // Extract bodyHint correctly from rawText
+        let bodyHint: string | undefined;
+        
+        // Method 1: Split by first period (.)
+        const dotIndex = original.indexOf('.');
+        if (dotIndex >= 0) {
+          const afterDot = original.slice(dotIndex + 1).trim();
+          if (afterDot.length > 0) {
+            bodyHint = afterDot;
+          }
+        }
+        
+        // Method 2: Detect greeting word as starting point (if no period found)
+        if (!bodyHint) {
+          const greetingPatterns = [
+            /\bhi\s+/i,
+            /\bhey\s+/i,
+            /\bhallo\s+/i,
+            /\bguten\s+morgen\s+/i,
+            /\bguten\s+tag\s+/i,
+            /\bguten\s+abend\s+/i,
+            /\blieber\s+/i,
+            /\bliebe\s+/i,
+          ];
+          
+          for (const pattern of greetingPatterns) {
+            const match = original.toLowerCase().match(pattern);
+            if (match && match.index !== undefined) {
+              bodyHint = original.slice(match.index).trim();
+              break;
+            }
+          }
+        }
+        
+        if (bodyHint) {
+          const preview = bodyHint.length > 80 ? bodyHint.substring(0, 80) + '...' : bodyHint;
+          console.log('[intent-router][lass-uns] bodyCandidate extracted:', preview);
+        }
+        
+        // Use reusable AutoSend detection
+        const autoSend = detectExtendedAutoSend(normalized);
+        
+        // TASK 1: Create email-compose intent with same shape as A3.4
+        // Use FreeDictationMeta structure so Wizard4 treats it the same way
+        const freeDictationMeta: FreeDictationMeta = {
+          normalized: normalized,
+          toNameRaw: toNameRaw,
+          bodyText: bodyHint || "",
+          autoSend: autoSend,
+        };
+        
+        const intent: VoiceIntent = {
+          type: "email-compose",
+          toRaw: toNameRaw,
+          subjectHint: undefined,
+          bodyHint: bodyHint, // Top-level field, same as A3.4
+          meta: {
+            freeDictationMeta: freeDictationMeta, // Same structure as A3.4
+            source: 'lass-uns',
+            autoSend: autoSend,
+          },
+        };
+        
+        console.log('[intent-router][lass-uns] Created email-compose intent:', {
+          toRaw: toNameRaw,
+          hasBodyHint: !!bodyHint,
+          bodyHintPreview: bodyHint ? bodyHint.substring(0, 50) : undefined,
+          autoSend: autoSend
+        });
+        console.log('[intent-router][lass-uns] intent bodyHint field:', intent.bodyHint);
+        
+        return intent;
+      }
+    }
   }
 
   // ============================================================
