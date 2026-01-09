@@ -15,6 +15,7 @@ import { generateWizard4Subject } from "../../logic/wizard4/subject";
 import { generateWizard4Body } from "../../logic/wizard4/body";
 import { buildWizard4EmailFromInput } from "../../logic/wizard4/email";
 import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
+import { polishEmailBody } from "../../logic/wizard4/email_polish";
 
 declare global {
   interface Window {
@@ -96,35 +97,101 @@ function isStrictValidEmail(email: string): boolean {
 }
 
 /**
- * Prüft, ob im sourceText eine klare "Sofort senden"-Phrase vorkommt.
- * Nur wenn eine dieser Phrasen enthalten ist, erlauben wir sendMode = "sendNow".
+ * FIX 2: Formatiert E-Mail-Body, um sicherzustellen, dass nach "Hi Name," eine Leerzeile kommt.
+ * Wird NUR für Status-Brain Bodies verwendet, nicht für Free-Dictation.
+ * 
+ * @param body - E-Mail-Body Text
+ * @returns Formatierten Body mit korrekter Leerzeile nach Greeting
  */
-function shouldSendNowFromSourceText(sourceText?: string): boolean {
-  if (!sourceText) return false;
+function formatGreetingBody(body: string): string {
+  if (!body || typeof body !== 'string') {
+    return body || '';
+  }
 
-  const normalized = sourceText
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+  // Pattern 1: "Hi Name,\n..." -> "Hi Name,\n\n..." (wenn nur ein \n, füge ein weiteres hinzu)
+  // Pattern 2: "Hi,\n..." -> "Hi,\n\n..." (wenn nur ein \n, füge ein weiteres hinzu)
+  // Pattern 3: "Hi Name, " (mit Space statt \n) -> "Hi Name,\n\n"
+  // Pattern 4: "Hi, " (mit Space statt \n) -> "Hi,\n\n"
+  
+  let formatted = body;
 
-  // KLARE SEND-PHRASEN – MASSIV ERWEITERT FÜR ROBUSTE ERKENNUNG
-  // Wenn einer dieser Begriffe im gesamten erkannten Text vorkommt: sendMode = "sendNow"
-  const autoSendTriggers = [
-    // Basis-Varianten
-    "sende",
-    "senden",
-    "schick sie",
-    "schick die mail",
-    "direkt raus",
-    "sofort raus",
-    "sofort senden",
-    "direkt senden",
-    "bitte abschicken",
-    "nachricht direkt los",
-    "nachricht direkt raus",
-    "mail direkt raus",
-    "ohne vorschau senden",
-    // Erweiterte Varianten
+  // Ersetze "Hi Name,\n" durch "Hi Name,\n\n" (wenn nicht bereits \n\n vorhanden)
+  // Regex: Match "Hi Name," oder "Hi," gefolgt von einem \n, aber nicht \n\n
+  const greetingWithName = /^(Hi\s+[^,\n]+,)\s*\n(?!\n)/m;
+  const greetingShort = /^(Hi,)\s*\n(?!\n)/m;
+
+  if (greetingWithName.test(formatted)) {
+    formatted = formatted.replace(greetingWithName, '$1\n\n');
+  } else if (greetingShort.test(formatted)) {
+    formatted = formatted.replace(greetingShort, '$1\n\n');
+  } else {
+    // Fallback: "Hi Name, " (mit Space) -> "Hi Name,\n\n"
+    const greetingWithNameSpace = /^(Hi\s+[^,\n]+,)\s+/m;
+    const greetingShortSpace = /^(Hi,)\s+/m;
+    
+    if (greetingWithNameSpace.test(formatted)) {
+      formatted = formatted.replace(greetingWithNameSpace, '$1\n\n');
+    } else if (greetingShortSpace.test(formatted)) {
+      formatted = formatted.replace(greetingShortSpace, '$1\n\n');
+    }
+  }
+
+  return formatted;
+}
+
+/**
+ * Zentrale Funktion zur Erkennung expliziter SendNow-Befehle mit Guards gegen False-Positives.
+ * Erweitert um Imperativ-Phrasen wie "sende ...", "schick ...", "lass ... wissen", etc.
+ */
+function isExplicitSendNowCommand(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+
+  // ============================================================
+  // GUARD: False-Positive Detection - MUST be checked FIRST
+  // ============================================================
+  const falsePositivePatterns = [
+    /\b(ich|wir)\s+(sende|send|senden|schicke|schicken)\b/i,
+    /\b(ich|wir)\s+(werde|wollen|wollten)\s+(senden|schicken)\b/i,
+    /\b(kannst|könntest|würdest|kann|könnte|würde)\s+du\s+.*\b(senden|schicken)\b/i,
+    /\b(bitte\s+)?an\s+mich\s+(senden|schicken)\b/i,
+    /\b(bitte\s+)?mir\s+(senden|schicken)\b/i,
+    /\b(sende|schick|schicke)\s+(dir|mir|uns|ihr|euch)\b/i,
+  ];
+
+  for (const pattern of falsePositivePatterns) {
+    if (pattern.test(normalized)) {
+      console.log("[autosend] excluded false-positive:", pattern);
+      return false;
+    }
+  }
+
+  // ============================================================
+  // Exact phrase matches (fast check) - bestehende Patterns
+  // ============================================================
+  const autoSendPhrases = [
+    "schick sie direkt raus",
+    "schick die nachricht direkt los",
+    "sende sie direkt raus",
+    "sende die nachricht sofort raus",
+    "schick sie sofort los",
+    "schick die email direkt raus",
+    "sende sie dann auch direkt zu ihm",
+    "sende sie dann auch direkt zu ihr",
+    "schick sie dann auch direkt zu ihm",
+    "schick sie dann auch direkt zu ihr",
+    "und schick sie direkt raus",
+    "und schicke sie direkt raus",
+    "und schick es direkt raus",
+    "und schicke es direkt raus",
+    "und schicke es dann auch direkt los",
+    "und schick es dann auch direkt los",
+    "und schick sie dann auch direkt los",
+    "und schicke sie dann auch direkt los",
+    "und sende sie dann auch direkt zu ihm",
+    "und sende sie direkt zu ihm",
+    "und sende sie direkt an ihn",
+    "und sende die email sofort raus",
+    "und sende die mail sofort raus",
     "schick sie sofort raus",
     "schicke sie sofort raus",
     "schick die mail sofort raus",
@@ -147,17 +214,136 @@ function shouldSendNowFromSourceText(sourceText?: string): boolean {
     "hau raus",
     "schick die nachricht direkt los",
     "schick die mail direkt los",
-    "schick sie direkt los"
+    "schick sie direkt los",
+    "direkt raus",
+    "sofort raus",
+    "sofort senden",
+    "direkt senden",
+    "bitte abschicken",
+    "nachricht direkt los",
+    "nachricht direkt raus",
+    "mail direkt raus",
+    "ohne vorschau senden",
   ];
 
-  for (const trigger of autoSendTriggers) {
-    if (normalized.includes(trigger)) {
-      console.log("[autosend] klare Autosend-Phrase erkannt:", trigger);
+  for (const phrase of autoSendPhrases) {
+    if (normalized.includes(phrase)) {
+      console.log("[autosend] matched exact phrase:", phrase);
+      return true;
+    }
+  }
+
+  // ============================================================
+  // Extended regex patterns - bestehende Patterns
+  // ============================================================
+  const extendedPatterns = [
+    /\bsende\s+sie\s+direkt\b/i,
+    /\bsende\s+sie\s+dann\s+direkt\b/i,
+    /\bsende\s+sie\s+direkt\s+zu\s+(?:ihm|ihr)\b/i,
+    /\bsende\s+die\s+nachricht\s+direkt\b/i,
+    /\bsende\s+es\s+direkt\b/i,
+    /\bsende\s+es\s+jetzt\s+direkt\b/i,
+    /\bschicke\s+es\s+direkt\b/i,
+    /\bschicke\s+sie\s+direkt\b/i,
+  ];
+
+  for (const pattern of extendedPatterns) {
+    if (pattern.test(normalized)) {
+      console.log("[autosend] matched extended pattern");
+      return true;
+    }
+  }
+
+  // ============================================================
+  // NEW: Imperative send/notify phrases
+  // ============================================================
+  // Check if text is in imperative context
+  const isImperativeContext = (txt: string): boolean => {
+    if (/^(sende|send|senden|schick|schicke|lass)\b/i.test(txt)) {
+      return true;
+    }
+    if (/\b(bitte\s+)?(sende|send|senden|schick|schicke)\b/i.test(txt) || 
+        /\b(sende|send|senden|schick|schicke)\s+bitte\b/i.test(txt)) {
+      return true;
+    }
+    if (/\blass\s+uns\b/i.test(txt)) {
+      return true;
+    }
+    return false;
+  };
+
+  // Imperative "sende/send/senden"
+  if (isImperativeContext(normalized)) {
+    const imperativeSendPatterns = [
+      /\b(sende|send|senden)\s+bitte\s+(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\b/i,
+      /\b(sende|send|senden)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
+      /\b(sende|send|senden)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
+      /\b(sende|send|senden)\b.*\b(?:direkt|sofort|jetzt)\b/i,
+    ];
+
+    for (const pattern of imperativeSendPatterns) {
+      if (pattern.test(normalized)) {
+        console.log("[autosend] matched imperative send pattern");
+        return true;
+      }
+    }
+  }
+
+  // Imperative "schick/schicke"
+  if (isImperativeContext(normalized)) {
+    const imperativeSchickPatterns = [
+      /\b(schick|schicke)\s+bitte\s+(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\b/i,
+      /\b(schick|schicke)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
+      /\b(schick|schicke)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
+    ];
+
+    for (const pattern of imperativeSchickPatterns) {
+      if (pattern.test(normalized)) {
+        console.log("[autosend] matched imperative schick pattern");
+        return true;
+      }
+    }
+  }
+
+  // Pattern: "lass <name> wissen" / "lass <name> bitte wissen"
+  const lassWissenPattern = /\blass\s+([a-zäöüß]+)\s+(?:bitte\s+)?wissen\b/i;
+  if (lassWissenPattern.test(normalized)) {
+    console.log("[autosend] matched 'lass <name> wissen' pattern");
+    return true;
+  }
+
+  // Pattern: "lass uns ... senden/abschicken/rausschicken"
+  const lassUnsSendenPattern = /\blass\s+uns\b.*\b(senden|abschicken|rausschicken|verschicken)\b/i;
+  if (lassUnsSendenPattern.test(normalized)) {
+    console.log("[autosend] matched 'lass uns ... senden' pattern");
+    return true;
+  }
+
+  // Pattern: "sende/schick ... direkt raus / sofort / jetzt"
+  const direktSofortPatterns = [
+    /\b(sende|schick|schicke)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
+    /\b(sende|schick|schicke)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
+  ];
+
+  for (const pattern of direktSofortPatterns) {
+    if (pattern.test(normalized)) {
+      console.log("[autosend] matched 'direkt/sofort' pattern");
       return true;
     }
   }
 
   return false;
+}
+
+/**
+ * Prüft, ob im sourceText eine klare "Sofort senden"-Phrase vorkommt.
+ * Nur wenn eine dieser Phrasen enthalten ist, erlauben wir sendMode = "sendNow".
+ * 
+ * Delegiert an isExplicitSendNowCommand für konsistente Erkennung.
+ */
+function shouldSendNowFromSourceText(sourceText?: string): boolean {
+  if (!sourceText) return false;
+  return isExplicitSendNowCommand(sourceText);
 }
 
 /**
@@ -780,6 +966,24 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // ============================================================
       // PHASE 1: Basis-Draft aus Intent erstellen (OHNE finalen Body-Style)
       // ============================================================
+      // AUFGABE B: Guard-Condition für Status-Brain - verhindert explicit-body Überschreibung VOR buildWizard4EmailFromInput
+      const emailIntentCheck: any = intent;
+      const intentSourceCheck = emailIntentCheck?.meta?.source;
+      const isStatusBrain = intentSourceCheck === "status-brain";
+      
+      // EXPLICIT BODY WINS: Prüfe zuerst, ob ein expliziter bodyHint vorhanden ist
+      const hasExplicitBody = !!(intent.bodyHint && intent.bodyHint.trim().length > 0);
+      
+      if (hasExplicitBody && !isStatusBrain) {
+        console.log('[wizard4][explicit-body] bodyHint present -> will skip template/ai draft', {
+          bodyHintPreview: intent.bodyHint.substring(0, 80)
+        });
+      } else if (isStatusBrain) {
+        console.log('[wizard4][explicit-body] skipped due to status-brain source (early guard)');
+      } else {
+        console.log('[wizard4][explicit-body] no bodyHint -> allow draft generator');
+      }
+      
       const rawText = lastTranscript || intent.bodyHint || intent.toRaw || "";
       let wizard4Draft: any = null;
       
@@ -792,7 +996,19 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             to: (intent as any)?.to,
             toRaw: (intent as any)?.toRaw,
             draftToEmail: (wizard4Draft as any)?.toEmail,
+            hasExplicitBody: hasExplicitBody && !isStatusBrain,
+            isStatusBrain: isStatusBrain,
           });
+          
+          // EXPLICIT BODY WINS: Wenn ein expliziter bodyHint vorhanden ist, überschreibe den generierten Body sofort
+          // ABER: NICHT bei Status-Brain (dort wird Body später mit aufgelöstem Namen gesetzt)
+          if (hasExplicitBody && !isStatusBrain) {
+            wizard4Draft.body = intent.bodyHint.trim();
+            console.log('[wizard4][explicit-body] Overwrote draft.body with explicit bodyHint', {
+              oldBodyPreview: (wizard4Draft.body || '').substring(0, 50),
+              newBodyPreview: intent.bodyHint.substring(0, 80)
+            });
+          }
           
           w.__fm_wizard4_last_draft = wizard4Draft;
         } catch (err) {
@@ -843,12 +1059,25 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         // Standard: immer erstmal auf "previewOnly"
         let sendMode: "previewOnly" | "sendNow" = "previewOnly";
         
-        // Generische AutoSend-Erkennung nur, wenn KEIN Free-Diktat
-        if (!freeDictationMeta) {
-          // 1. Prio: explizites AutoSend aus dem Intent-Meta
-          if (statusMeta?.autoSend) {
+        // FIX 4: PRIORITÄT 1 - Intent-Meta autoSend (für ALLE Intent-Typen, auch Free-Dictation)
+        // Dies muss ZUERST geprüft werden, damit es sich durchsetzt
+        if (emailIntent?.meta?.autoSend === true) {
+          // TASK 4: Pronoun safety - prevent AutoSend if toName is a pronoun
+          const currentToName = wizard4Draft?.toName || emailIntent?.toRaw || '';
+          if (currentToName && isInvalidRecipientToken(currentToName)) {
+            sendMode = "previewOnly";
+            console.log('[wizard4][safety-pronoun] AutoSend cancelled: pronoun detected in toName/toRaw:', currentToName);
+          } else {
             sendMode = "sendNow";
             console.log('[autosend] sendMode = sendNow (AutoSend aus Intent-Meta erkannt)');
+          }
+        }
+        // Generische AutoSend-Erkennung nur, wenn KEIN Free-Diktat UND keine Intent-Meta autoSend
+        else if (!freeDictationMeta) {
+          // 1. Prio: explizites AutoSend aus dem Status-Meta (für Status-Brain)
+          if (statusMeta?.autoSend) {
+            sendMode = "sendNow";
+            console.log('[autosend] sendMode = sendNow (AutoSend aus Status-Meta erkannt)');
           } else {
             // 2. Prio: bestehende Text-Trigger-Logik (massiv erweitert)
             if (shouldSendNowFromSourceText(wizard4Draft.sourceText)) {
@@ -860,9 +1089,9 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             }
           }
         }
-        
-        // A3.4 – Free-Dictation: AutoSend optional erlauben (nach allgemeiner Logik, damit es sich durchsetzt)
-        if (freeDictationMeta) {
+        // A3.4 – Free-Dictation: AutoSend optional erlauben (nur wenn Intent-Meta nicht bereits gesetzt)
+        else if (freeDictationMeta && emailIntent?.meta?.autoSend !== true) {
+          // Fallback: Prüfe freeDictationMeta.autoSend (für Rückwärtskompatibilität)
           // TASK 4: Pronoun safety - prevent AutoSend if toName is a pronoun
           const currentToName = wizard4Draft?.toName || emailIntent?.toRaw || '';
           if (freeDictationMeta.autoSend) {
@@ -872,7 +1101,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               console.log('[wizard4][safety-pronoun] AutoSend cancelled: pronoun detected in toName/toRaw:', currentToName);
             } else {
               sendMode = "sendNow";
-              console.log('[autosend][free-dictation] AutoSend aktiv (A3.4), sendMode = sendNow.');
+              console.log('[autosend][free-dictation] AutoSend aktiv (A3.4 via freeDictationMeta), sendMode = sendNow.');
             }
           } else {
             sendMode = "previewOnly";
@@ -1179,101 +1408,155 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
       
       // JETZT Body neu bauen mit finalen toName/toEmail (nach Resolver)
-      // Status-Gehirn hat Priorität - überschreibt den vorherigen Body mit korrekter Anrede
+      // EXPLICIT BODY WINS: Prüfe zuerst, ob ein expliziter bodyHint vorhanden ist
+      // Wenn ja, überspringe alle Template/Status-Gehirn-Logik
       if (wizard4Draft && wizard4Draft.sourceText) {
         const source = wizard4Draft.sourceText.trim();
         if (source) {
-          // Prüfe, ob es eine Status-Mail ist (via meta.statusEmail)
+          // AUFGABE B: Guard-Condition für Status-Brain - verhindert explicit-body Überschreibung
           const emailIntent: any = intent;
-          const statusMeta = emailIntent?.meta?.statusEmail;
-          const freeDictationMeta = emailIntent?.meta?.freeDictationMeta;
+          const intentSource = emailIntent?.meta?.source;
+          const statusBrain = emailIntent?.meta?.statusBrain;
           
-          // Sicherstellen, dass Anrede NIEMALS "Hi dem," wird
-          // Priorität: 1) Resolver-Name, 2) StatusMeta.toNameRaw (sauber extrahiert), 3) leer
-          const resolvedContactName = wizard4Draft.toName || "";
-          const toDisplayName = 
-            resolvedContactName ||
-            (statusMeta?.toNameRaw && statusMeta.toNameRaw.trim()) ||
-            (freeDictationMeta?.toNameRaw && freeDictationMeta.toNameRaw.trim()) ||
-            "";
-          
-          // A3.4 – Free-Diktat: Body 1:1 aus bodyHint übernehmen (kein Status-Gehirn)
-          // Free-Diktat hat IMMER Priorität vor Status-Logik
-          // Also handles "lass-uns" intents (which use the same freeDictationMeta structure)
-          if (freeDictationMeta) {
-            const freeDictationBody = freeDictationMeta.bodyText || intent.bodyHint || "";
-            if (freeDictationBody.trim().length > 0) {
-              wizard4Draft.body = freeDictationBody.trim();
-              const intentSource = (emailIntent as any)?.meta?.source || 'free-dictation';
-              console.debug('[fm-voice][wizard4][body] Free-Diktat Body 1:1 übernommen', { 
-                sourceText: wizard4Draft.sourceText, 
-                toName: wizard4Draft.toName, 
-                resolvedContactName,
-                toDisplayName,
-                body: wizard4Draft.body,
-                isFreeDictation: true,
-                intentSource: intentSource
-              });
+          // Status-Brain: Template-Body bereits in bodyHint, aber Name muss noch vom Contact Resolver gesetzt werden
+          if (intentSource === "status-brain" && statusBrain?.usedTemplate) {
+            // Status-Brain Template-Body verwenden, aber Name vom Contact Resolver übernehmen
+            const resolvedContactName = wizard4Draft.toName || "";
+            const templateBody = intent.bodyHint && intent.bodyHint.trim().length > 0 ? intent.bodyHint.trim() : "";
+            let finalBody = templateBody;
+            
+            if (resolvedContactName && finalBody) {
+              // Ersetze "Hi," durch "Hi {Name}," wenn Name vorhanden ist
+              // Wichtig: buildStatusEmailBody gibt bereits "Hi,\n\n..." zurück,
+              // also müssen wir das \n\n beim Ersetzen erhalten
+              finalBody = finalBody.replace(/^Hi,\s*\n\n/m, `Hi ${resolvedContactName},\n\n`);
+              // Fallback: Falls nur ein \n vorhanden ist (sollte nicht passieren, aber sicherheitshalber)
+              if (finalBody === templateBody && !finalBody.includes(`Hi ${resolvedContactName}`)) {
+                finalBody = finalBody.replace(/^Hi,\s*\n/m, `Hi ${resolvedContactName},\n\n`);
+              }
+              // Fallback: Falls kein \n vorhanden ist (sollte nicht passieren)
+              if (finalBody === templateBody && !finalBody.includes(`Hi ${resolvedContactName}`)) {
+                finalBody = finalBody.replace(/^Hi,\s+/m, `Hi ${resolvedContactName},\n\n`);
+              }
             }
-          }
-          // TASK 2: Also check for lass-uns intents that might not have freeDictationMeta
-          // (fallback for any edge cases)
-          else if ((emailIntent as any)?.meta?.source === 'lass-uns' && intent.bodyHint) {
-            const lassUnsBody = intent.bodyHint.trim();
-            if (lassUnsBody.length > 0) {
-              wizard4Draft.body = lassUnsBody;
-              console.debug('[fm-voice][wizard4][body] Lass-uns Body 1:1 übernommen', { 
-                sourceText: wizard4Draft.sourceText, 
-                toName: wizard4Draft.toName, 
-                resolvedContactName,
-                toDisplayName,
-                body: wizard4Draft.body,
-                isLassUns: true
-              });
-            }
-          }
-          // Verwende das neue Status-Gehirn für Status-Mails (nur wenn KEIN Free-Diktat)
-          else if (statusMeta?.isStatus && !freeDictationMeta) {
-            const statusResult = buildStatusEmailBody({
-              rawText: statusMeta.rawText || source,
-              statusText: statusMeta.statusText || undefined,
-              toDisplayName: toDisplayName || undefined,
+            
+            // FIX 2: Stelle sicher, dass nach "Hi Name," oder "Hi," eine Leerzeile kommt
+            // (formatGreetingBody ist defensiv und prüft nochmal, falls etwas schiefging)
+            finalBody = formatGreetingBody(finalBody);
+            
+            wizard4Draft.body = finalBody;
+            console.log('[status-brain][wizard4] Using Status-Brain template body with resolved name', {
+              toName: resolvedContactName,
+              category: statusBrain.category,
+              bodyPreview: finalBody.substring(0, 100)
             });
+            console.log('[wizard4][explicit-body] skipped due to status-brain source');
+          } else {
+            // EXPLICIT BODY WINS: Höchste Priorität - wenn expliziter bodyHint vorhanden, verwende diesen IMMER
+            // ABER: Nur wenn es NICHT von Status-Brain kommt
+            const explicitBodyHint = intent.bodyHint && intent.bodyHint.trim().length > 0 ? intent.bodyHint.trim() : null;
             
-            if (statusResult && statusResult.trim().length > 0) {
-              wizard4Draft.body = statusResult.trim();
-              console.debug('[fm-voice][wizard4][body] styled from Status-Gehirn nach Resolver', { 
-                sourceText: wizard4Draft.sourceText, 
-                toName: wizard4Draft.toName, 
-                resolvedContactName,
-                toDisplayName,
-                body: wizard4Draft.body,
-                isStatus: true
+            if (explicitBodyHint) {
+              // Expliziter bodyHint (nicht von Status-Brain) - direkt verwenden
+              wizard4Draft.body = explicitBodyHint;
+              console.log('[wizard4][explicit-body] Explicit bodyHint found -> skip template/ai draft, using bodyHint directly', {
+                bodyHintPreview: explicitBodyHint.substring(0, 100)
               });
+            } else {
+              // Nur wenn KEIN expliziter bodyHint vorhanden ist, verwende Template/Status-Gehirn
+              // Prüfe, ob es eine Status-Mail ist (via meta.statusEmail)
+              const emailIntent: any = intent;
+              const statusMeta = emailIntent?.meta?.statusEmail;
+              const freeDictationMeta = emailIntent?.meta?.freeDictationMeta;
+              
+              // Sicherstellen, dass Anrede NIEMALS "Hi dem," wird
+              // Priorität: 1) Resolver-Name, 2) StatusMeta.toNameRaw (sauber extrahiert), 3) leer
+              const resolvedContactName = wizard4Draft.toName || "";
+              const toDisplayName = 
+                resolvedContactName ||
+                (statusMeta?.toNameRaw && statusMeta.toNameRaw.trim()) ||
+                (freeDictationMeta?.toNameRaw && freeDictationMeta.toNameRaw.trim()) ||
+                "";
+              
+              // A3.4 – Free-Diktat: Body 1:1 aus bodyHint übernehmen (kein Status-Gehirn)
+              // Free-Diktat hat IMMER Priorität vor Status-Logik
+              // Also handles "lass-uns" intents (which use the same freeDictationMeta structure)
+              if (freeDictationMeta) {
+                const freeDictationBody = freeDictationMeta.bodyText || intent.bodyHint || "";
+                if (freeDictationBody.trim().length > 0) {
+                  wizard4Draft.body = freeDictationBody.trim();
+                  const intentSource = (emailIntent as any)?.meta?.source || 'free-dictation';
+                  console.debug('[fm-voice][wizard4][body] Free-Diktat Body 1:1 übernommen', { 
+                    sourceText: wizard4Draft.sourceText, 
+                    toName: wizard4Draft.toName, 
+                    resolvedContactName,
+                    toDisplayName,
+                    body: wizard4Draft.body,
+                    isFreeDictation: true,
+                    intentSource: intentSource
+                  });
+                }
+              }
+              // TASK 2: Also check for lass-uns intents that might not have freeDictationMeta
+              // (fallback for any edge cases)
+              else if ((emailIntent as any)?.meta?.source === 'lass-uns' && intent.bodyHint) {
+                const lassUnsBody = intent.bodyHint.trim();
+                if (lassUnsBody.length > 0) {
+                  wizard4Draft.body = lassUnsBody;
+                  console.debug('[fm-voice][wizard4][body] Lass-uns Body 1:1 übernommen', { 
+                    sourceText: wizard4Draft.sourceText, 
+                    toName: wizard4Draft.toName, 
+                    resolvedContactName,
+                    toDisplayName,
+                    body: wizard4Draft.body,
+                    isLassUns: true
+                  });
+                }
+              }
+              // Verwende das neue Status-Gehirn für Status-Mails (nur wenn KEIN Free-Diktat)
+              else if (statusMeta?.isStatus && !freeDictationMeta) {
+                const statusResult = buildStatusEmailBody({
+                  rawText: statusMeta.rawText || source,
+                  statusText: statusMeta.statusText || undefined,
+                  toDisplayName: toDisplayName || undefined,
+                });
+                
+                if (statusResult && statusResult.trim().length > 0) {
+                  wizard4Draft.body = statusResult.trim();
+                  console.debug('[fm-voice][wizard4][body] styled from Status-Gehirn nach Resolver', { 
+                    sourceText: wizard4Draft.sourceText, 
+                    toName: wizard4Draft.toName, 
+                    resolvedContactName,
+                    toDisplayName,
+                    body: wizard4Draft.body,
+                    isStatus: true
+                  });
+                }
+              }
+              // Fallback: Alte Logik für non-Status-Mails (nur wenn KEIN Free-Diktat)
+              else if (!freeDictationMeta) {
+                // Extrahiere bodyHint aus dem Intent (message-Feld)
+                const bodyHint = wizard4Draft.intent?.message || null;
+                
+                const statusResult = buildStatusEmailBody({
+                  rawText: source,
+                  statusText: bodyHint || null,
+                  toDisplayName: toDisplayName || undefined,
+                });
+                
+                if (statusResult && statusResult.trim().length > 0) {
+                  wizard4Draft.body = statusResult.trim();
+                  console.debug('[fm-voice][wizard4][body] styled from Status-Gehirn nach Resolver', { 
+                    sourceText: wizard4Draft.sourceText, 
+                    toName: wizard4Draft.toName,
+                    toDisplayName,
+                    body: wizard4Draft.body
+                  });
+                }
+              }
+              // Wenn Body leer ist, bleibt der vorhandene Body erhalten (Fallback)
             }
           }
-          // Fallback: Alte Logik für non-Status-Mails (nur wenn KEIN Free-Diktat)
-          else if (!freeDictationMeta) {
-            // Extrahiere bodyHint aus dem Intent (message-Feld)
-            const bodyHint = wizard4Draft.intent?.message || null;
-            
-            const statusResult = buildStatusEmailBody({
-              rawText: source,
-              statusText: bodyHint || null,
-              toDisplayName: toDisplayName || undefined,
-            });
-            
-            if (statusResult && statusResult.trim().length > 0) {
-              wizard4Draft.body = statusResult.trim();
-              console.debug('[fm-voice][wizard4][body] styled from Status-Gehirn nach Resolver', { 
-                sourceText: wizard4Draft.sourceText, 
-                toName: wizard4Draft.toName,
-                toDisplayName,
-                body: wizard4Draft.body
-              });
-            }
-          }
-          // Wenn Body leer ist, bleibt der vorhandene Body erhalten (Fallback)
         }
       }
       
@@ -1302,26 +1585,51 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         subject = "Kurze Info";
       }
       
-      // Body-Prio: 1) Wizard4-Body, 2) bodyHint, 3) leerer String
-      // Body IMMER aus dem Draft übernehmen, wenn vorhanden (unabhängig von sendMode)
-      // Bei Free-Diktat: Falls Draft-Body leer, bodyHint verwenden (1:1)
-      let bodyForUi =
-        typeof wizard4Draft?.body === "string" && wizard4Draft.body.trim().length > 0
+      // FIX: Final-Body-Zuweisung - bodyForUi MUSS hier definiert werden, damit es immer verfügbar ist
+      // AUFGABE B: Guard-Condition für Status-Brain - verhindert explicit-body Überschreibung
+      const emailIntentForBody: any = intent;
+      const intentSourceForBody = emailIntentForBody?.meta?.source;
+      
+      // FIX: bodyForUi MUSS hier definiert werden, damit es immer verfügbar ist (vor allen if-Blöcken)
+      let bodyForUi = "";
+      
+      if (intentSourceForBody === "status-brain") {
+        // Status-Brain: Verwende den bereits gesetzten Draft-Body (mit aufgelöstem Namen)
+        bodyForUi = typeof wizard4Draft?.body === "string" && wizard4Draft.body.trim().length > 0
           ? wizard4Draft.body
           : (intent.bodyHint ?? "").trim();
+        console.log('[wizard4][explicit-body] skipped due to status-brain source, using draft body');
+      } else {
+        // EXPLICIT BODY WINS: Prüfe zuerst, ob ein expliziter bodyHint vorhanden ist (nur bei Nicht-Status-Brain)
+        const explicitBodyHint = intent.bodyHint && intent.bodyHint.trim().length > 0 ? intent.bodyHint.trim() : null;
+        if (explicitBodyHint) {
+          bodyForUi = explicitBodyHint;
+          console.log('[wizard4][explicit-body] Using explicit bodyHint as final body', {
+            bodyPreview: bodyForUi.substring(0, 100)
+          });
+        } else {
+          // Fallback: Verwende Draft-Body, falls vorhanden
+          bodyForUi = typeof wizard4Draft?.body === "string" && wizard4Draft.body.trim().length > 0
+            ? wizard4Draft.body
+            : "";
+          
+          // Free-Diktat: Falls Body immer noch leer, direkt aus freeDictationMeta nehmen
+          // Also handles "lass-uns" intents (which use the same freeDictationMeta structure)
+          if (freeDictationMetaForSubject && (!bodyForUi || bodyForUi.trim().length === 0)) {
+            bodyForUi = freeDictationMetaForSubject.bodyText || "";
+            const intentSource = (emailIntentForSubject as any)?.meta?.source || 'free-dictation';
+            console.log('[fm-voice][wizard4][free-dictation] Body aus meta.freeDictationMeta.bodyText übernommen:', bodyForUi.substring(0, 80), 'source:', intentSource);
+          }
+          // TASK 2: Fallback for lass-uns intents without freeDictationMeta (edge case)
+          if (!freeDictationMetaForSubject && (emailIntentForSubject as any)?.meta?.source === 'lass-uns' && intent.bodyHint && (!bodyForUi || bodyForUi.trim().length === 0)) {
+            bodyForUi = intent.bodyHint;
+            console.log('[fm-voice][wizard4][lass-uns] Body aus intent.bodyHint übernommen:', bodyForUi.substring(0, 80));
+          }
+        }
+      }
       
-      // Free-Diktat: Falls Body immer noch leer, direkt aus freeDictationMeta nehmen
-      // Also handles "lass-uns" intents (which use the same freeDictationMeta structure)
-      if (freeDictationMetaForSubject && (!bodyForUi || bodyForUi.trim().length === 0)) {
-        bodyForUi = freeDictationMetaForSubject.bodyText || intent.bodyHint || "";
-        const intentSource = (emailIntentForSubject as any)?.meta?.source || 'free-dictation';
-        console.log('[fm-voice][wizard4][free-dictation] Body aus meta.freeDictationMeta.bodyText übernommen:', bodyForUi.substring(0, 80), 'source:', intentSource);
-      }
-      // TASK 2: Fallback for lass-uns intents without freeDictationMeta (edge case)
-      else if ((emailIntentForSubject as any)?.meta?.source === 'lass-uns' && intent.bodyHint && (!bodyForUi || bodyForUi.trim().length === 0)) {
-        bodyForUi = intent.bodyHint;
-        console.log('[fm-voice][wizard4][lass-uns] Body aus intent.bodyHint übernommen:', bodyForUi.substring(0, 80));
-      }
+      // FIX: Stelle sicher, dass bodyForUi IMMER ein String ist (defensive programming)
+      bodyForUi = (bodyForUi ?? "").toString();
       
       // Default-Body für sendNow wenn leer (damit AutoSend nicht wegen leerem Text scheitert)
       let body: string | null = bodyForUi;
@@ -1331,6 +1639,45 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         console.log('[fm-voice][wizard4] Default-Body gesetzt (sendNow, body leer)');
       } else {
         body = bodyForUi || null;
+      }
+      
+      // ============================================================
+      // POLISH FRÜH STARTEN: Starte Polish parallel, bevor UI gesetzt wird
+      // ============================================================
+      // Bevorzuge bodyHintRaw (Original mit Groß-/Kleinschreibung) über bodyHint (normalized)
+      const rawBodyForPolish = (intent.bodyHintRaw && intent.bodyHintRaw.trim().length > 0) 
+        ? intent.bodyHintRaw 
+        : (body || '');
+      
+      // Detect Status-Brain Quelle: KEIN Polish für Status-Brain Templates (sind bereits sauber)
+      // Wiederverwende isStatusBrain aus früherem Block, falls vorhanden, sonst neu berechnen
+      const intentSourceForPolish = (intent as any)?.meta?.source;
+      const isStatusBrainForPolish = intentSourceForPolish === "status-brain";
+      const hasStatusBrainTemplateForPolish = (intent as any)?.meta?.statusBrain?.usedTemplate === true;
+      
+      // Prüfe, ob wir polishen sollten
+      const shouldPolish = 
+        rawBodyForPolish.trim().length > 0 && 
+        wizard4Draft && 
+        !isStatusBrainForPolish && // Status-Brain Templates nicht polishen
+        !hasStatusBrainTemplateForPolish; // Doppelt sicher
+      
+      // Starte Polish früh (parallel), speichere Promise
+      let polishPromise: Promise<any> | null = null;
+      if (shouldPolish) {
+        const sendMode = wizard4Draft.sendMode || 'previewOnly';
+        const mode = sendMode === 'sendNow' ? 'sendNow' : 'previewOnly';
+        // Timeout: sendNow bekommt 3500ms (wie gefordert), previewOnly 3000ms
+        const timeoutMs = mode === 'sendNow' ? 3500 : 3000;
+        
+        console.log('[wizard4][ai-polish] Starte Polish früh (parallel)', { mode, timeoutMs, bodyLength: rawBodyForPolish.length });
+        polishPromise = polishEmailBody(rawBodyForPolish, { mode, timeoutMs });
+      } else {
+        if (isStatusBrainForPolish || hasStatusBrainTemplateForPolish) {
+          console.log('[wizard4][ai-polish] skipped - Status-Brain Template (kein Polish nötig)');
+        } else {
+          console.log('[wizard4][ai-polish] skipped - body empty or other reason');
+        }
       }
       
       // ============================================================
@@ -1348,134 +1695,251 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       showTransitionMessage("Bereite E-Mail vor …");
       triggerEmotion("idea");
       
+      // lastAction setzen für spätere KI-Integration
+      const recipient = finalToEmail || (wizard4Draft && wizard4Draft.toName) || "Unbekannt";
+      const description = `E-Mail an ${recipient}.`;
+      setLastAction({ kind: "email-compose", description });
+      
       // Warte kurz, damit die MailCompose-Komponente gemountet ist
-      setTimeout(() => {
-      // Setze E-Mail-Felder über Helper-Funktion mit Wizard4-Daten
-      applyEmailToComposeUI({
-        to: finalToEmail,
-        subject: subject,
-        body: body,
-        logPrefix: "[fm-voice] email-compose (Wizard4)",
-      });
-      
-      // Stelle sicher, dass finalToEmail IMMER gesetzt wird (auch wenn schon gesetzt)
-      if (finalToEmail && typeof w.__fm_set_mail_to === 'function') {
-        try {
-          w.__fm_set_mail_to(finalToEmail);
-          console.log('[fm-voice][wizard4] __fm_set_mail_to aufgerufen (vor AutoSend):', finalToEmail);
-        } catch (err) {
-          console.error('[fm-voice] Fehler beim Setzen von __fm_set_mail_to (vor AutoSend):', err);
+      setTimeout(async () => {
+        // ============================================================
+        // KI-POLISHING: Warte auf Polish (bei sendNow) oder nutze Ergebnis (bei previewOnly)
+        // WICHTIG: Bei sendNow wird hier AUSDRÜCKLICH auf Polish gewartet, bevor AutoSend startet
+        // ============================================================
+        // FIX: rawBodyForUi MUSS hier definiert werden für Logging (später verwendet)
+        // rawBodyForPolish ist bereits außerhalb des setTimeout definiert
+        const rawBodyForUi = rawBodyForPolish || body || '';
+        let finalBodyForUi = rawBodyForUi;
+        
+        // ROBUSTE POLISH+AutoSend Pipeline
+        if (polishPromise) {
+          try {
+            const sendMode = wizard4Draft.sendMode || 'previewOnly';
+            const isSendNow = sendMode === 'sendNow';
+            
+            let polishResult = await polishPromise;
+            
+            // Optionaler Retry bei sendNow + timeout
+            if (!polishResult.ok && polishResult.reason === 'timeout' && isSendNow) {
+              console.log('[wizard4][ai-polish] Timeout bei sendNow, versuche Retry mit kürzerem Prompt', { bodyLength: rawBodyForUi.length });
+              try {
+                polishResult = await polishEmailBody(rawBodyForUi, { mode: 'sendNow', timeoutMs: 6000, shortPrompt: true });
+              } catch (retryErr) {
+                console.warn('[wizard4][ai-polish] Retry fehlgeschlagen, verwende Original', retryErr);
+                // polishResult bleibt beim ursprünglichen Ergebnis (ok: false)
+              }
+            }
+            
+            if (polishResult.ok && polishResult.usedAi && polishResult.body.trim().length > 0) {
+              // Der Body wurde bereits in polishEmailBody sanitized, kann direkt verwendet werden
+              finalBodyForUi = polishResult.body;
+              console.log('[wizard4][ai-polish] body polished (nach await)', { 
+                sendMode, 
+                mode: isSendNow ? 'sendNow' : 'previewOnly',
+                originalLength: rawBodyForUi.length, 
+                polishedLength: finalBodyForUi.length
+              });
+            } else {
+              // Fallback: Verwende Original-Body
+              finalBodyForUi = rawBodyForUi;
+              
+              // Verbessertes Logging für Fallback
+              const logData: any = { 
+                sendMode, 
+                mode: isSendNow ? 'sendNow' : 'previewOnly',
+                reason: polishResult.reason || 'not used',
+                ok: polishResult.ok
+              };
+              
+              // Bei sendNow und sentWithoutPolish Flag deutlich loggen
+              if (isSendNow && polishResult.sentWithoutPolish === true) {
+                console.warn('[wizard4][ai-polish] fallback reason:', polishResult.reason, '-> sending without polish (sendNow=true)', logData);
+              } else {
+                console.log('[wizard4][ai-polish] skipped/fallback', logData);
+              }
+            }
+          } catch (err: any) {
+            // DEFENSIV: Bei jedem Fehler Fallback auf Original, keine Exceptions werfen
+            console.error('[wizard4][ai-polish] error during polishing, using original body:', err);
+            finalBodyForUi = rawBodyForUi; // Sicherstellen, dass finalBodyForUi gesetzt ist
+            
+            const sendMode = wizard4Draft.sendMode || 'previewOnly';
+            const isSendNow = sendMode === 'sendNow';
+            if (isSendNow) {
+              console.warn('[wizard4][ai-polish] fallback -> sending without polish (sendNow=true, exception occurred):', err.message || 'unknown');
+            }
+          }
         }
-      }
-      
-      // Zusätzliches Logging für Debugging
-      if (wizard4Draft) {
-        // Logge den FINALEN Body, der wirklich ins UI gesetzt wurde
-        const finalBody = body || '';
-        console.log('[fm-voice][wizard4] Email-Felder gesetzt:', {
+        
+        // ============================================================
+        // UI-UPDATE: Setze E-Mail-Felder (NACH Polishing, VOR AutoSend)
+        // WICHTIG: Bei sendNow wurde hier bereits auf Polish gewartet (await)
+        // ============================================================
+        // Edgecase: Prüfe, ob UI noch gemountet ist (nicht unmounted)
+        if (typeof window === 'undefined' || !w.__fm_set_mail_body) {
+          console.warn('[wizard4][ai-polish] UI unmounted oder __fm_set_mail_body nicht verfügbar, überspringe UI-Update und AutoSend');
+          return; // Beende den Callback, wenn UI nicht verfügbar
+        }
+        
+        // FIX: Stelle sicher, dass finalBodyForUi wirklich verwendet wird
+        // Aktualisiere auch body und wizard4Draft.body, damit AutoSend den polierten Body verwendet
+        body = finalBodyForUi;
+        if (wizard4Draft) {
+          wizard4Draft.body = finalBodyForUi;
+        }
+        
+        // Setze E-Mail-Felder über Helper-Funktion mit Wizard4-Daten (mit poliertem Body)
+        applyEmailToComposeUI({
           to: finalToEmail,
           subject: subject,
-          body: finalBody,
-          sendMode: wizard4Draft.sendMode,
-          toName: wizard4Draft.toName,
-          draftBody: wizard4Draft.body,
-          usedBodyHint: !wizard4Draft && !!intent.bodyHint
+          body: finalBodyForUi,
+          logPrefix: "[fm-voice] email-compose (Wizard4)",
         });
         
-        if (wizard4Draft.toName && !finalToEmail) {
-          console.log('[fm-voice][wizard4] Hinweis: Nur Name erkannt, keine E-Mail-Adresse:', wizard4Draft.toName);
+        // Stelle sicher, dass finalToEmail IMMER gesetzt wird (auch wenn schon gesetzt)
+        if (finalToEmail && typeof w.__fm_set_mail_to === 'function') {
+          try {
+            w.__fm_set_mail_to(finalToEmail);
+            console.log('[fm-voice][wizard4] __fm_set_mail_to aufgerufen (nach Polish, vor AutoSend):', finalToEmail);
+          } catch (err) {
+            console.error('[fm-voice] Fehler beim Setzen von __fm_set_mail_to (nach Polish, vor AutoSend):', err);
+          }
         }
-      }
-      
-      // -----------------------------
-      // AutoSend 4.0 – Wizard 4 (mit Retry-Logik)
-      // -----------------------------
-      try {
-        const canAutoSend =
-          WIZARD4_AUTOSEND_ENABLED &&
-          wizard4Draft &&
-          wizard4Draft.sendMode === 'sendNow' &&
-          typeof w.__fm_send_mail_now === 'function' &&
-          safeAutoSendEmail !== null;
         
-        if (canAutoSend) {
-          console.log('[fm-voice][wizard4] AutoSend: starte Retry-Logik.', {
-            to: safeAutoSendEmail,
-            subject: wizard4Draft.subject,
+        // Zusätzliches Logging für Debugging
+        if (wizard4Draft) {
+          // Logge den FINALEN Body, der wirklich ins UI gesetzt wurde (inkl. Polishing)
+          console.log('[fm-voice][wizard4] Email-Felder gesetzt (nach Polish, vor AutoSend):', {
+            to: finalToEmail,
+            subject: subject,
+            body: finalBodyForUi,
             sendMode: wizard4Draft.sendMode,
+            toName: wizard4Draft.toName,
+            draftBody: wizard4Draft.body,
+            usedBodyHint: !wizard4Draft && !!intent.bodyHint,
+            usedBodyHintRaw: !wizard4Draft && !!intent.bodyHintRaw,
+            bodyPolished: finalBodyForUi !== rawBodyForUi
           });
           
-          // Retry-Logik: Warte bis Empfänger wirklich im UI steht
-          let retryCount = 0;
-          const maxRetries = 5;
+          if (wizard4Draft.toName && !finalToEmail) {
+            console.log('[fm-voice][wizard4] Hinweis: Nur Name erkannt, keine E-Mail-Adresse:', wizard4Draft.toName);
+          }
+        }
+        
+        // -----------------------------
+        // AutoSend 4.0 – Wizard 4 (mit Retry-Logik)
+        // WICHTIG: Startet NACH Polishing (await wurde bereits abgewartet)
+        // -----------------------------
+        try {
+          // Edgecase: Prüfe nochmal, ob UI noch verfügbar ist (UI könnte zwischenzeitlich unmounted sein)
+          if (typeof window === 'undefined' || !w.__fm_send_mail_now) {
+            console.warn('[wizard4][autosend] UI unmounted oder __fm_send_mail_now nicht verfügbar, überspringe AutoSend');
+            return;
+          }
           
-          const trySend = () => {
-            // Stelle sicher, dass safeAutoSendEmail im UI steht
-            if (safeAutoSendEmail && typeof w.__fm_set_mail_to === 'function') {
+          const canAutoSend =
+            WIZARD4_AUTOSEND_ENABLED &&
+            wizard4Draft &&
+            wizard4Draft.sendMode === 'sendNow' &&
+            typeof w.__fm_send_mail_now === 'function' &&
+            safeAutoSendEmail !== null;
+          
+          if (canAutoSend) {
+            console.log('[fm-voice][wizard4] AutoSend: starte Retry-Logik (NACH Polish).', {
+              to: safeAutoSendEmail,
+              subject: wizard4Draft.subject,
+              sendMode: wizard4Draft.sendMode,
+              bodyLength: finalBodyForUi.length,
+              bodyPolished: finalBodyForUi !== rawBodyForUi
+            });
+            
+            // Retry-Logik: Warte bis Empfänger wirklich im UI steht
+            let retryCount = 0;
+            const maxRetries = 5;
+            
+            const trySend = () => {
               try {
-                w.__fm_set_mail_to(safeAutoSendEmail);
-                console.log('[fm-voice][wizard4] AutoSend: safeAutoSendEmail ins UI gesetzt:', safeAutoSendEmail);
-              } catch (err) {
-                console.error('[fm-voice][wizard4] AutoSend: Fehler beim Setzen von safeAutoSendEmail:', err);
+                // Stelle sicher, dass safeAutoSendEmail im UI steht
+                if (safeAutoSendEmail && typeof w.__fm_set_mail_to === 'function') {
+                  try {
+                    w.__fm_set_mail_to(safeAutoSendEmail);
+                    console.log('[fm-voice][wizard4] AutoSend: safeAutoSendEmail ins UI gesetzt:', safeAutoSendEmail);
+                  } catch (err) {
+                    console.error('[fm-voice][wizard4] AutoSend: Fehler beim Setzen von safeAutoSendEmail:', err);
+                  }
+                }
+                
+                const currentTo = (typeof w.__fm_get_mail_to === 'function') ? String(w.__fm_get_mail_to() || '') : '';
+                
+                if (currentTo && currentTo.includes('@')) {
+                  console.log('[fm-voice][wizard4] AutoSend: Empfänger steht im UI, sende jetzt.', { currentTo, safeAutoSendEmail, bodyLength: finalBodyForUi.length });
+                  didAutoSend = true;
+                  
+                  // DEFENSIV: Wrappe __fm_send_mail_now in try/catch, um Crashes zu verhindern
+                  try {
+                    if (typeof w.__fm_send_mail_now === 'function') {
+                      w.__fm_send_mail_now();
+                      console.log('[fm-voice][wizard4] AutoSend: __fm_send_mail_now erfolgreich aufgerufen');
+                    } else {
+                      console.error('[fm-voice][wizard4] AutoSend: __fm_send_mail_now ist keine Funktion');
+                    }
+                  } catch (sendErr: any) {
+                    console.error('[fm-voice][wizard4] AutoSend: Fehler beim Aufruf von __fm_send_mail_now:', sendErr);
+                    // Fallback: Zeige prepared-Nachricht
+                    PartnerBotBus.say("E-Mail konnte nicht automatisch gesendet werden. Bitte manuell senden.");
+                  }
+                } else if (retryCount < maxRetries) {
+                  retryCount++;
+                  console.log('[fm-voice][wizard4] AutoSend: Empfänger noch nicht im UI, retry in 200ms.', { 
+                    currentTo, 
+                    retryCount, 
+                    maxRetries,
+                    safeAutoSendEmail
+                  });
+                  setTimeout(trySend, 200);
+                } else {
+                  console.warn('[fm-voice][wizard4] AutoSend: Abbruch nach', maxRetries, 'Retries. Empfänger nicht im UI gesetzt.', { 
+                    currentTo,
+                    expectedTo: safeAutoSendEmail
+                  });
+                  // AutoSend fehlgeschlagen, zeige prepared-Nachricht
+                  if (!didAutoSend) {
+                    PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
+                  }
+                }
+              } catch (err: any) {
+                // DEFENSIV: Fange alle Exceptions ab, damit kein "Uncaught (in promise)" auftritt
+                console.error('[fm-voice][wizard4] AutoSend: Unerwarteter Fehler in trySend:', err);
+                if (!didAutoSend) {
+                  PartnerBotBus.say("E-Mail vorbereitet. Bitte prüfen und manuell senden.");
+                }
               }
-            }
+            };
             
-            const currentTo = (typeof w.__fm_get_mail_to === 'function') ? String(w.__fm_get_mail_to() || '') : '';
-            
-            if (currentTo && currentTo.includes('@')) {
-              console.log('[fm-voice][wizard4] AutoSend: Empfänger steht im UI, sende jetzt.', { currentTo, safeAutoSendEmail });
-              didAutoSend = true;
-              w.__fm_send_mail_now();
-            } else if (retryCount < maxRetries) {
-              retryCount++;
-              console.log('[fm-voice][wizard4] AutoSend: Empfänger noch nicht im UI, retry in 200ms.', { 
-                currentTo, 
-                retryCount, 
-                maxRetries,
-                safeAutoSendEmail
-              });
-              setTimeout(trySend, 200);
-            } else {
-              console.warn('[fm-voice][wizard4] AutoSend: Abbruch nach', maxRetries, 'Retries. Empfänger nicht im UI gesetzt.', { 
-                currentTo,
-                expectedTo: safeAutoSendEmail
-              });
-              // AutoSend fehlgeschlagen, zeige prepared-Nachricht
-              if (!didAutoSend) {
-                PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
-              }
+            // Starte Retry-Logik nach kurzer Verzögerung
+            setTimeout(trySend, 150);
+          } else {
+            console.log('[fm-voice][wizard4] AutoSend nicht ausgeführt.', {
+              autosendEnabled: WIZARD4_AUTOSEND_ENABLED,
+              hasDraft: !!wizard4Draft,
+              sendMode: wizard4Draft ? wizard4Draft.sendMode : null,
+              hasSafeAutoSendEmail: safeAutoSendEmail !== null,
+              hasSendFn: typeof w.__fm_send_mail_now === 'function',
+            });
+            // AutoSend nicht ausgeführt, zeige prepared-Nachricht
+            if (!didAutoSend) {
+              PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
             }
-          };
-          
-          // Starte Retry-Logik nach kurzer Verzögerung
-          setTimeout(trySend, 150);
-        } else {
-          console.log('[fm-voice][wizard4] AutoSend nicht ausgeführt.', {
-            autosendEnabled: WIZARD4_AUTOSEND_ENABLED,
-            hasDraft: !!wizard4Draft,
-            sendMode: wizard4Draft ? wizard4Draft.sendMode : null,
-            hasSafeAutoSendEmail: safeAutoSendEmail !== null,
-            hasSendFn: typeof w.__fm_send_mail_now === 'function',
-          });
-          // AutoSend nicht ausgeführt, zeige prepared-Nachricht
+          }
+        } catch (err) {
+          console.error('[fm-voice][wizard4] Fehler beim AutoSend:', err);
+          // Bei Fehler zeige prepared-Nachricht
           if (!didAutoSend) {
             PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
           }
         }
-      } catch (err) {
-        console.error('[fm-voice][wizard4] Fehler beim AutoSend:', err);
-        // Bei Fehler zeige prepared-Nachricht
-        if (!didAutoSend) {
-          PartnerBotBus.say("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
-        }
-      }
-    }, 100);
-    
-    // lastAction setzen für spätere KI-Integration
-    const recipient = finalToEmail || (wizard4Draft && wizard4Draft.toName) || "Unbekannt";
-    const description = `E-Mail an ${recipient}.`;
-    setLastAction({ kind: "email-compose", description });
-    })(); // Ende des async IIFE
+      }, 100);
+    })();
     return;
   }
 

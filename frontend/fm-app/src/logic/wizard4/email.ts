@@ -319,6 +319,20 @@ function generateWizard4Body(draft: Wizard4EmailDraft): string {
   const currentBody =
     typeof draft.body === "string" ? draft.body : draft.body ? String(draft.body) : "";
 
+  // EXPLICIT BODY WINS: Wenn bereits ein expliziter Body vorhanden ist (aus VoiceIntent.bodyHint),
+  // überspringe Template-Generierung und verwende den vorhandenen Body
+  // Ein expliziter Body erkennt man daran, dass er nicht leer ist und nicht dem Standard-Template entspricht
+  const hasExplicitBody = currentBody && currentBody.trim().length > 0 && 
+    !currentBody.includes("ich wollte dir nur kurz Bescheid geben") &&
+    !currentBody.includes("Moin,");
+  
+  if (hasExplicitBody) {
+    console.log('[wizard4][explicit-body][email.ts] Existing explicit body detected -> skip template generation', {
+      bodyPreview: currentBody.substring(0, 80)
+    });
+    return currentBody.trim();
+  }
+
   let body = currentBody.trim();
 
   // 1) Prüfe, ob es eine Status-Mail ist (via meta.statusEmail)
@@ -372,6 +386,19 @@ function generateWizard4Body(draft: Wizard4EmailDraft): string {
  * Generiert/ensured den Body für einen Wizard4-Draft
  */
 export function ensureWizard4Body(draft: Wizard4EmailDraft): void {
+  // EXPLICIT BODY WINS: Wenn bereits ein expliziter Body vorhanden ist, nicht überschreiben
+  const currentBody = draft.body && typeof draft.body === "string" ? draft.body.trim() : "";
+  const hasExplicitBody = currentBody.length > 0 && 
+    !currentBody.includes("ich wollte dir nur kurz Bescheid geben") &&
+    !currentBody.includes("Moin,");
+  
+  if (hasExplicitBody) {
+    console.log('[wizard4][explicit-body][email.ts] ensureWizard4Body: explicit body found -> skip generation', {
+      bodyPreview: currentBody.substring(0, 80)
+    });
+    return;
+  }
+  
   // ruft nur generateWizard4Body auf, wenn der Body noch nicht gebaut wurde
   if (!draft.body || `${draft.body}`.trim().length === 0 || draft.sourceText) {
     generateWizard4Body(draft);
