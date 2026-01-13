@@ -1,6 +1,5 @@
 import { parseIntentDE } from "./intent";
 import { voiceState } from "./state";
-import { speak } from "./tts";
 import { recordAndTranscribe } from "../stt";
 import { PartnerBotBus } from "../partnerbot";
 import { triggerEmotion } from "../partnerbot/partnerbot_emotion";
@@ -16,6 +15,7 @@ import { generateWizard4Body } from "../../logic/wizard4/body";
 import { buildWizard4EmailFromInput } from "../../logic/wizard4/email";
 import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 import { polishEmailBody } from "../../logic/wizard4/email_polish";
+import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
 
 declare global {
   interface Window {
@@ -1731,8 +1731,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             }
             
             if (polishResult.ok && polishResult.usedAi && polishResult.body.trim().length > 0) {
-              // Der Body wurde bereits in polishEmailBody sanitized, kann direkt verwendet werden
-              finalBodyForUi = polishResult.body;
+              // Der Body wurde bereits in polishEmailBody sanitized, normalisiere zusätzlich
+              const polished = polishResult.body;
+              finalBodyForUi = normalizeEmailBodyAfterPolish(polished);
+              console.debug("[wizard4][ai-polish][normalize] before:", polished.substring(0, 100));
+              console.debug("[wizard4][ai-polish][normalize] after:", finalBodyForUi.substring(0, 100));
               console.log('[wizard4][ai-polish] body polished (nach await)', { 
                 sendMode, 
                 mode: isSendNow ? 'sendNow' : 'previewOnly',
@@ -1969,6 +1972,119 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       return;
     }
     PartnerBotBus.say(`Deine letzte Aktion war: ${last.description}`);
+    return;
+  }
+
+  if (intent.type === "email-append") {
+    console.log("[email-append] append intent detected", intent);
+    
+    const w = window as any;
+    
+    // PRECONDITION: Check if draft exists
+    if (typeof w.__fm_get_mail_body !== 'function') {
+      console.warn('[email-append] __fm_get_mail_body not available, aborting');
+      // Fallback to normal behavior
+      triggerEmotion("error");
+      PartnerBotBus.say("Ich kann keinen E-Mail-Text anhängen, da keine E-Mail geöffnet ist.");
+      return;
+    }
+
+    const currentBody = w.__fm_get_mail_body();
+    if (!currentBody || typeof currentBody !== 'string' || currentBody.trim().length === 0) {
+      console.log('[email-append] detected but no draft active -> ignore');
+      // Do NOT fall through to fm-ai - return safely
+      triggerEmotion("error");
+      PartnerBotBus.say("Ich kann keinen Text anhängen, da keine E-Mail geöffnet ist.");
+      return;
+    }
+
+    const appendText = intent.payload.appendText;
+    if (!appendText || appendText.trim().length === 0) {
+      console.warn('[email-append] appendText is empty, doing nothing');
+      return;
+    }
+
+    console.log('[email-append] appendText extracted:', appendText.substring(0, 50));
+    console.log('[email-append] currentBody length=' + currentBody.length);
+
+    // Handle append asynchronously (polish the appended text)
+    (async () => {
+      try {
+        // Determine separator: if current body ends with punctuation or newline, add double newline, else space
+        const trimmedBody = currentBody.trim();
+        const endsWithPunctuation = /[.!?]$/.test(trimmedBody);
+        const endsWithNewline = /\n$/.test(currentBody);
+        const separator = (endsWithPunctuation || endsWithNewline) ? '\n\n' : ' ';
+
+        // Polish ONLY the appended text
+        const polishResult = await polishEmailBody(appendText, { mode: 'previewOnly', timeoutMs: 3000 });
+        const polishedAppend = polishResult.ok && polishResult.usedAi ? polishResult.body : appendText;
+
+        // Merge: currentBody + separator + polishedAppend
+        const finalBody = trimmedBody + separator + polishedAppend.trim();
+
+        console.log('[email-append] appended length=' + polishedAppend.length);
+        console.log('[email-append] finalBody length=' + finalBody.length);
+
+        // Update UI
+        if (typeof w.__fm_set_mail_body === 'function') {
+          w.__fm_set_mail_body(finalBody);
+          console.log('[email-append] body updated in UI');
+        }
+
+        // finalOnly flag: if autosend is triggered, only speak final message
+        const finalOnly = intent.meta?.autoSend === true;
+
+        if (finalOnly) {
+          console.log("[email-append][tts] suppress intermediate tts because autoSend=true");
+        }
+
+        // AutoSend if requested (AFTER body is set)
+        if (intent.meta?.autoSend && typeof w.__fm_send_mail_now === 'function') {
+          console.log('[email-append] autosend triggered');
+          
+          // Wait to ensure body is set in UI (use existing retry logic pattern)
+          let retryCount = 0;
+          const maxRetries = 5;
+          
+          const trySend = () => {
+            try {
+              const currentBodyCheck = typeof w.__fm_get_mail_body === 'function' ? w.__fm_get_mail_body() : '';
+              if (currentBodyCheck && currentBodyCheck.includes(polishedAppend.substring(0, 20))) {
+                // Body seems to be set, try sending
+                w.__fm_send_mail_now();
+                console.log('[email-append] autosend executed');
+                
+                // VOICE SUPPRESSED: MailCompose will announce on success
+                console.log("[email-append][voice] send triggered -> voice suppressed; MailCompose will announce on success");
+              } else if (retryCount < maxRetries) {
+                retryCount++;
+                setTimeout(trySend, 200);
+              } else {
+                console.warn('[email-append] autosend: body not set after retries, sending anyway');
+                w.__fm_send_mail_now();
+                
+                // VOICE SUPPRESSED: MailCompose will announce on success
+                console.log("[email-append][voice] send triggered -> voice suppressed; MailCompose will announce on success");
+              }
+            } catch (err: any) {
+              console.error('[email-append] autosend error:', err);
+            }
+          };
+          
+          setTimeout(trySend, 200);
+        } else {
+          // PreviewOnly: speak success message (no suppression needed)
+          triggerEmotion("success");
+          PartnerBotBus.say("Text hinzugefügt.");
+        }
+      } catch (err: any) {
+        console.error('[email-append] error:', err);
+        triggerEmotion("error");
+        PartnerBotBus.say("Fehler beim Hinzufügen des Textes.");
+      }
+    })();
+
     return;
   }
 

@@ -180,11 +180,11 @@ Gib NUR den korrigierten E-Mail-Body zurück, ohne Erklärungen, ohne Labels, oh
       console.log('[email-polish] quality-guard applied');
     }
 
-    // Sanitize: Entferne Meta-Wörter wie "Senden.", "Betreff:", "An:" etc.
+    // Sanitize: Entferne Meta-Wörter wie "Senden.", "Betreff:", "An:" etc. UND Command-Artefakte wie "Schreiben."
     const beforeSanitize = polishedBody;
     polishedBody = sanitizePolishedEmailBody(polishedBody);
     if (beforeSanitize !== polishedBody) {
-      console.log('[ai-polish][sanitize] removed leading meta-tokens', {
+      console.log('[ai-polish][sanitize] removed leading meta-tokens/command-artifacts', {
         beforeLength: beforeSanitize.length,
         afterLength: polishedBody.length,
         removed: beforeSanitize.substring(0, 50)
@@ -240,6 +240,77 @@ Gib NUR den korrigierten E-Mail-Body zurück, ohne Erklärungen, ohne Labels, oh
 }
 
 /**
+ * Entfernt führende Command-Artefakte wie "Schreiben.", "Senden.", "Schick." etc.
+ * @param text - Text zum Bereinigen
+ * @returns Text ohne führende Command-Artefakte
+ */
+function stripLeadingCommandArtifact(text: string): string {
+  if (!text || typeof text !== 'string') {
+    return text || '';
+  }
+
+  let cleaned = text.trim();
+  let maxIterations = 2; // Safety: Maximal 2x hintereinander strip
+  let iteration = 0;
+
+  while (iteration < maxIterations) {
+    const before = cleaned;
+    
+    // Entferne NUR am Anfang ein einzelnes Kommando-Wort mit optionalem Punkt/Komma/Doppelpunkt/Bindestrich dahinter
+    // Pattern: "Schreiben." / "Senden." / "Schick." / "Schicke." / "Mail." / "Mailen." / "Nachricht." etc.
+    cleaned = cleaned.replace(/^\s*(senden|schreiben|schick|schicke|mail|mailen|nachricht)\s*[\.\:\-,]\s+/i, '');
+    
+    // Trim links nach jedem Strip
+    cleaned = cleaned.trimLeft();
+    
+    // Wenn nichts entfernt wurde, breche ab
+    if (before === cleaned) {
+      break;
+    }
+    
+    iteration++;
+  }
+
+  return cleaned;
+}
+
+/**
+ * Normalisiert E-Mail-Body nach AI-Polish: Entfernt Command-Artefakte und Meta-Sätze vor Greetings
+ * @param text - Polierter Body-Text
+ * @returns Normalisierter Body-Text
+ */
+export function normalizeEmailBodyAfterPolish(text: string): string {
+  if (!text || typeof text !== 'string') {
+    return text || '';
+  }
+
+  let t = text.trimStart();
+
+  // STEP 1: Remove simple leading commands (wie bisher)
+  t = stripLeadingCommandArtifact(t);
+
+  // STEP 2: Greeting-Anker-Strip
+  // Suche erste Begrüßung im Text
+  const greetingRegex = /\b(hi|hey|hallo|guten\s+morgen|guten\s+tag|guten\s+abend|moin|servus)\b/i;
+  const greetingMatch = t.match(greetingRegex);
+
+  if (greetingMatch && greetingMatch.index !== undefined && greetingMatch.index > 0) {
+    const greetingIndex = greetingMatch.index;
+    const prefix = t.slice(0, greetingIndex).trim();
+    const bodyFromGreeting = t.slice(greetingIndex).trimStart();
+
+    // Bedingung zum Abschneiden:
+    // - prefix.length <= 120
+    // - und prefix enthält eines: /(schreib|sende|send|mail|nachricht|los)\b/i
+    if (prefix.length <= 120 && /(schreib|sende|send|mail|nachricht|los)\b/i.test(prefix)) {
+      t = bodyFromGreeting;
+    }
+  }
+
+  return t;
+}
+
+/**
  * Sanitized polierten E-Mail-Body: Entfernt Meta-Wörter wie "Senden.", "Betreff:", "An:" etc.
  * @param text - Polierter Body-Text
  * @returns Sanitized Body-Text ohne Meta-Wörter
@@ -251,7 +322,10 @@ function sanitizePolishedEmailBody(text: string): string {
 
   let sanitized = text.trim();
 
-  // Entferne führende Meta-Zeilen/Token (case-insensitive, deutsch/englisch)
+  // STEP 1: Entferne führende Command-Artefakte (z.B. "Schreiben.", "Senden.", "Schick.")
+  sanitized = stripLeadingCommandArtifact(sanitized);
+
+  // STEP 2: Entferne führende Meta-Zeilen/Token (case-insensitive, deutsch/englisch)
   // Pattern a): "Senden." / "Send." / "Verschieken." etc. (mit Punkt/Doppelpunkt/Bindestrich/Gedankenstrich)
   sanitized = sanitized.replace(/^\s*(senden|send|verschicken|abschicken|sende)\s*[\.\:\-–—]\s*/i, '');
 
@@ -336,6 +410,11 @@ if (typeof process !== 'undefined' && (process.env.NODE_ENV === 'development' ||
   function runSanitizerTests() {
     const testCases = [
       { input: "Senden. Hi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
+      { input: "Schreiben. Hi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
+      { input: "Schreiben: Hi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
+      { input: "Senden: Hi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
+      { input: "Schick. Hi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
+      { input: "Schick: Hi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
       { input: "Betreff: Test\nHi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
       { input: "An: Thomas\nHi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },
       { input: "  SEND: Hi Thomas, hier ist Dennis.", expected: "Hi Thomas, hier ist Dennis." },

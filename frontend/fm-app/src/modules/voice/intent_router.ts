@@ -16,6 +16,7 @@ export type Wizard3OneShotPayload = {
 export type VoiceIntent =
   | { type: "navigate"; target: "control-center" | "lead-radar" | "leads" | "mail-compose" | "voice-diagnostics" }
   | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; bodyHintRaw?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean }; statusBrain?: { category: StatusCategory; usedTemplate: boolean }; freeDictationMeta?: FreeDictationMeta; source?: string; autoSend?: boolean } }
+  | { type: "email-append"; meta?: { autoSend?: boolean }; payload: { appendText: string } }
   | { type: "wizard3-one-shot"; payload: Wizard3OneShotPayload }
   | { type: "wizard2-edit-anrede"; newAnrede: string }
   | { type: "wizard2-edit-subject"; newSubject: string }
@@ -2440,11 +2441,14 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   // Spezial-Route: ALLE Sätze mit "schreib ..."
   // Diese Route muss FRÜH kommen, damit sie vor anderen email-compose-Intents greift
   // Erkennt ALLE Varianten: "schreib dem ...", "schreib Freiraum ...", "schreib thomas ...", etc.
+  // BUT: Skip if it's an append trigger ("schreib noch dazu")
+  const isAppendTrigger = /^schreib\s+noch\s+dazu\s*/i.test(text);
   if (
-    text.startsWith("schreib ") ||
+    !isAppendTrigger &&
+    (text.startsWith("schreib ") ||
     text.startsWith("schreibe ") ||
     text.startsWith("schreib mal ") ||
-    text.startsWith("schreibe mal ")
+    text.startsWith("schreibe mal "))
   ) {
     console.log(
       "[intent-router][intent-4.2] Umgangssprache-Mail erkannt:",
@@ -2646,6 +2650,132 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   ) {
     console.log("[fm-voice] routeVoiceIntent -> email-preview");
     return { type: "email-preview" };
+  }
+
+  // ============================================================
+  // EMAIL-APPEND: Text an bestehenden E-Mail-Draft anhängen
+  // MUST run BEFORE wizard2 to prevent "schreib noch dazu" from being caught by wizard2-rewrite-body
+  // ============================================================
+  {
+    const appendTriggers = [
+      // Full forms with "noch"
+      /^füge\s+noch\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+noch\s+hinzu\s*[:.]?\s*/i, // umlaut-less
+      /^fuge\s+bitte\s+noch\s+hinzu\s*[:.]?\s*/i, // "fuge bitte noch hinzu"
+      /^ergänze\s+noch\s*[:.]?\s*/i,
+      /^erganze\s+noch\s*[:.]?\s*/i, // umlaut-less
+      /^erganze\s+bitte\s+noch\s*[:.]?\s*/i, // "erganze bitte noch"
+      /^häng\s+noch\s+dran\s*[:.]?\s*/i,
+      /^hang\s+noch\s+dran\s*[:.]?\s*/i, // umlaut-less
+      /^schreib\s+noch\s+dazu\s*[:.]?\s*/i,
+      /^und\s+außerdem\s*[:.]?\s*/i,
+      /^und\s+ausserdem\s*[:.]?\s*/i, // umlaut-less
+      // Short forms (without "noch")
+      /^füge\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+hinzu\s*[:.]?\s*/i, // umlaut-less
+      /^ergänze\s*[:.]?\s*/i,
+      /^erganze\s*[:.]?\s*/i, // umlaut-less
+      // Extended synonyms
+      /^erganze\s+das\s+um\s*[:.]?\s*/i, // "erganze das um"
+      /^erweitere\s+das\s+um\s*[:.]?\s*/i, // "erweitere das um"
+      /^pack\s+noch\s+dazu\s*[:.]?\s*/i, // "pack noch dazu"
+      /^setz\s+noch\s+dahinter\s*[:.]?\s*/i, // "setz noch dahinter"
+      /^mach\s+noch\s+dazu\s*[:.]?\s*/i, // "mach noch dazu"
+      /^hau\s+noch\s+dran\s*[:.]?\s*/i, // "hau noch dran"
+    ];
+
+    let matchedTrigger: RegExpMatchArray | null = null;
+    let triggerIndex = -1;
+
+    for (const trigger of appendTriggers) {
+      const match = text.match(trigger);
+      if (match) {
+        matchedTrigger = match;
+        triggerIndex = match.index! + match[0].length;
+        break;
+      }
+    }
+
+    if (matchedTrigger && triggerIndex >= 0) {
+      console.log('[email-append] detected');
+
+      // Extract appendText from ORIGINAL text (preserve capitalization)
+      // Find corresponding position in original text
+      const normalizedTriggerMatch = text.match(matchedTrigger[0].toLowerCase());
+      let originalTriggerIndex = -1;
+      if (normalizedTriggerMatch) {
+        // Find the trigger in original text (case-insensitive search)
+        const triggerPattern = new RegExp(matchedTrigger[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        const originalMatch = original.match(triggerPattern);
+        if (originalMatch && originalMatch.index !== undefined) {
+          originalTriggerIndex = originalMatch.index + originalMatch[0].length;
+        }
+      }
+
+      // Fallback: use normalized index if original match fails
+      const extractIndex = originalTriggerIndex >= 0 ? originalTriggerIndex : triggerIndex;
+      let appendText = original.substring(extractIndex).trim();
+      
+      // Trim punctuation/leading commas/colons
+      appendText = appendText.replace(/^[,.:;!?\s]+/, '').trim();
+
+      // Detect AutoSend phrases (MUST be done BEFORE sanitization, use normalized for detection)
+      const normalizedAppendText = appendText.toLowerCase();
+      const sendTriggers = [
+        /\bund\s+schick\s+es\s+ab\b/i,
+        /\bund\s+sende\s+es\b/i,
+        /\bund\s+sende\s+es\s+jetzt\b/i,
+        /\bund\s+raus\s+damit\b/i,
+        /\bund\s+schick\s+es\s+(?:jetzt|sofort)\s*(?:ab|raus)?\b/i,
+        /\bund\s+sende\s+(?:es|sie)\s+(?:jetzt|sofort|ab|raus)\b/i,
+        /\bsofort\s+raus\b/i, // "sofort raus" standalone
+      ];
+
+      let hasAutoSend = false;
+      for (const sendTrigger of sendTriggers) {
+        if (sendTrigger.test(normalizedAppendText)) {
+          hasAutoSend = true;
+          break;
+        }
+      }
+
+      // AGGRESSIVE Sanitization: Remove send-trigger phrases from appendText
+      // These words MUST NEVER appear in the email body
+      appendText = appendText
+        .replace(/\s*und\s+schick\s+es\s+ab\s*/gi, '')
+        .replace(/\s*und\s+sende\s+es\s*(?:jetzt|sofort)?\s*/gi, '')
+        .replace(/\s*und\s+raus\s+damit\s*/gi, '')
+        .replace(/\s*und\s+schick\s+es\s+(?:jetzt|sofort)?\s*(?:ab|raus)?\s*/gi, '')
+        .replace(/\bsofort\s+raus\b/gi, '') // Remove "sofort raus" standalone
+        .replace(/\bsenden\b/gi, '')
+        .replace(/\bsend\b/gi, '')
+        .replace(/\bschick\s+es\b/gi, '')
+        .replace(/\braus\s+damit\b/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (appendText.length > 0) {
+        const intent: VoiceIntent = {
+          type: "email-append",
+          meta: {
+            autoSend: hasAutoSend,
+          },
+          payload: {
+            appendText: appendText,
+          },
+        };
+
+        console.log('[email-append] appendText=' + appendText.substring(0, 50) + (appendText.length > 50 ? '...' : ''));
+        console.log('[email-append] autoSend=' + hasAutoSend);
+
+        return intent;
+      } else {
+        // If appendText is empty after sanitization, do NOT create intent
+        // This prevents fallthrough to fm-ai
+        console.log('[email-append] detected but appendText empty after extraction, ignoring');
+        return { type: "unknown" }; // Return unknown instead of falling through to ai-chat
+      }
+    }
   }
 
   // 5) Wizard2-Intents (Anrede/Betreff/Text bearbeiten)

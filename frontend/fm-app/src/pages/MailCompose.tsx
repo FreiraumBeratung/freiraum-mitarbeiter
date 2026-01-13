@@ -2,6 +2,19 @@ import React, { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { PartnerBotBus } from "../components/PartnerBot";
 
+// sayOnce Guard: Prevents duplicate "E-Mail wurde versendet" announcements
+// Cooldown: 1200ms (only for mail_sent key)
+let __fm_lastSayAt = { mail_sent: 0 };
+function sayOnceMailSent(fnSpeak: () => void) {
+  const now = Date.now();
+  if (now - __fm_lastSayAt.mail_sent < 1200) {
+    console.log("[fm-mail][voice] sayOnce: suppressing duplicate mail_sent announcement (cooldown)");
+    return;
+  }
+  __fm_lastSayAt.mail_sent = now;
+  fnSpeak();
+}
+
 declare global {
   interface Window {
     __fm_set_mail_body?: (text: string) => void;
@@ -78,8 +91,8 @@ export default function MailCompose() {
 
       const data = await response.json().catch(() => ({} as any));
       console.log("[fm-mail] Mailversand erfolgreich", data);
-      // HINWEIS: Nur EINE TTS-Ausgabe beim erfolgreichen Versand
-      PartnerBotBus.say("Die E-Mail wurde versendet.");
+      // HINWEIS: Nur EINE TTS-Ausgabe beim erfolgreichen Versand (mit sayOnce Guard)
+      sayOnceMailSent(() => PartnerBotBus.say("Die E-Mail wurde versendet."));
       // Sanfte, nicht-blockierende UI-Notification statt alert()
       setSuccessMessage("E-Mail wurde erfolgreich gesendet.");
       // Nach 4 Sekunden automatisch ausblenden
