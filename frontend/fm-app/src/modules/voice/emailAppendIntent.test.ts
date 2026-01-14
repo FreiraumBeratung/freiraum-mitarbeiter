@@ -188,7 +188,24 @@ describe('email-append Intent Detection', () => {
     });
   });
 
-  describe('Case 5: Extended synonyms', () => {
+  describe('Case 5: Extended synonyms (including "folgendes")', () => {
+    it('should detect "Füge noch folgendes hinzu. Thomas, kannst du bitte Pizza morgen mitbringen?"', () => {
+      const input = 'Füge noch folgendes hinzu. Thomas, kannst du bitte Pizza morgen mitbringen?';
+      const result = routeVoiceIntent(input);
+      expect(result.type).toBe('email-append');
+      if (result.type === 'email-append') {
+        expect(result.payload.appendText.toLowerCase()).toContain('thomas, kannst du bitte pizza morgen mitbringen');
+      }
+    });
+
+    it('should detect "fuge noch folgendes hinzu ps ich melde mich später"', () => {
+      const input = 'fuge noch folgendes hinzu ps ich melde mich später';
+      const result = routeVoiceIntent(input);
+      expect(result.type).toBe('email-append');
+      if (result.type === 'email-append') {
+        expect(result.payload.appendText.toLowerCase()).toContain('ps ich melde mich später');
+      }
+    });
     it('should detect "fuge bitte noch hinzu ps ich melde mich später"', () => {
       const input = 'fuge bitte noch hinzu ps ich melde mich später';
       const result = routeVoiceIntent(input);
@@ -328,6 +345,79 @@ describe('email-append Intent Detection', () => {
         // Voice suppression happens in index.ts, not in intent_router
         // This test ensures the intent structure is correct
       }
+    });
+  });
+
+  describe('Case 8: "hänge noch an" trigger (STT tolerance for "anruf")', () => {
+    it('should detect "Hänge noch anruf mich bitte, Thomas." as email-append', () => {
+      const input = 'Hänge noch anruf mich bitte, Thomas.';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-append');
+      if (result.type === 'email-append') {
+        expect(result.payload.appendText.toLowerCase()).toContain('ruf mich bitte');
+        expect(result.payload.appendText.toLowerCase()).toContain('thomas');
+        expect(result.meta?.autoSend).toBe(false);
+      }
+    });
+
+    it('should handle "häng noch anruf mich bitte, Thomas." (without "e")', () => {
+      const input = 'häng noch anruf mich bitte, Thomas.';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-append');
+      if (result.type === 'email-append') {
+        expect(result.payload.appendText.toLowerCase()).toContain('ruf mich bitte');
+      }
+    });
+  });
+
+  describe('Case 9: email-send guard (content detection)', () => {
+    // Note: These tests require email context (lastAction), which may not be available in unit tests
+    // The guard logic is tested indirectly through integration tests
+    it('should NOT route "Schick die Mail direkt los." as email-append (no content)', () => {
+      const input = 'Schick die Mail direkt los.';
+      const result = routeVoiceIntent(input);
+      
+      // Without email context, this should be email-send
+      // (The guard only works when lastAction indicates email context)
+      expect(result.type).toBe('email-send');
+    });
+  });
+
+  describe('Case 10: AutoSend detection with "schickt" (STT 3. Person)', () => {
+    it('should detect autosend for "erganze noch bring was zu trinken mit und schickt die mail direkt los"', () => {
+      const input = 'erganze noch bring was zu trinken mit und schickt die mail direkt los';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-append');
+      if (result.type === 'email-append') {
+        expect(result.meta?.autoSend).toBe(true);
+        expect(result.payload.appendText.toLowerCase()).toContain('bring was zu trinken mit');
+        // "und schickt die mail direkt los" should be stripped from appendText
+        expect(result.payload.appendText.toLowerCase()).not.toContain('schickt');
+      }
+    });
+  });
+
+  describe('Case 11: Override email-send for append+autosend', () => {
+    it('should route "erganze noch bring was zu trinken mit und schick die mail direkt los" as email-append (not email-send)', () => {
+      const input = 'erganze noch bring was zu trinken mit und schick die mail direkt los';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-append');
+      expect(result.type).not.toBe('email-send');
+      if (result.type === 'email-append') {
+        expect(result.meta?.autoSend).toBe(true);
+        expect(result.payload.appendText.toLowerCase()).toContain('bring was zu trinken mit');
+      }
+    });
+
+    it('should keep "schick die mail direkt los" as email-send (no append trigger)', () => {
+      const input = 'schick die mail direkt los';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-send');
     });
   });
 });

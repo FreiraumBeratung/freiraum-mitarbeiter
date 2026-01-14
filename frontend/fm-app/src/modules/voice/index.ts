@@ -2043,6 +2043,17 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         if (intent.meta?.autoSend && typeof w.__fm_send_mail_now === 'function') {
           console.log('[email-append] autosend triggered');
           
+          // Check if recipient exists (required for AutoSend)
+          const currentTo = typeof w.__fm_get_mail_to === 'function' ? String(w.__fm_get_mail_to() || '') : '';
+          
+          if (!currentTo || !currentTo.includes('@')) {
+            console.warn('[email-append] autosend: no recipient found, skipping AutoSend');
+            // PreviewOnly: speak success message
+            triggerEmotion("success");
+            PartnerBotBus.say("Text hinzugefügt.");
+            return;
+          }
+          
           // Wait to ensure body is set in UI (use existing retry logic pattern)
           let retryCount = 0;
           const maxRetries = 5;
@@ -2050,8 +2061,10 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           const trySend = () => {
             try {
               const currentBodyCheck = typeof w.__fm_get_mail_body === 'function' ? w.__fm_get_mail_body() : '';
-              if (currentBodyCheck && currentBodyCheck.includes(polishedAppend.substring(0, 20))) {
-                // Body seems to be set, try sending
+              const currentToCheck = typeof w.__fm_get_mail_to === 'function' ? String(w.__fm_get_mail_to() || '') : '';
+              
+              if (currentBodyCheck && currentBodyCheck.includes(polishedAppend.substring(0, 20)) && currentToCheck && currentToCheck.includes('@')) {
+                // Body and recipient are set, try sending
                 w.__fm_send_mail_now();
                 console.log('[email-append] autosend executed');
                 
@@ -2061,7 +2074,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                 retryCount++;
                 setTimeout(trySend, 200);
               } else {
-                console.warn('[email-append] autosend: body not set after retries, sending anyway');
+                console.warn('[email-append] autosend: body/recipient not set after retries, sending anyway');
                 w.__fm_send_mail_now();
                 
                 // VOICE SUPPRESSED: MailCompose will announce on success

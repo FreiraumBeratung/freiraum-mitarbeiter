@@ -133,6 +133,31 @@ function normalizeRecipient(raw: string): string {
 }
 
 /**
+ * Entfernt AutoSend-Phrasen am Ende des appendText (z.B. "und schick sie direkt los").
+ * Arbeitet auf RAW-Text, um sauberes Stripping zu ermöglichen.
+ */
+function stripAutoSendFromAppendText(raw: string): string {
+  if (!raw) return raw;
+  let s = String(raw);
+
+  // Entferne typische Autosend-Enden komplett (inkl. "und" davor)
+  // Beispiele:
+  // "..., und schick sie direkt los."
+  // "..., schick es jetzt ab"
+  // "..., sende sie sofort"
+  // "..., und sende das jetzt"
+  const re =
+    /(\s*(?:,|\.)?\s*(?:und\s+)?)\b(schick(?:e|en)?|sende(?:n)?|schicke(?:n)?|versend(?:e|en)?|schick(?:t)?)\b[\s\S]*?\b(direkt\s+los|sofort|jetzt|gleich|ab(?:senden)?|raus)\b\s*\.?\s*$/i;
+
+  // nur am Ende strippen (damit wir nicht mitten im Satz etwas entfernen)
+  if (re.test(s.trim())) {
+    s = s.replace(re, "");
+  }
+
+  return s.trim();
+}
+
+/**
  * Prüft, ob ein Sprachbefehl eine E-Mail mit Inhalt beschreibt (Wizard3-OneShot).
  * Erkennt sowohl klassische Befehle ("Schreibe X eine Mail wegen Y") als auch lockere Formulierungen
  * ("Meine Freiraum Beratung mit web.de eine Mail. Es geht um Pizza.").
@@ -2063,12 +2088,12 @@ function detectExtendedAutoSend(normalized: string): boolean {
     }
   }
 
-  // Pattern B: Imperative "schick/schicke"
+  // Pattern B: Imperative "schick/schicke/schickt" (schickt = STT 3. Person, toleriert als Imperativ-Variante)
   if (isImperativeContext(text)) {
     const imperativeSchickPatterns = [
-      /\b(schick|schicke)\s+bitte\s+(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\b/i,
-      /\b(schick|schicke)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
-      /\b(schick|schicke)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
+      /\b(schick|schicke|schickt)\s+bitte\s+(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\b/i,
+      /\b(schick|schicke|schickt)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
+      /\b(schick|schicke|schickt)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
     ];
 
     for (const pattern of imperativeSchickPatterns) {
@@ -2093,10 +2118,10 @@ function detectExtendedAutoSend(normalized: string): boolean {
     return true;
   }
 
-  // Pattern E: "sende/schick ... direkt raus / sofort / jetzt"
+  // Pattern E: "sende/schick/schickt ... direkt raus / sofort / jetzt"
   const direktSofortPatterns = [
-    /\b(sende|schick|schicke)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
-    /\b(sende|schick|schicke)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
+    /\b(sende|schick|schicke|schickt)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
+    /\b(sende|schick|schicke|schickt)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
   ];
 
   for (const pattern of direktSofortPatterns) {
@@ -2598,6 +2623,87 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     return { type: "last-action" };
   }
 
+  // ============================================================
+  // OVERRULE: Append+AutoSend Detection VOR email-send
+  // Verhindert, dass "Ergänze noch bring ... und schick die Mail direkt los" als email-send gematched wird
+  // ============================================================
+  {
+    // Check if text contains append triggers
+    const appendTriggers = [
+      /^füge\s+noch\s+folgendes\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+noch\s+folgendes\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+bitte\s+noch\s+folgendes\s+hinzu\s*[:.]?\s*/i,
+      /^füge\s+noch\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+noch\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+bitte\s+noch\s+hinzu\s*[:.]?\s*/i,
+      /^ergänze\s+noch\s*[:.]?\s*/i,
+      /^erganze\s+noch\s*[:.]?\s*/i,
+      /^erganze\s+bitte\s+noch\s*[:.]?\s*/i,
+      /^häng\s+noch\s+dran\s*[:.]?\s*/i,
+      /^hang\s+noch\s+dran\s*[:.]?\s*/i,
+      /^häng(?:e|en)?\s+(?:bitte\s+)?(?:noch\s+)?an/i,
+      /^hang(?:e|en)?\s+(?:bitte\s+)?(?:noch\s+)?an/i,
+      /^schreib\s+noch\s+dazu\s*[:.]?\s*/i,
+      /^füge\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+hinzu\s*[:.]?\s*/i,
+      /^ergänze\s*[:.]?\s*/i,
+      /^erganze\s*[:.]?\s*/i,
+    ];
+    
+    let matchedAppendTrigger: RegExpMatchArray | null = null;
+    let appendTriggerIndex = -1;
+    
+    for (const trigger of appendTriggers) {
+      const match = text.match(trigger);
+      if (match) {
+        matchedAppendTrigger = match;
+        appendTriggerIndex = match.index! + match[0].length;
+        break;
+      }
+    }
+    
+    if (matchedAppendTrigger && appendTriggerIndex >= 0) {
+      // Append trigger found - check for AutoSend
+      const hasAutoSendLike = detectExtendedAutoSend(text);
+      
+      if (hasAutoSendLike) {
+        // Extract appendText candidate (similar to email-append block)
+        const normalizedTriggerMatch = text.match(matchedAppendTrigger[0].toLowerCase());
+        let originalTriggerIndex = -1;
+        if (normalizedTriggerMatch) {
+          const triggerPattern = new RegExp(matchedAppendTrigger[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+          const originalMatch = original.match(triggerPattern);
+          if (originalMatch && originalMatch.index !== undefined) {
+            originalTriggerIndex = originalMatch.index + originalMatch[0].length;
+          }
+        }
+        
+        const extractIndex = originalTriggerIndex >= 0 ? originalTriggerIndex : appendTriggerIndex;
+        let appendTextRaw = original.substring(extractIndex).trim();
+        appendTextRaw = appendTextRaw.replace(/^[,.:;!?\s]+/, '').trim();
+        
+        // Strip AutoSend phrases
+        let content = stripAutoSendFromAppendText(appendTextRaw);
+        content = content.trim();
+        
+        if (content.length >= 8) {
+          console.log("[email-append][override-send] append+autosend detected -> routing to email-append", { contentPreview: content.slice(0, 60) });
+          
+          const intent: VoiceIntent = {
+            type: "email-append",
+            meta: {
+              autoSend: true,
+            },
+            payload: {
+              appendText: content,
+            },
+          };
+          return intent;
+        }
+      }
+    }
+  }
+
   // --- E-Mail Senden / Vorschau ---
   // Beispiele:
   // "sende die mail"
@@ -2636,6 +2742,48 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   ];
 
   if (SEND_PATTERNS.some((p) => text.includes(p))) {
+    // Guard: Wenn AutoSend-Phrase matched UND Inhalt vorhanden ist, dann email-append statt email-send
+    try {
+      const { getLastAction } = require("./voice_action_store");
+      const lastAction = getLastAction();
+      const isEmailContext = lastAction && (lastAction.kind === "email-compose" || lastAction.kind === "email-append");
+      
+      if (isEmailContext) {
+        // Prüfe auf AutoSend-Phrasen (die auch in email-append verwendet werden)
+        const hasAutoSendPhrase = /schick.*(?:die\s+)?(?:mail|email).*direkt\s+los|sende.*(?:die\s+)?(?:mail|email).*direkt|schick.*direkt\s+(?:los|raus)|sende.*direkt\s+(?:los|raus)/i.test(text);
+        
+        if (hasAutoSendPhrase) {
+          // Extrahiere Content-Kandidat (ohne Send-Phrase)
+          let contentCandidate = stripAutoSendFromAppendText(original);
+          
+          // Entferne leichte Füllwörter am Anfang/Ende
+          contentCandidate = contentCandidate
+            .replace(/^(bitte|die\s+mail|mail|e-mail|email|jetzt|sofort|gleich)\s+/i, '')
+            .replace(/\s+(bitte|die\s+mail|mail|e-mail|email|jetzt|sofort|gleich)$/i, '')
+            .trim();
+          
+          // Wenn noch substantieller Inhalt vorhanden ist (>= 12 Zeichen), dann email-append
+          if (contentCandidate.length >= 12) {
+            console.log("[fm-voice] email-send guard: content detected, routing as email-append", { contentCandidate: contentCandidate.substring(0, 50) });
+            
+            // Route als email-append mit AutoSend
+            const intent: VoiceIntent = {
+              type: "email-append",
+              meta: {
+                autoSend: true,
+              },
+              payload: {
+                appendText: contentCandidate,
+              },
+            };
+            return intent;
+          }
+        }
+      }
+    } catch {
+      // getLastAction nicht verfügbar, fallback zu email-send
+    }
+    
     console.log("[fm-voice] intent matched: email-send", { normalizedText: text });
     return { type: "email-send" };
   }
@@ -2658,6 +2806,10 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   // ============================================================
   {
     const appendTriggers = [
+      // Full forms with "noch" and "folgendes"
+      /^füge\s+noch\s+folgendes\s+hinzu\s*[:.]?\s*/i,
+      /^fuge\s+noch\s+folgendes\s+hinzu\s*[:.]?\s*/i, // umlaut-less
+      /^fuge\s+bitte\s+noch\s+folgendes\s+hinzu\s*[:.]?\s*/i, // "fuge bitte noch folgendes hinzu"
       // Full forms with "noch"
       /^füge\s+noch\s+hinzu\s*[:.]?\s*/i,
       /^fuge\s+noch\s+hinzu\s*[:.]?\s*/i, // umlaut-less
@@ -2667,6 +2819,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       /^erganze\s+bitte\s+noch\s*[:.]?\s*/i, // "erganze bitte noch"
       /^häng\s+noch\s+dran\s*[:.]?\s*/i,
       /^hang\s+noch\s+dran\s*[:.]?\s*/i, // umlaut-less
+      /^häng(?:e|en)?\s+(?:bitte\s+)?(?:noch\s+)?an/i, // "hänge noch an", "häng an", "hänge anruf..." (ohne \b für "anruf" tolerance)
+      /^hang(?:e|en)?\s+(?:bitte\s+)?(?:noch\s+)?an/i, // umlaut-less (ohne "n" in "hang")
       /^schreib\s+noch\s+dazu\s*[:.]?\s*/i,
       /^und\s+außerdem\s*[:.]?\s*/i,
       /^und\s+ausserdem\s*[:.]?\s*/i, // umlaut-less
@@ -2714,15 +2868,17 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
       // Fallback: use normalized index if original match fails
       const extractIndex = originalTriggerIndex >= 0 ? originalTriggerIndex : triggerIndex;
-      let appendText = original.substring(extractIndex).trim();
+      let appendTextRaw = original.substring(extractIndex).trim();
       
       // Trim punctuation/leading commas/colons
-      appendText = appendText.replace(/^[,.:;!?\s]+/, '').trim();
+      appendTextRaw = appendTextRaw.replace(/^[,.:;!?\s]+/, '').trim();
 
       // Detect AutoSend phrases (MUST be done BEFORE sanitization, use normalized for detection)
-      const normalizedAppendText = appendText.toLowerCase();
+      const normalizedAppendText = appendTextRaw.toLowerCase();
       const sendTriggers = [
-        /\bund\s+schick\s+es\s+ab\b/i,
+        /\bund\s+schick(?:t|e)?\s+(?:es|sie|die\s+(?:mail|email))\s+(?:direkt\s+)?(?:los|ab|raus)\b/i,
+        /\bund\s+schick(?:t|e)?\s+es\s+ab\b/i,
+        /\bund\s+sende\s+(?:es|sie)\s+(?:direkt\s+)?(?:los|ab|raus)\b/i,
         /\bund\s+sende\s+es\b/i,
         /\bund\s+sende\s+es\s+jetzt\b/i,
         /\bund\s+raus\s+damit\b/i,
@@ -2739,17 +2895,24 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         }
       }
 
-      // AGGRESSIVE Sanitization: Remove send-trigger phrases from appendText
+      // Strip AutoSend phrases from appendText using robust helper
+      let appendText = stripAutoSendFromAppendText(appendTextRaw);
+
+      // Fallback: AGGRESSIVE Sanitization if helper didn't catch everything
       // These words MUST NEVER appear in the email body
       appendText = appendText
+        .replace(/\s*und\s+schick\s+(?:es|sie)\s+(?:direkt\s+)?(?:los|ab|raus)\s*/gi, '')
+        .replace(/\s*und\s+schicke\s+(?:es|sie)\s+(?:direkt\s+)?(?:los|ab|raus)\s*/gi, '')
         .replace(/\s*und\s+schick\s+es\s+ab\s*/gi, '')
+        .replace(/\s*und\s+sende\s+(?:es|sie)\s+(?:direkt\s+)?(?:los|ab|raus)\s*/gi, '')
         .replace(/\s*und\s+sende\s+es\s*(?:jetzt|sofort)?\s*/gi, '')
         .replace(/\s*und\s+raus\s+damit\s*/gi, '')
         .replace(/\s*und\s+schick\s+es\s+(?:jetzt|sofort)?\s*(?:ab|raus)?\s*/gi, '')
+        .replace(/\s*und\s+sende\s+(?:es|sie)\s+(?:jetzt|sofort|ab|raus)\s*/gi, '')
         .replace(/\bsofort\s+raus\b/gi, '') // Remove "sofort raus" standalone
         .replace(/\bsenden\b/gi, '')
         .replace(/\bsend\b/gi, '')
-        .replace(/\bschick\s+es\b/gi, '')
+        .replace(/\bschick\s+(?:es|sie)\b/gi, '')
         .replace(/\braus\s+damit\b/gi, '')
         .replace(/\s+/g, ' ')
         .trim();
