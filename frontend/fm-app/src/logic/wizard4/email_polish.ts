@@ -257,8 +257,8 @@ function stripLeadingCommandArtifact(text: string): string {
     const before = cleaned;
     
     // Entferne NUR am Anfang ein einzelnes Kommando-Wort mit optionalem Punkt/Komma/Doppelpunkt/Bindestrich dahinter
-    // Pattern: "Schreiben." / "Senden." / "Schick." / "Schicke." / "Mail." / "Mailen." / "Nachricht." etc.
-    cleaned = cleaned.replace(/^\s*(senden|schreiben|schick|schicke|mail|mailen|nachricht)\s*[\.\:\-,]\s+/i, '');
+    // Pattern: "Schreiben." / "Senden." / "Schick." / "Schicke." / "Mail." / "Mailen." / "Nachricht." / "Zukommen." etc.
+    cleaned = cleaned.replace(/^\s*(senden|schreiben|schick|schicke|mail|mailen|nachricht|zukommen)\s*[\.\:\-,]\s+/i, '');
     
     // Trim links nach jedem Strip
     cleaned = cleaned.trimLeft();
@@ -291,23 +291,41 @@ export function normalizeEmailBodyAfterPolish(text: string): string {
 
   // STEP 2: Greeting-Anker-Strip
   // Suche erste Begrüßung im Text
-  const greetingRegex = /\b(hi|hey|hallo|guten\s+morgen|guten\s+tag|guten\s+abend|moin|servus)\b/i;
+  // Pattern: (^|[\n\r\s]) erlaubt Zeilenanfang oder Whitespace davor
+  const greetingRegex = /(^|[\n\r\s])((hi|hallo|hey|guten\s+tag|guten\s+morgen|guten\s+abend|moin|servus)\b)/i;
   const greetingMatch = t.match(greetingRegex);
 
-  if (greetingMatch && greetingMatch.index !== undefined && greetingMatch.index > 0) {
-    const greetingIndex = greetingMatch.index;
-    const prefix = t.slice(0, greetingIndex).trim();
-    const bodyFromGreeting = t.slice(greetingIndex).trimStart();
+  if (greetingMatch && greetingMatch.index !== undefined) {
+    // greetingMatch.index zeigt auf den Start von (^|[\n\r\s])
+    // greetingMatch[2] ist das eigentliche Greeting ("hi", "hallo", etc.)
+    // Finde den Start des Greetings (nach optionalem Whitespace)
+    let greetingIndex = greetingMatch.index;
+    // Wenn das Match mit Whitespace beginnt, startet das Greeting direkt danach
+    if (greetingMatch[1] && greetingMatch[1].trim() === '') {
+      // Whitespace gefunden, Greeting startet direkt danach
+      greetingIndex = greetingMatch.index + greetingMatch[1].length;
+    }
+    
+    if (greetingIndex > 0) {
+      const prefix = t.slice(0, greetingIndex).trim();
+      const bodyFromGreeting = t.slice(greetingIndex).trimStart();
 
-    // Bedingung zum Abschneiden:
-    // - prefix.length <= 120
-    // - und prefix enthält eines: /(schreib|sende|send|mail|nachricht|los)\b/i
-    if (prefix.length <= 120 && /(schreib|sende|send|mail|nachricht|los)\b/i.test(prefix)) {
-      t = bodyFromGreeting;
+      // Bedingung zum Abschneiden:
+      // - prefix.length <= 160 (wie in Anforderung)
+      // - und prefix enthält Command-Wörter (inkl. "zukommen")
+      const cmdRe = /\b(schreib(?:e|en)?|schreibe|mail|e-?mail|email|nachricht|sende(?:n)?|send|versende(?:n)?|schick(?:e|en|t)?|verschick(?:en)?|los|direkt|sofort|zukommen|zukommen\s+lassen)\b/i;
+      
+      if (prefix.length > 0 && prefix.length <= 160 && cmdRe.test(prefix)) {
+        // Entferne alles vor dem Greeting
+        let cleaned = bodyFromGreeting;
+        // Zusätzlich leading punctuation entfernen:
+        cleaned = cleaned.replace(/^[,.\-–—:;]+\s*/g, "");
+        return cleaned.trim();
+      }
     }
   }
 
-  return t;
+  return t.trim();
 }
 
 /**

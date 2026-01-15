@@ -63,6 +63,32 @@ describe('append_autosend_strip', () => {
         expect(result.payload.appendText.toLowerCase()).not.toMatch(/und\s+sch/i);
       }
     });
+
+    it('should remove "und sende es sofort los" from appendText', () => {
+      const input = 'Ergänze noch bitte Cola Zero mitbringen und sende es sofort los.';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-append');
+      if (result.type === 'email-append') {
+        expect(result.meta?.autoSend).toBe(true);
+        expect(result.payload.appendText.toLowerCase()).toContain('bitte cola zero mitbringen');
+        // "und sende es sofort los" should be stripped
+        expect(result.payload.appendText.toLowerCase()).not.toMatch(/sende.*sofort.*los/i);
+        expect(result.payload.appendText.toLowerCase()).not.toMatch(/und\s+sen/i);
+      }
+    });
+
+    it('should remove "sende es sofort los" (without "und") from appendText', () => {
+      const input = 'Ergänze noch bitte Cola Zero mitbringen sende es sofort los.';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-append');
+      if (result.type === 'email-append') {
+        expect(result.meta?.autoSend).toBe(true);
+        expect(result.payload.appendText.toLowerCase()).toContain('bitte cola zero mitbringen');
+        expect(result.payload.appendText.toLowerCase()).not.toMatch(/sende.*sofort.*los/i);
+      }
+    });
   });
 });
 

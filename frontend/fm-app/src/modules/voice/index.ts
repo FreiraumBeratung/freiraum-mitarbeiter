@@ -1733,7 +1733,14 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             if (polishResult.ok && polishResult.usedAi && polishResult.body.trim().length > 0) {
               // Der Body wurde bereits in polishEmailBody sanitized, normalisiere zusätzlich
               const polished = polishResult.body;
-              finalBodyForUi = normalizeEmailBodyAfterPolish(polished);
+              const normalizedBody = normalizeEmailBodyAfterPolish(polished);
+              
+              // Debug-Logs für Post-Polish-Normalisierung
+              console.log("[wizard4][post-polish-normalize] before:", polished.slice(0, 180));
+              console.log("[wizard4][post-polish-normalize] after:", normalizedBody.slice(0, 180));
+              
+              finalBodyForUi = normalizedBody;
+              
               console.debug("[wizard4][ai-polish][normalize] before:", polished.substring(0, 100));
               console.debug("[wizard4][ai-polish][normalize] after:", finalBodyForUi.substring(0, 100));
               console.log('[wizard4][ai-polish] body polished (nach await)', { 
@@ -2018,7 +2025,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
 
         // Polish ONLY the appended text
         const polishResult = await polishEmailBody(appendText, { mode: 'previewOnly', timeoutMs: 3000 });
-        const polishedAppend = polishResult.ok && polishResult.usedAi ? polishResult.body : appendText;
+        let polishedAppend = polishResult.ok && polishResult.usedAi ? polishResult.body : appendText;
+        
+        // Normalize nach Polish (entfernt Command-Artefakte wie "Zukommen." vor Greetings)
+        // Wird nur angewendet wenn Greeting vorhanden ist (die Funktion prüft das)
+        polishedAppend = normalizeEmailBodyAfterPolish(polishedAppend);
 
         // Merge: currentBody + separator + polishedAppend
         const finalBody = trimmedBody + separator + polishedAppend.trim();

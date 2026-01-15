@@ -419,6 +419,21 @@ describe('email-append Intent Detection', () => {
       
       expect(result.type).toBe('email-send');
     });
+
+    it('should route "erganze noch cola zero mitbringen und sende es sofort los" as email-append with clean appendText', () => {
+      const input = 'erganze noch cola zero mitbringen und sende es sofort los';
+      const result = routeVoiceIntent(input);
+      
+      expect(result.type).toBe('email-append');
+      expect(result.type).not.toBe('email-send');
+      if (result.type === 'email-append') {
+        expect(result.meta?.autoSend).toBe(true);
+        expect(result.payload.appendText.toLowerCase()).toContain('cola zero mitbringen');
+        // "und sende es sofort los" should be stripped
+        expect(result.payload.appendText.toLowerCase()).not.toMatch(/sende.*sofort.*los/i);
+        expect(result.payload.appendText.toLowerCase()).not.toMatch(/und\s+sen/i);
+      }
+    });
   });
 });
 

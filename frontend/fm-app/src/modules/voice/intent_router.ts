@@ -133,9 +133,73 @@ function normalizeRecipient(raw: string): string {
 }
 
 /**
- * Entfernt AutoSend-Phrasen am Ende des appendText (z.B. "und schick sie direkt los").
+ * Entfernt AutoSend-Phrasen am Ende des appendText (z.B. "und schick sie direkt los", "und sende es sofort los").
  * Arbeitet auf RAW-Text, um sauberes Stripping zu ermöglichen.
  */
+/**
+ * Entfernt trailing Send-Phrasen am Ende des Body-Texts (z.B. "und los", "und sofort senden").
+ * Arbeitet NUR am Satzende, um falsch-positive Matches zu vermeiden.
+ * 
+ * @param body - Body-Text, aus dem trailing Send-Phrasen entfernt werden sollen
+ * @returns { body: string; stripped: boolean } - Bereinigter Body und Flag ob etwas entfernt wurde
+ */
+function stripTrailingSendPhrases(body: string): { body: string; stripped: boolean } {
+  if (!body || typeof body !== 'string') {
+    return { body: body || '', stripped: false };
+  }
+
+  let cleaned = body.trim();
+  const original = cleaned;
+  let stripped = false;
+  let maxIterations = 2; // Maximal 2x hintereinander (falls "und los sofort" etc.)
+  let iteration = 0;
+
+  // Liste von Patterns, die NUR am Ende matched werden (trailing send phrases)
+  const trailingSendPatterns = [
+    // "und los" / "los"
+    /(\s*(und\s+)?los\s*[.!?]?)$/i,
+    // "und direkt ab"
+    /(\s*(und\s+)?direkt\s+ab\s*[.!?]?)$/i,
+    // "und sofort" / "sofort"
+    /(\s*(und\s+)?sofort\s*[.!?]?)$/i,
+    // "und jetzt" / "jetzt"
+    /(\s*(und\s+)?jetzt\s*[.!?]?)$/i,
+    // "und sofort senden" / "sofort senden" / "senden"
+    /(\s*(und\s+)?(sofort\s+)?senden\s*[.!?]?)$/i,
+    // "und schick die mail ab" / "schick ab"
+    /(\s*(und\s+)?schick\s*(die\s+mail\s+)?(direkt\s+)?ab\s*[.!?]?)$/i,
+    // "und sende es/die mail jetzt/sofort ab/los"
+    /(\s*(und\s+)?sende\s*(es|die\s+mail)?\s*(jetzt|sofort)?\s*(ab|los)?\s*[.!?]?)$/i,
+    // "und schick es/die mail jetzt/sofort ab/los"
+    /(\s*(und\s+)?schick\s*(es|die\s+mail)?\s*(jetzt|sofort)?\s*(ab|los)?\s*[.!?]?)$/i,
+    // "und schicke es/die mail jetzt/sofort ab/los"
+    /(\s*(und\s+)?schicke\s*(es|die\s+mail)?\s*(jetzt|sofort)?\s*(ab|los)?\s*[.!?]?)$/i,
+  ];
+
+  while (iteration < maxIterations) {
+    let matched = false;
+    
+    for (const pattern of trailingSendPatterns) {
+      const before = cleaned;
+      cleaned = cleaned.replace(pattern, '').trim();
+      
+      if (cleaned !== before) {
+        matched = true;
+        stripped = true;
+        break; // Nur ein Pattern pro Iteration
+      }
+    }
+    
+    if (!matched) {
+      break; // Nichts mehr gefunden, abbrechen
+    }
+    
+    iteration++;
+  }
+
+  return { body: cleaned.trim(), stripped };
+}
+
 function stripAutoSendFromAppendText(raw: string): string {
   if (!raw) return raw;
   let s = String(raw);
@@ -146,14 +210,48 @@ function stripAutoSendFromAppendText(raw: string): string {
   // "..., schick es jetzt ab"
   // "..., sende sie sofort"
   // "..., und sende das jetzt"
-  const re =
-    /(\s*(?:,|\.)?\s*(?:und\s+)?)\b(schick(?:e|en)?|sende(?:n)?|schicke(?:n)?|versend(?:e|en)?|schick(?:t)?)\b[\s\S]*?\b(direkt\s+los|sofort|jetzt|gleich|ab(?:senden)?|raus)\b\s*\.?\s*$/i;
+  // "..., und sende es sofort los"
+  // "..., sende es sofort los"
+  // "..., und sende sie sofort los"
+  // "..., und schick die mail direkt los"
+  
+  // Pattern 1: "schick/schicke/schickt" Varianten
+  const schickPattern =
+    /(\s*(?:,|\.)?\s*(?:und\s+)?)\b(schick(?:e|en|t)?)\s+(?:es|sie|die\s+(?:mail|email|e-?mail))?\s*(?:jetzt|sofort|direkt)?\s*(?:ab|los|raus)?\b\s*\.?\s*$/i;
+  
+  // Pattern 2: "sende/send/versende/verschick" Varianten (erweitert)
+  const sendePattern =
+    /(\s*(?:,|\.)?\s*(?:und\s+)?)\b(sende(?:n)?|send|versende(?:n)?|verschick(?:en)?)\s+(?:es|sie|die\s+(?:mail|email|e-?mail))?\s*(?:jetzt|sofort|direkt)?\s*(?:ab|los|raus)?\b\s*\.?\s*$/i;
+  
+  // Pattern 3: "direkt los", "sofort los", "jetzt los" am Ende (mit optionalem Verb davor)
+  const direktSofortPattern =
+    /(\s*(?:,|\.)?\s*(?:und\s+)?)\b(?:sende(?:n)?|send|schick(?:e|en|t)?|versende(?:n)?)\s+(?:es|sie|die\s+(?:mail|email))?\s+(direkt|sofort|jetzt)\s+(los|ab|raus)\b\s*\.?\s*$/i;
+  
+  // Pattern 4: "sofort senden", "jetzt senden" am Ende
+  const sofortSendenPattern =
+    /(\s*(?:,|\.)?\s*(?:und\s+)?)(sofort|jetzt)\s+senden\b\s*\.?\s*$/i;
 
   // nur am Ende strippen (damit wir nicht mitten im Satz etwas entfernen)
-  if (re.test(s.trim())) {
-    s = s.replace(re, "");
+  let originalLength = s.length;
+  
+  // Apply patterns in order (most specific first)
+  s = s.replace(direktSofortPattern, "");
+  if (s.length !== originalLength) {
+    return s.trim();
   }
-
+  
+  s = s.replace(sofortSendenPattern, "");
+  if (s.length !== originalLength) {
+    return s.trim();
+  }
+  
+  s = s.replace(sendePattern, "");
+  if (s.length !== originalLength) {
+    return s.trim();
+  }
+  
+  s = s.replace(schickPattern, "");
+  
   return s.trim();
 }
 
@@ -500,12 +598,53 @@ export function cleanEmailBodyFromCommand(rawBodyText: string, toNameRaw?: strin
  * TASK 3: Improved name extraction to prevent garbage strings like
  * "folgendenachrichtanthomashithomas..."
  */
-function parseColloquialStatusEmailCommand(normalized: string): {
+function parseColloquialStatusEmailCommand(normalized: string, original?: string): {
   toNameRaw: string | null;
   statusText: string | null;
 } {
   // Erwartet z.B.: "schreib dem thomas dass ich spater komme"
   let text = normalized.trim();
+  const origText = (original || normalized).trim();
+
+  // NEW PATTERN: "bitte folgende nachricht/mail/email <name> (an)? schicken/senden/rausschicken..."
+  // Example: "Bitte folgende Nachricht Thomas schicken Hi Thomas, hier ist Dennis..."
+  const folgendeNachrichtSchickenMatch = text.match(/\bfolgende\s+(?:nachricht|mail|email|e-?mail)\s+(?:an\s+)?([a-z0-9äöüß]+)\s+(schicken|senden|rausschicken|verschicken|zusenden|abschicken|zukommen\s+lassen|zukommenlassen)/i);
+  if (folgendeNachrichtSchickenMatch && folgendeNachrichtSchickenMatch[1]) {
+    const name = folgendeNachrichtSchickenMatch[1].trim();
+    const verbMatch = folgendeNachrichtSchickenMatch[2];
+    
+    // Find the body start: after the matched pattern in normalized text
+    const matchEndIndex = folgendeNachrichtSchickenMatch.index! + folgendeNachrichtSchickenMatch[0].length;
+    let rawBodyTextNormalized = text.slice(matchEndIndex).trim();
+    
+    // Also extract from original text for better case/punctuation preservation
+    // Try to find equivalent position in original text
+    // First, find the pattern in original (case-insensitive)
+    const originalPattern = new RegExp(`folgende\\s+(?:nachricht|mail|email|e-?mail)\\s+(?:an\\s+)?${name}\\s+(?:${verbMatch})`, 'i');
+    const originalMatch = origText.match(originalPattern);
+    let rawBodyTextOriginal = origText;
+    if (originalMatch && originalMatch.index !== undefined) {
+      const originalMatchEnd = originalMatch.index + originalMatch[0].length;
+      rawBodyTextOriginal = origText.slice(originalMatchEnd).trim();
+    } else {
+      // Fallback: use normalized extraction
+      rawBodyTextOriginal = rawBodyTextNormalized;
+    }
+    
+    // Clean body text from command phrases (prefer original for better quality)
+    const bodyText = cleanEmailBodyFromCommand(rawBodyTextOriginal || rawBodyTextNormalized, name);
+    
+    console.log('[intent-router][intent4.2][schicken-form] "Schicken-Form" erkannt', {
+      name,
+      verb: verbMatch,
+      bodyPreview: bodyText ? bodyText.substring(0, 60) : null
+    });
+    
+    return {
+      toNameRaw: name,
+      statusText: bodyText || null,
+    };
+  }
 
   // TASK 3: Special handling for "folgende nachricht an <name>" patterns
   // Extract name directly after "an" to prevent garbage strings
@@ -1963,6 +2102,36 @@ function detectImperativeSendAutosend(normalized: string): boolean {
 }
 
 /**
+ * Checks if the text contains false-positive patterns that should exclude AutoSend.
+ * Returns true if a false-positive is detected (AutoSend should be blocked).
+ * 
+ * @param normalized - Normalized text (lowercase, trimmed)
+ * @returns true if false-positive detected (AutoSend should be blocked), false otherwise
+ */
+function checkFalsePositiveExclusion(normalized: string): boolean {
+  const text = normalized.toLowerCase().trim();
+
+  // False-positive patterns that should block AutoSend
+  const falsePositivePatterns = [
+    /\b(ich|wir)\s+(sende|send|senden|schicke|schicken)\b/i,
+    /\b(ich|wir)\s+(werde|wollen|wollten)\s+(senden|schicken)\b/i,
+    /\b(kannst|könntest|würdest|kann|könnte|würde)\s+du\s+.*\b(senden|schicken)\b/i,
+    /\b(bitte\s+)?an\s+mich\s+(senden|schicken)\b/i,
+    /\b(bitte\s+)?mir\s+(senden|schicken)\b/i,
+    /\b(sende|schick|schicke)\s+(dir|mir|uns|ihr|euch)\b/i, // "sende dir", "schick mir" = not a command to send mail
+  ];
+
+  for (const pattern of falsePositivePatterns) {
+    if (pattern.test(text)) {
+      console.log('[autosend-extended] excluded false-positive:', pattern);
+      return true; // false-positive detected
+    }
+  }
+
+  return false; // no false-positive
+}
+
+/**
  * TASK 3: Reusable extended AutoSend detection helper
  * Detects AutoSend phrases like "sende sie direkt", "schick sie direkt raus", etc.
  * Can be used by both A3.4 free-dictation and "lass-uns" intents.
@@ -1976,20 +2145,8 @@ function detectExtendedAutoSend(normalized: string): boolean {
   // GUARD: False-Positive Detection - MUST be checked FIRST
   // ============================================================
   // Exclude non-imperative uses of "sende/schick"
-  const falsePositivePatterns = [
-    /\b(ich|wir)\s+(sende|send|senden|schicke|schicken)\b/i,
-    /\b(ich|wir)\s+(werde|wollen|wollten)\s+(senden|schicken)\b/i,
-    /\b(kannst|könntest|würdest|kann|könnte|würde)\s+du\s+.*\b(senden|schicken)\b/i,
-    /\b(bitte\s+)?an\s+mich\s+(senden|schicken)\b/i,
-    /\b(bitte\s+)?mir\s+(senden|schicken)\b/i,
-    /\b(sende|schick|schicke)\s+(dir|mir|uns|ihr|euch)\b/i, // "sende dir", "schick mir" = not a command to send mail
-  ];
-
-  for (const pattern of falsePositivePatterns) {
-    if (pattern.test(text)) {
-      console.log('[autosend-extended] excluded false-positive:', pattern);
-      return false;
-    }
+  if (checkFalsePositiveExclusion(normalized)) {
+    return false;
   }
 
   // Exact phrase matches (fast check)
@@ -2377,6 +2534,14 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     return { type: "unknown" };
   }
 
+  // ============================================================
+  // AUTO-SEND FALSE-POSITIVE EXCLUSION FLAG
+  // ============================================================
+  // Prüfe früh, ob ein false-positive Pattern erkannt wurde.
+  // Wenn ja, muss autoSend IMMER false bleiben, auch wenn später
+  // Intent-Handler AutoSend erkennen.
+  const autoSendExcludedByFalsePositive = checkFalsePositiveExclusion(text);
+
   // --------------------------------------------------
   // STATUS-BRAIN: Schnelle Status-Nachrichten (VOR Diktier-Engine)
   // Erkennt semantische Status-Befehle wie:
@@ -2463,6 +2628,81 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     return emailIntent;
   }
 
+  // ============================================================
+  // NEU: "Schicken-Form" Pattern: "folgende nachricht/mail/email <name> schicken/senden..."
+  // ============================================================
+  // Pattern: "bitte folgende nachricht/mail/email <name> (an)? schicken/senden/rausschicken..."
+  // Example: "Bitte folgende Nachricht Thomas schicken Hi Thomas, hier ist Dennis..."
+  // Muss VOR "schreib ..." Block kommen, da diese Sätze NICHT mit "schreib" beginnen
+  const folgendeNachrichtSchickenMatch = text.match(/\bfolgende\s+(?:nachricht|mail|email|e-?mail)\s+(?:an\s+)?([a-z0-9äöüß]+)\s+(schicken|senden|rausschicken|verschicken|zusenden|abschicken|zukommen\s+lassen|zukommenlassen)/i);
+  if (folgendeNachrichtSchickenMatch && folgendeNachrichtSchickenMatch[1]) {
+    const name = folgendeNachrichtSchickenMatch[1].trim();
+    const verbMatch = folgendeNachrichtSchickenMatch[2];
+    
+    // Extract body from original text (better case/punctuation preservation)
+    const originalPattern = new RegExp(`folgende\\s+(?:nachricht|mail|email|e-?mail)\\s+(?:an\\s+)?${name}\\s+(?:${verbMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i');
+    const originalMatch = original.match(originalPattern);
+    let rawBodyTextOriginal = original;
+    if (originalMatch && originalMatch.index !== undefined) {
+      const originalMatchEnd = originalMatch.index + originalMatch[0].length;
+      rawBodyTextOriginal = original.slice(originalMatchEnd).trim();
+    } else {
+      // Fallback: extract from normalized
+      const matchEndIndex = folgendeNachrichtSchickenMatch.index! + folgendeNachrichtSchickenMatch[0].length;
+      rawBodyTextOriginal = text.slice(matchEndIndex).trim();
+    }
+    
+    // Clean body text from command phrases
+    const bodyText = cleanEmailBodyFromCommand(rawBodyTextOriginal, name);
+    
+    // AutoSend detection: conservative - only if verb is explicit send verb
+    let autoSend = false;
+    if (/\b(schicken|senden|rausschicken|verschicken|zusenden|abschicken)\b/i.test(verbMatch)) {
+      // Additional guard: Check for "direkt", "sofort", "jetzt" for more confidence (optional)
+      // For now, we set autoSend if the verb is a send verb (conservative)
+      autoSend = true;
+    }
+    
+    // Block AutoSend if false-positive exclusion was detected
+    if (autoSendExcludedByFalsePositive) {
+      autoSend = false;
+      console.log('[intent-router][autosend-guard] autosend blocked due to false-positive exclusion');
+    }
+    
+    console.log('[intent-router][intent-4.2][schicken-form] "Schicken-Form" erkannt', {
+      name,
+      verb: verbMatch,
+      bodyPreview: bodyText ? bodyText.substring(0, 60) : null,
+      autoSend
+    });
+    
+    const intent: VoiceIntent = {
+      type: "email-compose",
+      toRaw: name,
+      subjectHint: undefined,
+      bodyHint: bodyText || undefined,
+      meta: {
+        statusEmail: {
+          isStatus: true,
+          rawText: text,
+          toNameRaw: name,
+          statusText: bodyText || null,
+          autoSend: autoSend,
+        },
+        autoSend: autoSend,
+      },
+    };
+    
+    // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+    const extractedEmail = extractEmailAddress(original);
+    if (extractedEmail) {
+      intent.to = extractedEmail;
+      console.log("[intent-router][intent-4.2][schicken-form] E-Mail-Adresse extrahiert:", extractedEmail);
+    }
+    
+    return intent;
+  }
+
   // Spezial-Route: ALLE Sätze mit "schreib ..."
   // Diese Route muss FRÜH kommen, damit sie vor anderen email-compose-Intents greift
   // Erkennt ALLE Varianten: "schreib dem ...", "schreib Freiraum ...", "schreib thomas ...", etc.
@@ -2480,10 +2720,19 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       text
     );
 
-    const parsed = parseColloquialStatusEmailCommand(text);
+    const parsed = parseColloquialStatusEmailCommand(text, original);
     const toNameRaw = parsed.toNameRaw;
     const statusText = parsed.statusText;
-    const autoSend = detectAutoSendFromText(text);
+    // AutoSend: Check if "schicken|senden|rausschicken|verschicken|zusenden|abschicken|zukommen lassen" was detected
+    let autoSend = detectAutoSendFromText(text);
+    // Also check for verbs like "schicken", "senden" in the text (conservative: only if explicit)
+    if (!autoSend && /\b(schicken|senden|rausschicken|verschicken|zusenden|abschicken|zukommen\s+lassen|zukommenlassen)\b/i.test(text)) {
+      // Additional guard: Check for "direkt", "sofort", "jetzt" for more confidence
+      if (/\b(direkt|sofort|jetzt)\s+(?:schicken|senden|raus)/i.test(text) || /\bfolgende\s+(?:nachricht|mail|email)\s+.*\s+(schicken|senden|rausschicken|verschicken|zusenden|abschicken)\b/i.test(text)) {
+        autoSend = true;
+        console.log('[intent-router][intent-4.2][autosend] AutoSend detected via "schicken/senden" verb');
+      }
+    }
 
     // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
     const extractedEmail = extractEmailAddress(original);
@@ -2698,6 +2947,162 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
               appendText: content,
             },
           };
+          return intent;
+        }
+      }
+    }
+  }
+
+  // ============================================================
+  // COMPOSE-PRECEDENCE GUARD: Compose + Send Detection VOR email-send
+  // ============================================================
+  // Verhindert, dass Sätze mit Compose-Inhalt (Empfänger + Body) + Send-Wunsch
+  // als email-send geroutet werden, sondern als email-compose mit autoSend=true
+  // Beispiel: "Bitte Thomas schicken Hi Thomas, hier ist Dennis. Ich hoffe dir gehts gut und sofort senden."
+  {
+    // Define SEND_PATTERNS locally (before it's defined later in the file)
+    const SEND_PATTERNS_LOCAL = [
+      "sende die mail bitte",
+      "sende die email bitte",
+      "schick die mail los",
+      "schicke die mail los",
+      "schick die email los",
+      "schicke die email los",
+      "schicke bitte die mail ab",
+      "schicke bitte die email ab",
+      "schick die mail ab",
+      "schick die email ab",
+      "sofort senden",
+      "mail jetzt senden",
+      "email jetzt senden",
+      "schick sie los",
+      "schicke sie los",
+      "sende die mail",
+      "sende die email",
+      "schick die mail",
+      "schicke die mail",
+      "schick die email",
+      "schicke die email",
+      "schick email los",
+      "email senden",
+      "e mail senden",
+      "mail senden",
+    ];
+    
+    // Check for send candidate: imperative send patterns
+    const sendCandidate = SEND_PATTERNS_LOCAL.some((p) => text.includes(p)) || detectExtendedAutoSend(text);
+    
+    if (sendCandidate) {
+      // Check for compose candidate:
+      // a) schicken-direct pattern could be recognized (<name> schicken|senden at start)
+      const schickenDirectCandidate = /^(?:bitte\s+)?([a-z0-9äöüß]+)\s+(schicken|senden)\b/i.test(text);
+      
+      // b) Greeting/Startmarker present (hi/hallo/hey/guten tag/moin/servus etc.)
+      const greetingMarkerPattern = /\b(hi|hallo|hey|guten\s+tag|guten\s+morgen|guten\s+abend|moin|servus|lieber|liebe)\s+/i;
+      const hasGreetingMarker = greetingMarkerPattern.test(original);
+      
+      // c) body-clean would find a message start marker
+      // (We simulate this by checking if cleanEmailBodyFromCommand would find something)
+      let bodyCleanCandidate = false;
+      try {
+        // Test if body-clean would extract meaningful content (not just command phrases)
+        const testBody = cleanEmailBodyFromCommand(original, null);
+        // If body-clean found a greeting marker or extracted substantial content
+        const testBodyLower = testBody.toLowerCase();
+        bodyCleanCandidate = greetingMarkerPattern.test(testBody) || 
+                            (testBody.length > 20 && !testBodyLower.match(/^(schick|sende|mail|email|nachricht)\s*/i));
+      } catch {
+        // If body-clean fails, assume no compose candidate
+      }
+      
+      const composeCandidate = schickenDirectCandidate || hasGreetingMarker || bodyCleanCandidate;
+      
+      if (composeCandidate && sendCandidate) {
+        // Route to email-compose with autoSend=true
+        // Extract toNameRaw and bodyHint using schicken-direct logic if applicable
+        
+        let toNameRaw: string | null = null;
+        let bodyHint: string | undefined = undefined;
+        
+        // Try schicken-direct pattern extraction first
+        const schickenDirectMatch = text.match(/^(?:bitte\s+)?([a-z0-9äöüß]+)\s+(schicken|senden)\b/i);
+        if (schickenDirectMatch && schickenDirectMatch[1]) {
+          toNameRaw = schickenDirectMatch[1].trim();
+          const verbMatch = schickenDirectMatch[2];
+          
+          // Extract body from original text
+          const originalPattern = new RegExp(`^(?:bitte\\s+)?${toNameRaw}\\s+(?:${verbMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b`, 'i');
+          const originalMatch = original.match(originalPattern);
+          let rawBodyTextOriginal = original;
+          if (originalMatch && originalMatch.index !== undefined) {
+            const originalMatchEnd = originalMatch.index + originalMatch[0].length;
+            rawBodyTextOriginal = original.slice(originalMatchEnd).trim();
+            rawBodyTextOriginal = rawBodyTextOriginal.replace(/^[,.\-–—:;]+\s*/, '').trim();
+          } else {
+            const matchEndIndex = schickenDirectMatch.index! + schickenDirectMatch[0].length;
+            rawBodyTextOriginal = text.slice(matchEndIndex).trim();
+            rawBodyTextOriginal = rawBodyTextOriginal.replace(/^[,.\-–—:;]+\s*/, '').trim();
+          }
+          
+          // Clean body text and strip send phrases
+          bodyHint = cleanEmailBodyFromCommand(rawBodyTextOriginal, toNameRaw);
+          // Also strip send phrases from end
+          bodyHint = stripAutoSendFromAppendText(bodyHint);
+        } else {
+          // Fallback: Extract using body-clean and try to find name from text
+          // Try to extract name from beginning of text
+          const nameMatch = text.match(/^(?:bitte\s+)?([a-z0-9äöüß]{2,20})\s+/i);
+          if (nameMatch && nameMatch[1]) {
+            toNameRaw = nameMatch[1].trim();
+          }
+          
+          // Use body-clean to extract body
+          bodyHint = cleanEmailBodyFromCommand(original, toNameRaw);
+          // Strip trailing send phrases from end
+          const strippedResult = stripTrailingSendPhrases(bodyHint || '');
+          bodyHint = strippedResult.body;
+          if (strippedResult.stripped) {
+            console.log('[intent-router][strip-trailing-send] removed trailing send phrase from bodyHint');
+          }
+        }
+        
+          // Only proceed if we have meaningful content
+          if (bodyHint && bodyHint.trim().length > 5) {
+            // Block AutoSend if false-positive exclusion was detected
+            const finalAutoSend = autoSendExcludedByFalsePositive ? false : true;
+            if (autoSendExcludedByFalsePositive) {
+              console.log('[intent-router][autosend-guard] autosend blocked due to false-positive exclusion');
+            }
+            
+            console.log('[intent-router][compose-precedence] compose+send detected -> routing to email-compose (autoSend=' + finalAutoSend + ')', {
+              toNameRaw,
+              bodyPreview: bodyHint.substring(0, 60),
+            });
+            
+            const intent: VoiceIntent = {
+              type: "email-compose",
+              toRaw: toNameRaw || undefined,
+              subjectHint: undefined,
+              bodyHint: bodyHint,
+              meta: {
+                statusEmail: {
+                  isStatus: true,
+                  rawText: text,
+                  toNameRaw: toNameRaw,
+                  statusText: bodyHint,
+                  autoSend: finalAutoSend,
+                },
+                autoSend: finalAutoSend,
+              },
+            };
+          
+          // Versuche auch, E-Mail-Adresse zu extrahieren
+          const extractedEmail = extractEmailAddress(original);
+          if (extractedEmail) {
+            intent.to = extractedEmail;
+            console.log("[intent-router][compose-precedence] E-Mail-Adresse extrahiert:", extractedEmail);
+          }
+          
           return intent;
         }
       }
@@ -3180,6 +3585,96 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       if (extractedEmail) {
         intent.to = extractedEmail;
         console.log("[intent-router][intent-4.2] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+      
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // INTENT 4.2: "Schicken-Direct" Pattern: "<Name> schicken/senden ..."
+  // ============================================================
+  // Pattern: "<toName> schicken/senden <body>"
+  // Examples:
+  // - "Thomas schicken ich komme 10 minuten später"
+  // - "Thomas schicken Hi Thomas, ich komme 10 minuten später"
+  // - "bitte Thomas schicken. Hi Thomas, ..."
+  // Must run AFTER status-brain and other email intents, but BEFORE ai-chat fallback
+  {
+    // Match: start of text (or after "bitte") contains "<name> schicken" or "<name> senden"
+    // Pattern: (optional "bitte") <name> (schicken|senden) <rest>
+    const schickenDirectMatch = text.match(/^(?:bitte\s+)?([a-z0-9äöüß]+)\s+(schicken|senden)\b/i);
+    if (schickenDirectMatch && schickenDirectMatch[1] && schickenDirectMatch[2]) {
+      const toNameRaw = schickenDirectMatch[1].trim();
+      const verbMatch = schickenDirectMatch[2];
+      
+      // Extract rest text (body) from original text
+      // Find the pattern in original (case-insensitive) for better case preservation
+      const originalPattern = new RegExp(`^(?:bitte\\s+)?${toNameRaw}\\s+(?:${verbMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b`, 'i');
+      const originalMatch = original.match(originalPattern);
+      let rawBodyTextOriginal = original;
+      if (originalMatch && originalMatch.index !== undefined) {
+        const originalMatchEnd = originalMatch.index + originalMatch[0].length;
+        rawBodyTextOriginal = original.slice(originalMatchEnd).trim();
+        // Remove leading comma/punctuation if present
+        rawBodyTextOriginal = rawBodyTextOriginal.replace(/^[,.\-–—:;]+\s*/, '').trim();
+      } else {
+        // Fallback: extract from normalized
+        const matchEndIndex = schickenDirectMatch.index! + schickenDirectMatch[0].length;
+        rawBodyTextOriginal = text.slice(matchEndIndex).trim();
+        rawBodyTextOriginal = rawBodyTextOriginal.replace(/^[,.\-–—:;]+\s*/, '').trim();
+      }
+      
+      // Clean body text using existing body-clean mechanism (handles greeting markers)
+      let bodyText = cleanEmailBodyFromCommand(rawBodyTextOriginal, toNameRaw);
+      
+      // Strip trailing send phrases from end
+      const strippedResult = stripTrailingSendPhrases(bodyText);
+      bodyText = strippedResult.body;
+      if (strippedResult.stripped) {
+        console.log('[intent-router][strip-trailing-send] removed trailing send phrase from bodyHint');
+      }
+      
+      // AutoSend: This pattern semantically indicates a send request
+      // BUT: Block if false-positive exclusion was detected
+      let autoSend = true;
+      if (autoSendExcludedByFalsePositive) {
+        autoSend = false;
+        console.log('[intent-router][autosend-guard] autosend blocked due to false-positive exclusion');
+      }
+      
+      console.log('[intent-router][intent-4.2][schicken-direct] erkannt', {
+        toNameRaw,
+        verb: verbMatch,
+        bodyPreview: bodyText ? bodyText.substring(0, 60) : null,
+        autoSend
+      });
+      console.log('[intent-router][intent-4.2][schicken-direct] toNameRaw:', toNameRaw);
+      console.log('[intent-router][intent-4.2][schicken-direct] bodyHint:', bodyText ? bodyText.substring(0, 80) : null);
+      console.log('[intent-router][intent-4.2][schicken-direct] autoSend=' + autoSend);
+      
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toNameRaw,
+        subjectHint: undefined,
+        bodyHint: bodyText || undefined,
+        meta: {
+          statusEmail: {
+            isStatus: true,
+            rawText: text,
+            toNameRaw: toNameRaw,
+            statusText: bodyText || null,
+            autoSend: autoSend,
+          },
+          autoSend: autoSend,
+        },
+      };
+      
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][intent-4.2][schicken-direct] E-Mail-Adresse extrahiert:", extractedEmail);
       }
       
       return intent;
