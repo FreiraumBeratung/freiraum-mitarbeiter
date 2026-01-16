@@ -8,6 +8,10 @@ import {
   type StatusCategory,
   type StatusBrainInput,
 } from "../../logic/wizard4/status_brain";
+import {
+  hasNoSendNegation,
+  stripTrailingSendPhrases as stripTrailingSendPhrasesV4,
+} from "../../logic/wizard4/intent/send_phrase_strip";
 
 export type Wizard3OneShotPayload = {
   rawText: string; // komplette Original-Sprachnachricht
@@ -143,7 +147,7 @@ function normalizeRecipient(raw: string): string {
  * @param body - Body-Text, aus dem trailing Send-Phrasen entfernt werden sollen
  * @returns { body: string; stripped: boolean } - Bereinigter Body und Flag ob etwas entfernt wurde
  */
-function stripTrailingSendPhrases(body: string): { body: string; stripped: boolean } {
+function stripTrailingSendPhrasesLegacy(body: string): { body: string; stripped: boolean } {
   if (!body || typeof body !== 'string') {
     return { body: body || '', stripped: false };
   }
@@ -521,13 +525,22 @@ export function cleanEmailBodyFromCommand(rawBodyText: string, toNameRaw?: strin
   if (text === beforeCleaning) {
     // Kein Marker gefunden, entferne Steuerteile manuell
     
-    // 1. Entferne führende Steuerteile: "an <name>"
+    // 1. Entferne führende Steuerteile: "an <name>" (inkl. optionaler Artikel und Satzzeichen)
     if (toNameRaw) {
-      const namePattern = new RegExp(`^an\\s+${toNameRaw}\\s+`, 'i');
+      const name = toNameRaw.trim();
+      // Escapen von Sonderzeichen im Namen für Regex
+      const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Entferne "an <name>" oder "an dem/den/die <name>" mit optionalen Satzzeichen
+      const namePattern = new RegExp(`^an\\s+(?:dem\\s+|den\\s+|die\\s+)?${escapedName}\\s*[\\.:,\\-]?\\s+`, 'i');
       text = text.replace(namePattern, '').trim();
+      // Fallback: Auch ohne Leerzeichen nach Satzzeichen (z.B. "an thomas.")
+      const namePatternAlt = new RegExp(`^an\\s+(?:dem\\s+|den\\s+|die\\s+)?${escapedName}[\\.:,\\-]\\s*`, 'i');
+      text = text.replace(namePatternAlt, '').trim();
     }
     // Generisches "an <name>" Pattern (auch wenn toNameRaw nicht vorhanden)
     text = text.replace(/^an\s+[a-zäöüß]+\s+/i, '').trim();
+    // Generisches "an <name>." / "an <name>:" Pattern (auch wenn toNameRaw nicht vorhanden)
+    text = text.replace(/^an\s+[a-zäöüß]+[\\.:,\\-]\s*/i, '').trim();
 
     // 2. Entferne führende Steuerteile: "dem/den/der <name>"
     if (toNameRaw) {
@@ -588,6 +601,47 @@ export function cleanEmailBodyFromCommand(rawBodyText: string, toNameRaw?: strin
   }
 
   return text;
+}
+
+type StripTailResult = { text: string; stripped: boolean; matched?: string };
+
+/**
+ * Entfernt NUR am Ende (tail-only) Negations-Kontrollphrasen wie:
+ * ", aber nicht senden", "aber nicht schicken", "nicht abschicken", "noch nicht senden"
+ * 
+ * Wichtig: NICHT mitten im Satz anfassen (tail-only mit $ anchor).
+ * 
+ * @param input - Body-Text, aus dem trailing Negations-Phrasen entfernt werden sollen
+ * @returns StripTailResult mit bereinigtem Text und Flag ob etwas entfernt wurde
+ * 
+ * @example
+ * stripTrailingNegationSendPhrases("Ich bin gleich da, aber nicht senden.")
+ * // => { text: "Ich bin gleich da.", stripped: true, matched: ", aber nicht senden." }
+ */
+function stripTrailingNegationSendPhrases(input: string): StripTailResult {
+  const original = input ?? "";
+  let text = original.trim();
+
+  if (!text) {
+    return { text: original, stripped: false };
+  }
+
+  // Pattern: tail-only Negations-Kontrollphrase
+  // Optional: Komma/Punkt + optional "aber" + optional "bitte" + "nicht"/"noch nicht" + Send-Verb
+  const negationPattern = /(\s*(?:,|\.)?\s*(?:aber\s+)?(?:bitte\s+)?(?:noch\s+)?nicht\s+(?:senden|schicken|abschicken|absenden|rausschicken|verschicken|versenden)\s*[.!?]?\s*)$/i;
+
+  const match = text.match(negationPattern);
+  if (match && match[1]) {
+    const matched = match[1];
+    text = text.replace(negationPattern, "").trim();
+
+    // Cleanup: Entferne tail-only Reste wie ", aber" / "aber" / ", und" / "und" am Ende
+    text = text.replace(/(?:,\s*)?(?:aber|und)\s*$/i, "").trim();
+
+    return { text, stripped: true, matched };
+  }
+
+  return { text, stripped: false };
 }
 
 /**
@@ -799,6 +853,179 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
   }
 
   return { toNameRaw: cleanName, statusText };
+}
+
+/**
+ * Erkennt "lass <name> bitte folgendes wissen" Pattern für explicit-body (Wizard4).
+ * 
+ * Varianten:
+ * - "Lass Thomas bitte folgendes wissen, Thomas, hier ist Dennis. Ich komme 15 Minuten später."
+ * - "Lass Thomas folgendes wissen: Hi Thomas, ich komme 10 Minuten später."
+ * - "Lass Thomas wissen: Ich komme 5 Minuten später."
+ * - "Lass Thomas bitte folgendes wissen Hi Thomas, hier ist Dennis."
+ * 
+ * @param normalized - Normalisierter Text (lowercase, keine Sonderzeichen)
+ * @param original - Originaler Text (für bessere Extraktion)
+ * @returns VoiceIntent | null - Email-Compose Intent mit bodyHint oder null
+ */
+function detectLassWissenCommand(normalized: string, original: string): VoiceIntent | null {
+  const text = normalized.trim().toLowerCase();
+  const origText = original.trim();
+
+  // Pattern für "lass <name> (bitte)? folgendes wissen" oder "lass <name> wissen:"
+  // Unterstützt Trennzeichen: ".", ",", ":" nach "wissen"
+  const patterns = [
+    // "lass <name> bitte folgendes wissen ..." (mit Punkt, Komma oder Doppelpunkt)
+    /^lass\s+([a-z0-9äöüß]+)\s+bitte\s+folgendes\s+wissen[:\s,\.]+(.+)$/i,
+    // "lass <name> folgendes wissen ..." (mit Punkt, Komma oder Doppelpunkt)
+    /^lass\s+([a-z0-9äöüß]+)\s+folgendes\s+wissen[:\s,\.]+(.+)$/i,
+    // "lass <name> wissen: ..." (mit Punkt, Komma oder Doppelpunkt)
+    /^lass\s+([a-z0-9äöüß]+)\s+wissen[:\s,\.]+(.+)$/i,
+    // "lass <name> bitte wissen ..." (ohne "folgendes", mit Punkt, Komma oder Doppelpunkt)
+    /^lass\s+([a-z0-9äöüß]+)\s+bitte\s+wissen[:\s,\.]+(.+)$/i,
+  ];
+
+  let match: RegExpMatchArray | null = null;
+  let toNameRaw: string | null = null;
+  let rawBodyText: string | null = null;
+
+  for (const pattern of patterns) {
+    match = origText.match(pattern);
+    if (match && match[1] && match[2]) {
+      toNameRaw = match[1].trim();
+      rawBodyText = match[2].trim();
+      break;
+    }
+  }
+
+  if (!toNameRaw || !rawBodyText || rawBodyText.length < 3) {
+    return null;
+  }
+
+  // Validiere Name (nicht "uns", "eine", "der", etc.)
+  const invalidNames = ['uns', 'eine', 'der', 'die', 'das', 'mal', 'bitte', 'folgendes', 'wissen'];
+  if (invalidNames.includes(toNameRaw.toLowerCase())) {
+    return null;
+  }
+
+  // BodyPart-Extraktion: rawBodyText wurde bereits aus den Patterns extrahiert
+  // (alles nach "wissen" mit Trennzeichen)
+  // Verwende rawBodyText direkt - es enthält bereits den korrekten Body
+  let bodyPart = (rawBodyText || '').trim();
+
+  // 1. Strip trailing send phrases NACH Extraktion
+  const beforeStrip = bodyPart.trim();
+  const stripped = stripTrailingSendPhrasesV4(beforeStrip);
+
+  // DEBUG LOGS
+  console.debug("[intent-router][lass-wissen][debug] body beforeStrip:", beforeStrip);
+  console.debug("[intent-router][lass-wissen][debug] strip matched:", stripped.matched ?? null);
+  console.debug("[intent-router][lass-wissen][debug] body afterStrip:", stripped.text);
+
+  // 2. Strip trailing negation send phrases (z.B. ", aber nicht senden")
+  // Dies entfernt die komplette Negations-Phrase, nicht nur das Verb
+  const negStripped = stripTrailingNegationSendPhrases(stripped.text);
+  console.debug("[intent-router][lass-wissen][debug] negation-strip matched:", negStripped.matched ?? null);
+  console.debug("[intent-router][lass-wissen][debug] body afterNegationStrip:", negStripped.text);
+
+  // Guard: Wenn negStripped.text leer ist, abbrechen
+  if (!negStripped.text || negStripped.text.trim().length < 3) {
+    console.debug("[intent-router][lass-wissen] body empty after stripping -> abort");
+    return null;
+  }
+
+  // bodyHint ist jetzt der finale Body (OHNE trailing send phrases UND OHNE negation phrases)
+  let bodyHint = negStripped.text.trim();
+
+  // Optional: Entferne Name-Duplikat am Anfang (case-insensitive)
+  // Wenn bodyHint mit dem Namen startet (z.B. "Thomas, hier ist Dennis..."), entferne es
+  if (bodyHint) {
+    const namePattern = new RegExp(`^${toNameRaw}\\s*[,.:]?\\s+`, 'i');
+    bodyHint = bodyHint.replace(namePattern, '').trim();
+  }
+
+  // 3. AutoSend-Erkennung
+  // AUTOSEND-REGEL:
+  // - Für "lass <name> ... wissen" setze autoSend=true, WENN:
+  //   a) das Wort "bitte" im Satz vorkommt ODER
+  //   b) eine klare Send-Phrase vorkommt (schick los / sende sofort / direkt raus / und los / schick direkt ab)
+  // - Sonst: autoSend=false
+  // - AutoSend darf NICHT passieren, wenn im Satz ein klares "nicht senden / nur zeigen / Entwurf / vorlesen / preview" vorkommt
+
+  let autoSend = false;
+
+  // Prüfe zuerst auf Negation (höchste Priorität)
+  const hasNegationPreview = checkFalsePositiveExclusion(text);
+  const negation = hasNoSendNegation(origText) || hasNoSendNegation(text);
+  if (hasNegationPreview || negation) {
+    autoSend = false;
+    console.debug("[intent-router][autosend] disabled due to negation");
+    console.log('[intent-router][lass-wissen] AutoSend blocked - negation/preview detected');
+  } else {
+    // Prüfe auf "bitte"
+    const hasBitte = /\bbitte\b/i.test(origText);
+    
+    // Prüfe auf Send-Phrasen (senden/schicken/abschicken/rausschicken/los)
+    // Aber VORSICHT: nicht "schick dir ..." false-positive
+    const sendPhrases = [
+      /\b(?:senden|schicken|abschicken|rausschicken|verschicken|losschicken)\b/i,
+      /\b(?:schick|schicke|sende|send)\s+(?:los|direkt\s+(?:los|raus|ab)|sofort|jetzt|ab)\b/i,
+      /\b(?:direkt|sofort)\s+(?:raus|los|ab)\b/i,
+      /\b(?:direkt\s+)?los\b/i,  // "direkt los" oder "los"
+      /\bund\s+(?:los|raus)\b/i,
+      /\bschick\s+(?:direkt\s+)?ab\b/i,  // "schick ab" oder "schick direkt ab"
+      /\braus\s+damit\b/i,  // "raus damit"
+      /\bsende\s+jetzt\b/i,  // "sende jetzt"
+    ];
+    // Guard: Nicht false-positive wie "schick dir", "schick mir"
+    const falsePositiveGuard = !/^(?:schick|schicke|sende|send)\s+(?:dir|mir|uns|ihr|euch)\b/i.test(origText);
+    const hasSendPhrase = falsePositiveGuard && sendPhrases.some(pattern => pattern.test(origText));
+
+    if (hasBitte || hasSendPhrase) {
+      autoSend = true;
+      console.log('[intent-router][lass-wissen] AutoSend enabled', {
+        hasBitte,
+        hasSendPhrase,
+      });
+    } else {
+      autoSend = false;
+      console.log('[intent-router][lass-wissen] AutoSend disabled - no "bitte" and no send phrase');
+    }
+  }
+
+  // bodyHint ist jetzt final (ohne trailing send phrases, ohne Name-Duplikat)
+  // bodyHint behält Groß-/Kleinschreibung für bodyHintRaw
+  const bodyHintRaw = bodyHint;
+  const bodyHintNormalized = bodyHint.toLowerCase();
+
+  const freeDictationMeta: FreeDictationMeta = {
+    normalized: text,
+    toNameRaw: toNameRaw,
+    bodyText: bodyHintNormalized,
+    autoSend: autoSend,
+  };
+
+  // IMMER email-compose Intent zurückgeben (wenn Body vorhanden)
+  const intent: VoiceIntent = {
+    type: "email-compose",
+    toRaw: toNameRaw,
+    subjectHint: undefined,
+    bodyHintRaw: bodyHintRaw,
+    bodyHint: bodyHintNormalized,
+    meta: {
+      freeDictationMeta: freeDictationMeta,
+      source: 'lass-wissen',
+      autoSend: autoSend,
+    },
+  };
+
+  console.log('[intent-router][lass-wissen] Created email-compose intent', {
+    toNameRaw,
+    bodyPreview: bodyHint.substring(0, 60),
+    autoSend,
+  });
+
+  return intent;
 }
 
 /**
@@ -1191,7 +1418,8 @@ function parseFreeDictationEmailCommand(normalized: string): {
     {
       kind: "sende-email-an",
       // z.B.: "sende bitte folgende email an thomas hi thomas ..."
-      regex: /^sende(?:\s+bitte)?\s+folgende(?:\s+e[- ]?mail)?\s+an\s+(?:den\s+|die\s+|dem\s+)?([a-zäöüß]+)\s+(.*)$/i,
+      // z.B.: "sende folgende email an thomas. bitte ruf mich zurück"
+      regex: /^sende(?:\s+bitte)?\s+folgende(?:\s+e[- ]?mail)?\s+an\s+(?:den\s+|die\s+|dem\s+)?([a-zäöüß]+)\s*(?:[\.:,\-]\s*)?(.+)$/i,
     },
   ];
 
@@ -2020,6 +2248,385 @@ function parseEmailCompose(text: string): { toRaw: string; bodyHint?: string } |
 }
 
 /**
+ * Parst "schick/sende <NAME> eine kurze mail, <BODY>" Muster für Intent-4.2 Fallback.
+ * Unterstützt Varianten:
+ * - "schick Thomas eine kurze mail, ich komme 10 Minuten später"
+ * - "schick Thomas 'ne kurze mail, ich komme 10 Minuten später"
+ * - "schick Thomas eine mail, ich komme 10 Minuten später"
+ * - "sende Thomas eine kurze mail, ich komme 10 Minuten später"
+ * - Optional: Trennzeichen auch ":" oder "." (z.B. "... mail: <BODY>")
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @returns { toRaw: string, bodyHint?: string } | null
+ */
+function parseSchickMailPattern(original: string): { toRaw: string; bodyHint?: string } | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  const lowered = text.toLowerCase();
+
+  // Pattern: Imperativ-Verb + <NAME> + (eine|'ne) + (kurze)? + (mail|email|e-mail) + Trennzeichen + <BODY>
+  // Verben: schick, schicke, sende, send
+  const patterns = [
+    // "schick Thomas eine kurze mail, ..."
+    /^(schick|schicke|sende|send)\s+([a-zäöüß]+)\s+(?:eine|'ne)\s+(?:kurze\s+)?(?:mail|email|e-?mail)\s*[,:\.]\s*(.+)$/i,
+    // "schick Thomas eine kurze mail ..." (ohne explizites Trennzeichen, aber danach kommt Text)
+    /^(schick|schicke|sende|send)\s+([a-zäöüß]+)\s+(?:eine|'ne)\s+(?:kurze\s+)?(?:mail|email|e-?mail)\s+(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    // Groups: match[1] = verb, match[2] = name, match[3] = body
+    if (match && match[2] && match[3]) {
+      const toNameRaw = match[2].trim();
+      let bodyHint = match[3].trim();
+
+      // Body-Hint bereinigen: Entferne trailing "aber nicht senden" / "nicht senden" etc.
+      // Aber NICHT aggressive Füllwort-Stripping
+      const negationPattern = /\s*(?:,\s*)?(?:aber\s+)?(?:bitte\s+)?(?:noch\s+)?nicht\s+(?:senden|schicken|abschicken|rausschicken)\s*[.!?]?\s*$/i;
+      bodyHint = bodyHint.replace(negationPattern, '').trim();
+
+      // Entferne führendes "dass" nur wenn es wirklich führend ist
+      bodyHint = bodyHint.replace(/^dass\s+/i, '').trim();
+
+      // Wenn bodyHint nach Trimmen leer ist, nicht setzen
+      if (!bodyHint || bodyHint.length === 0) {
+        return { toRaw: toNameRaw };
+      }
+
+      return {
+        toRaw: toNameRaw,
+        bodyHint: bodyHint,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Erkennt kurzes Imperativ-Pattern: "sende <name> bitte, <body>" oder "schick <name>, <body>"
+ * 
+ * Unterstützt Muster:
+ * - "sende <name> bitte, <body>"
+ * - "sende <name>, <body>"
+ * - "schick <name> bitte, <body>"
+ * - "schick <name>, <body>"
+ * 
+ * Separatoren: "," ":" "."
+ * Pronomen werden blockiert (mir/dir/uns/euch/ihm/ihr)
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string } | null
+ */
+function detectShortImperativePattern(original: string, normalized: string): { 
+  toRaw: string; 
+  bodyHint: string; 
+  bodyHintRaw: string;
+} | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
+  const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'mich', 'dich', 'sich'];
+
+  // Pattern: Imperativ-Verb + optional "bitte" + <NAME> + optional "bitte" + Separator + <BODY>
+  // Verben: sende, send, schick, schicke
+  // Separatoren: ",", ":", "."
+  const patterns = [
+    // "sende <name> bitte, <body>"
+    /^(sende|send|schick|schicke)\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s+bitte\s*[,:\.]\s*(.+)$/i,
+    // "sende <name>, <body>"
+    /^(sende|send|schick|schicke)\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s*[,:\.]\s*(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[2] && match[3]) {
+      const toNameRaw = match[2].trim();
+      const toNameLower = toNameRaw.toLowerCase();
+
+      // Blockiere Pronomen
+      if (blockedPronouns.includes(toNameLower)) {
+        continue;
+      }
+
+      // Blockiere mehr als 2 Tokens (zu lang für Name)
+      const nameTokens = toNameRaw.split(/\s+/);
+      if (nameTokens.length > 2) {
+        continue;
+      }
+
+      let bodyHintRaw = match[3].trim();
+      
+      // Wenn body leer ist, kein Match
+      if (!bodyHintRaw || bodyHintRaw.length === 0) {
+        continue;
+      }
+
+      // Body normalisieren für bodyHint (lowercase, aber Struktur behalten)
+      let bodyHint = bodyHintRaw.toLowerCase();
+
+      // Entferne trailing Negation/Preview-Phrasen aus bodyHint
+      const negationPattern = /\s*(?:,\s*)?(?:aber\s+)?(?:bitte\s+)?(?:noch\s+)?nicht\s+(?:senden|schicken|abschicken|rausschicken)\s*[.!?]?\s*$/i;
+      bodyHint = bodyHint.replace(negationPattern, '').trim();
+      bodyHintRaw = bodyHintRaw.replace(negationPattern, '').trim();
+
+      // Wenn body nach Bereinigung leer ist, kein Match
+      if (!bodyHint || bodyHint.length === 0) {
+        continue;
+      }
+
+      return {
+        toRaw: toNameRaw.toLowerCase(), // Normalisiert für toRaw
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw, // Original mit Groß-/Kleinschreibung
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Erkennt "passive send" Pattern: "bitte sofort an <name> senden. <body>"
+ * 
+ * Unterstützt Muster:
+ * - "bitte sofort an <name> senden. <body>"
+ * - "sofort an <name> senden. <body>"
+ * - "bitte an <name> senden. <body>"
+ * 
+ * Separatoren: ".", ":", ","
+ * Pronomen werden blockiert (mir/dir/uns/euch/ihm/ihr/sie/er)
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string; hasAutoSendTrigger: boolean } | null
+ */
+function detectPassiveSendPattern(original: string, normalized: string): { 
+  toRaw: string; 
+  bodyHint: string; 
+  bodyHintRaw: string;
+  hasAutoSendTrigger: boolean;
+} | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
+  const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'sie', 'er', 'mich', 'dich', 'sich'];
+
+  // Pattern: optional "bitte" + optional (sofort|direkt|jetzt) + "an" + <NAME> + "senden" + Separator + <BODY>
+  // Separatoren: ".", ":", ","
+  const patterns = [
+    // "bitte sofort an <name> senden. <body>"
+    /^(?:bitte\s+)?(?:sofort|direkt|jetzt)\s+an\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s+senden\s*[,:\.]\s*(.+)$/i,
+    // "bitte an <name> senden. <body>" (ohne sofort/direkt/jetzt)
+    /^bitte\s+an\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s+senden\s*[,:\.]\s*(.+)$/i,
+    // "sofort an <name> senden. <body>" (ohne bitte)
+    /^(?:sofort|direkt|jetzt)\s+an\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s+senden\s*[,:\.]\s*(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && match[2]) {
+      const toNameRaw = match[1].trim();
+      const toNameLower = toNameRaw.toLowerCase();
+
+      // Blockiere Pronomen
+      if (blockedPronouns.includes(toNameLower)) {
+        continue;
+      }
+
+      // Blockiere mehr als 2 Tokens (zu lang für Name)
+      const nameTokens = toNameRaw.split(/\s+/);
+      if (nameTokens.length > 2) {
+        continue;
+      }
+
+      let bodyHintRaw = match[2].trim();
+      
+      // Wenn body leer ist, kein Match
+      if (!bodyHintRaw || bodyHintRaw.length === 0) {
+        continue;
+      }
+
+      // Body normalisieren für bodyHint (lowercase, Unicode clean)
+      let bodyHint = normalize(bodyHintRaw);
+
+      // Entferne trailing Negation/Preview-Phrasen aus bodyHint
+      const negationPattern = /\s*(?:,\s*)?(?:aber\s+)?(?:bitte\s+)?(?:noch\s+)?nicht\s+(?:senden|schicken|abschicken|rausschicken)\s*[.!?]?\s*$/i;
+      bodyHint = bodyHint.replace(negationPattern, '').trim();
+      bodyHintRaw = bodyHintRaw.replace(negationPattern, '').trim();
+
+      // Wenn body nach Bereinigung leer ist, kein Match
+      if (!bodyHint || bodyHint.length === 0) {
+        continue;
+      }
+
+      // Prüfe, ob AutoSend-Trigger im Command-Teil vorhanden ist
+      const commandPart = match[0].substring(0, match[0].length - match[2].length).toLowerCase();
+      const hasAutoSendTrigger = /\b(sofort|direkt|jetzt)\b/.test(commandPart);
+
+      return {
+        toRaw: toNameRaw.toLowerCase(), // Normalisiert für toRaw
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw, // Original mit Groß-/Kleinschreibung
+        hasAutoSendTrigger: hasAutoSendTrigger,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Erkennt "schick-an-direct" Pattern: "schick das direkt an thomas bin im termin"
+ * 
+ * Unterstützt Muster:
+ * - "schick das direkt an thomas bin im termin"
+ * - "schick bitte an thomas ich ruf später an"
+ * - "schick an thomas bin gleich da"
+ * - "sende das direkt an thomas ..."
+ * 
+ * Kein Separator erforderlich - Body ist alles nach dem Empfängernamen.
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string; hasAutoSendTrigger: boolean } | null
+ */
+function detectSchickAnDirectPattern(original: string, normalized: string): { 
+  toRaw: string; 
+  bodyHint: string; 
+  bodyHintRaw: string;
+  hasAutoSendTrigger: boolean;
+} | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
+  const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'sie', 'er', 'mich', 'dich', 'sich'];
+
+  // Pattern: (schick|schicke|schicken|sende|send) + optional "das" + optional "bitte" + optional (direkt|sofort|jetzt) + "an" + <NAME> + <BODY>
+  // Body ist alles nach dem Namen (kein Separator erforderlich)
+  // WICHTIG: Name ist 1 Token (z.B. "thomas") oder 2 Tokens (z.B. "thomas müller"), danach kommt Body
+  // Pattern erfasst Name-Gruppe separat, dann Body-Gruppe
+  const patterns = [
+    // "schick das direkt an <name> <body>"
+    // Name: 1 Token, dann optional 1 weiteres Token (nur wenn es wie ein Name aussieht)
+    /^(schick|schicke|schicken|sende|send)\s+das\s+(?:bitte\s+)?(?:direkt|sofort|jetzt)\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+(.+)$/i,
+    // "schick bitte an <name> <body>"
+    /^(schick|schicke|schicken|sende|send)\s+bitte\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+(.+)$/i,
+    // "schick an <name> <body>"
+    /^(schick|schicke|schicken|sende|send)\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+(.+)$/i,
+    // "schick das an <name> <body>"
+    /^(schick|schicke|schicken|sende|send)\s+das\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    // Groups: match[1] = verb, match[2] = first name token, match[3] = optional second name token, match[4] = body
+    if (match && match[2] && match[4]) {
+      // Baue Name aus Tokens zusammen
+      const firstNameToken = match[2].trim();
+      const secondNameToken = match[3]?.trim();
+      
+      // Prüfe, ob zweites Token ein Verb/Präposition ist (dann ist es Teil des Body, nicht des Namens)
+      const bodyStartWords = ['bin', 'ist', 'sind', 'habe', 'hat', 'haben', 'komme', 'kommt', 'kommst', 'ruf', 'rufe', 'ruft', 'ich', 'wir', 'er', 'sie', 'es', 'im', 'in', 'am', 'an', 'auf', 'zu', 'für', 'mit', 'von'];
+      const isSecondTokenBodyStart = secondNameToken && bodyStartWords.includes(secondNameToken.toLowerCase());
+      
+      let toNameRaw: string;
+      let bodyHintRaw: string;
+      
+      if (isSecondTokenBodyStart || !secondNameToken) {
+        // Zweites Token ist Body-Start oder nicht vorhanden -> Name ist nur erstes Token
+        toNameRaw = firstNameToken;
+        bodyHintRaw = (secondNameToken ? secondNameToken + ' ' : '') + match[4].trim();
+      } else {
+        // Zweites Token ist Teil des Namens (z.B. "Thomas Müller")
+        toNameRaw = firstNameToken + ' ' + secondNameToken;
+        bodyHintRaw = match[4].trim();
+      }
+      
+      const toNameLower = toNameRaw.toLowerCase();
+
+      // Blockiere Pronomen
+      if (blockedPronouns.includes(toNameLower)) {
+        continue;
+      }
+
+      // Wenn body leer ist, kein Match
+      if (!bodyHintRaw || bodyHintRaw.length === 0) {
+        continue;
+      }
+
+      // Body normalisieren für bodyHint (lowercase, Unicode clean)
+      let bodyHint = normalize(bodyHintRaw);
+
+      // Entferne trailing Negation/Preview-Phrasen aus bodyHint
+      const negationPattern = /\s*(?:,\s*)?(?:aber\s+)?(?:bitte\s+)?(?:noch\s+)?nicht\s+(?:senden|schicken|abschicken|rausschicken)\s*[.!?]?\s*$/i;
+      bodyHint = bodyHint.replace(negationPattern, '').trim();
+      bodyHintRaw = bodyHintRaw.replace(negationPattern, '').trim();
+
+      // Wenn body nach Bereinigung leer ist, kein Match
+      if (!bodyHint || bodyHint.length === 0) {
+        continue;
+      }
+
+      // Prüfe, ob AutoSend-Trigger im Command-Teil vorhanden ist
+      const commandPart = match[0].substring(0, match[0].length - bodyHintRaw.length).toLowerCase();
+      const hasAutoSendTrigger = /\b(sofort|direkt|jetzt)\b/.test(commandPart) || 
+                                  /\b(schick|schicke)\b/.test(commandPart.toLowerCase());
+
+      return {
+        toRaw: toNameRaw.toLowerCase(), // Normalisiert für toRaw
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw, // Original mit Groß-/Kleinschreibung
+        hasAutoSendTrigger: hasAutoSendTrigger,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Helper-Funktion: Entfernt führendes "an <name>" mit optionalen Artikeln und Satzzeichen.
+ * Nur am Anfang (^), case-insensitive.
+ * @param body - Body-Text, der bereinigt werden soll
+ * @param toNameRaw - Empfängername (wird regex-sicher escaped)
+ * @returns Bereinigter Body-Text
+ */
+function stripLeadingAnName(body: string, toNameRaw?: string | null): string {
+  if (!body || typeof body !== 'string') {
+    return body || '';
+  }
+
+  if (!toNameRaw) {
+    return body;
+  }
+
+  const name = toNameRaw.trim();
+  if (!name) {
+    return body;
+  }
+
+  // Escapen von Sonderzeichen im Namen für Regex
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // Entferne "an <name>" oder "an dem/den/die <name>" mit optionalen Satzzeichen
+  // Pattern 1: Mit Leerzeichen nach Satzzeichen (z.B. "An Thomas. Bitte...")
+  const pattern1 = new RegExp(`^an\\s+(?:dem\\s+|den\\s+|die\\s+)?${escapedName}\\s*[\\.:,\\-]?\\s+`, 'i');
+  let cleaned = body.replace(pattern1, '').trim();
+
+  // Pattern 2: Ohne Leerzeichen nach Satzzeichen (z.B. "an thomas. Bitte...")
+  const pattern2 = new RegExp(`^an\\s+(?:dem\\s+|den\\s+|die\\s+)?${escapedName}[\\.:,\\-]\\s*`, 'i');
+  cleaned = cleaned.replace(pattern2, '').trim();
+
+  return cleaned;
+}
+
+/**
  * A3.4 – Erweiterte Free-Dictation-Erkennung für Umgangssprache.
  * Erkennt Varianten wie:
  * - "schreib bitte folgendes an thomas ..."
@@ -2125,6 +2732,25 @@ function checkFalsePositiveExclusion(normalized: string): boolean {
     if (pattern.test(text)) {
       console.log('[autosend-extended] excluded false-positive:', pattern);
       return true; // false-positive detected
+    }
+  }
+
+  // Negation/Preview patterns that should block AutoSend (höchste Priorität)
+  const negationPreviewPatterns = [
+    /\bnicht\s+(?:senden|schicken|abschicken|rausschicken|verschicken)\b/i,
+    /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+    /\b(?:nur|bloß)\s+entwurf\b/i,
+    /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+    /\b(?:vorlesen|vorlese|vorliest)\b/i,
+    /\b(?:preview|vorschau|vorschauen)\b/i,
+    /\b(?:zeige|zeig|zeigen)\s+mir\b/i,
+    /\b(?:zeige|zeig|zeigen)\s+(?:nur|bloß)\b/i,
+  ];
+
+  for (const pattern of negationPreviewPatterns) {
+    if (pattern.test(text)) {
+      console.log('[autosend-extended] excluded - negation/preview pattern detected:', pattern);
+      return true; // negation/preview detected - block AutoSend
     }
   }
 
@@ -2468,6 +3094,11 @@ function parseFreeDictationA34(normalized: string): VoiceIntent | null {
 
   // Clean body text from command phrases using the robust cleaning function
   bodyText = cleanEmailBodyFromCommand(bodyText, toNameRaw);
+  // Additional guard: Remove leading "an <name>" with optional articles and punctuation
+  bodyText = stripLeadingAnName(bodyText, toNameRaw);
+  bodyText = bodyText.trim();
+
+  console.log('[intent-router][A3.4][debug] body after clean:', bodyText.substring(0, 80));
 
   // FIX 2: Sicherstellen, dass autoSend korrekt gesetzt wird (inkl. imperative detection)
   const autoSend = hasAutoSendPhrase;
@@ -2541,6 +3172,31 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   // Wenn ja, muss autoSend IMMER false bleiben, auch wenn später
   // Intent-Handler AutoSend erkennen.
   const autoSendExcludedByFalsePositive = checkFalsePositiveExclusion(text);
+
+  // --------------------------------------------------
+  // LASS-WISSEN: "lass <name> bitte folgendes wissen" (Wizard4 explicit-body)
+  // Muss VOR Status-Brain kommen, da es explizites Text-Diktat ist.
+  // Erkennt Varianten:
+  // - "Lass Thomas bitte folgendes wissen, Thomas, hier ist Dennis. Ich komme 15 Minuten später."
+  // - "Lass Thomas folgendes wissen: Hi Thomas, ich komme 10 Minuten später."
+  // - "Lass Thomas wissen: Ich komme 5 Minuten später."
+  // --------------------------------------------------
+  const lassWissenIntent = detectLassWissenCommand(text, original);
+  if (lassWissenIntent) {
+    // Block AutoSend if false-positive exclusion was detected
+    if (autoSendExcludedByFalsePositive && lassWissenIntent.meta?.autoSend) {
+      lassWissenIntent.meta.autoSend = false;
+      if (lassWissenIntent.meta.freeDictationMeta) {
+        lassWissenIntent.meta.freeDictationMeta.autoSend = false;
+      }
+      console.log('[intent-router][lass-wissen] AutoSend blocked - false-positive exclusion');
+    }
+    console.log('[intent-router][lass-wissen] matched:', {
+      toName: lassWissenIntent.toRaw,
+      autoSend: lassWissenIntent.meta?.autoSend,
+    });
+    return lassWissenIntent;
+  }
 
   // --------------------------------------------------
   // STATUS-BRAIN: Schnelle Status-Nachrichten (VOR Diktier-Engine)
@@ -3059,10 +3715,10 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           // Use body-clean to extract body
           bodyHint = cleanEmailBodyFromCommand(original, toNameRaw);
           // Strip trailing send phrases from end
-          const strippedResult = stripTrailingSendPhrases(bodyHint || '');
-          bodyHint = strippedResult.body;
+          const strippedResult = stripTrailingSendPhrasesV4(bodyHint || '');
+          bodyHint = strippedResult.text;
           if (strippedResult.stripped) {
-            console.log('[intent-router][strip-trailing-send] removed trailing send phrase from bodyHint');
+            console.debug('[intent-router][strip-trailing-send] removed trailing send phrase from bodyHint');
           }
         }
         
@@ -3569,23 +4225,74 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         text
       );
       
-      // Versuche, Empfänger und Body-Hint zu extrahieren
-      const emailParsed = parseEmailCompose(original);
-      const extractedEmail = extractEmailAddress(original);
+      // Prüfe zuerst auf "schick/sende <NAME> eine kurze mail, <BODY>" Muster
+      const schickMailParsed = parseSchickMailPattern(original);
+      let toRaw: string | undefined;
+      let bodyHint: string | undefined;
+      let bodyHintRaw: string | undefined;
+
+      if (schickMailParsed) {
+        // Neues Pattern erkannt - verwende dieses
+        toRaw = schickMailParsed.toRaw;
+        bodyHint = schickMailParsed.bodyHint;
+        bodyHintRaw = schickMailParsed.bodyHint; // Für jetzt gleich wie bodyHint
+        console.log('[intent-router][intent-4.2][schick-mail-pattern] Pattern erkannt:', {
+          toRaw,
+          bodyHintPreview: bodyHint?.substring(0, 50)
+        });
+      } else {
+        // Fallback: Versuche parseEmailCompose (für "schreib ..." Varianten)
+        const emailParsed = parseEmailCompose(original);
+        toRaw = emailParsed?.toRaw;
+        bodyHint = emailParsed?.bodyHint;
+      }
+
+      // Prüfe auf Imperativ am Anfang für AutoSend
+      const imperativePattern = /^(schick|schicke|sende|send)\b/i;
+      const hasImperative = imperativePattern.test(text);
       
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(text));
+      
+      // AutoSend-Entscheidung: true wenn Imperativ UND keine Negation UND kein False-Positive
+      const autoSend = hasImperative && !hasNegation && !autoSendExcludedByFalsePositive;
+
       // Erstelle email-compose Intent
       const intent: VoiceIntent = {
         type: "email-compose",
-        toRaw: emailParsed?.toRaw,
+        toRaw: toRaw,
         subjectHint: undefined,
-        bodyHint: emailParsed?.bodyHint,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'intent-4.2-umgangssprache',
+          autoSend: autoSend,
+        },
       };
       
       // Wenn eine E-Mail-Adresse per Regex gefunden wurde, diese als 'to' setzen
+      const extractedEmail = extractEmailAddress(original);
       if (extractedEmail) {
         intent.to = extractedEmail;
         console.log("[intent-router][intent-4.2] E-Mail-Adresse extrahiert:", extractedEmail);
       }
+
+      console.log('[intent-router][intent-4.2] Intent erstellt:', {
+        toRaw,
+        hasBodyHint: !!bodyHint,
+        bodyHintPreview: bodyHint?.substring(0, 50),
+        autoSend,
+        hasImperative,
+        hasNegation
+      });
       
       return intent;
     }
@@ -3629,18 +4336,32 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       let bodyText = cleanEmailBodyFromCommand(rawBodyTextOriginal, toNameRaw);
       
       // Strip trailing send phrases from end
-      const strippedResult = stripTrailingSendPhrases(bodyText);
-      bodyText = strippedResult.body;
+      const strippedResult = stripTrailingSendPhrasesV4(bodyText);
+      bodyText = strippedResult.text;
       if (strippedResult.stripped) {
-        console.log('[intent-router][strip-trailing-send] removed trailing send phrase from bodyHint');
+        console.debug('[intent-router][strip-trailing-send] removed trailing send phrase from bodyHint');
+      }
+      
+      // Validierungs-Check: Wenn bodyText nach stripping leer wird, kein email-compose erstellen
+      if (!bodyText || bodyText.trim().length < 3) {
+        console.debug("[intent-router] bodyHint empty after stripping, ignoring compose");
+        // Continue to next matcher/fallback - don't create intent
+        return { type: "unknown" };
       }
       
       // AutoSend: This pattern semantically indicates a send request
-      // BUT: Block if false-positive exclusion was detected
+      // BUT: Block if false-positive exclusion was detected OR negation present
       let autoSend = true;
       if (autoSendExcludedByFalsePositive) {
         autoSend = false;
         console.log('[intent-router][autosend-guard] autosend blocked due to false-positive exclusion');
+      }
+      
+      // Prüfe auf Negation (höchste Priorität)
+      const hasNegation = hasNoSendNegation(original) || hasNoSendNegation(text);
+      if (hasNegation) {
+        autoSend = false;
+        console.debug("[intent-router][autosend] disabled due to negation");
       }
       
       console.log('[intent-router][intent-4.2][schicken-direct] erkannt', {
@@ -3677,6 +4398,190 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         console.log("[intent-router][intent-4.2][schicken-direct] E-Mail-Adresse extrahiert:", extractedEmail);
       }
       
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // SHORT IMPERATIVE PATTERN: "sende <name> bitte, <body>"
+  // ============================================================
+  // Erkennt kurze Imperativ-Sätze wie:
+  // - "Sende Thomas bitte, ich melde mich später nochmal."
+  // - "Schick Thomas, ich bin gleich da."
+  // Muss VOR AI-Fallback kommen, aber NACH allen anderen Email-Intents
+  {
+    const shortImperativeMatch = detectShortImperativePattern(original, text);
+    if (shortImperativeMatch) {
+      const { toRaw, bodyHint, bodyHintRaw } = shortImperativeMatch;
+
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+      // AutoSend: true wenn Imperativ UND keine Negation UND kein False-Positive
+      const autoSend = !hasNegation && !autoSendExcludedByFalsePositive;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: undefined,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'short-imperative',
+          autoSend: autoSend,
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][short-imperative] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][short-imperative] matched', {
+        toNameRaw: toRaw,
+        bodyPreview: bodyHint.substring(0, 50),
+        bodyHintRawPreview: bodyHintRaw.substring(0, 50),
+        autoSend: autoSend,
+        hasNegation: hasNegation,
+        excludedByFalsePositive: autoSendExcludedByFalsePositive
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // PASSIVE SEND PATTERN: "bitte sofort an <name> senden. <body>"
+  // ============================================================
+  // Erkennt passive Send-Sätze wie:
+  // - "Bitte sofort an Thomas senden. Kurze Info verzögert sich etwas."
+  // - "Sofort an Thomas senden: Bin in 5 Minuten da."
+  // - "Bitte an Thomas senden. Kurze Info verzögert sich etwas." (ohne sofort -> previewOnly)
+  // Muss VOR AI-Fallback kommen, aber NACH allen anderen Email-Intents
+  {
+    const passiveSendMatch = detectPassiveSendPattern(original, text);
+    if (passiveSendMatch) {
+      const { toRaw, bodyHint, bodyHintRaw, hasAutoSendTrigger } = passiveSendMatch;
+
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+      // AutoSend: true wenn AutoSend-Trigger vorhanden UND keine Negation UND kein False-Positive
+      // default: false (wenn kein "sofort|direkt|jetzt" im Command)
+      const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: undefined,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'passive-send',
+          autoSend: autoSend,
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][passive-send] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      // Extrahiere Command-Teil für Logging
+      const commandMatch = original.match(/^(?:bitte\s+)?(?:sofort|direkt|jetzt)?\s*an\s+[^,.:]+\s+senden/i);
+      const commandPreview = commandMatch ? commandMatch[0].substring(0, 50) : 'unknown';
+
+      console.debug('[intent-router][passive-send] matched', {
+        toNameRaw: toRaw,
+        bodyPreview: bodyHint.substring(0, 50),
+        autoSend: autoSend,
+        commandPreview: commandPreview,
+        hasAutoSendTrigger: hasAutoSendTrigger,
+        hasNegation: hasNegation,
+        excludedByFalsePositive: autoSendExcludedByFalsePositive
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // SCHICK-AN-DIRECT PATTERN: "schick das direkt an thomas bin im termin"
+  // ============================================================
+  // Erkennt direkte "schick an <name> <body>" Sätze ohne Separator:
+  // - "Schick das direkt an Thomas bin im Termin."
+  // - "Schick bitte an Thomas ich ruf später an"
+  // - "Schick an Thomas bin gleich da"
+  // Muss VOR AI-Fallback kommen, aber NACH allen anderen Email-Intents
+  {
+    const schickAnDirectMatch = detectSchickAnDirectPattern(original, text);
+    if (schickAnDirectMatch) {
+      const { toRaw, bodyHint, bodyHintRaw, hasAutoSendTrigger } = schickAnDirectMatch;
+
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+      // AutoSend: true wenn AutoSend-Trigger vorhanden UND keine Negation UND kein False-Positive
+      // Wenn "schick" verwendet wird, setze autoSend=true (wie bei anderen schick-Patterns)
+      const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: undefined,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'schick-an-direct',
+          autoSend: autoSend,
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][schick-an-direct] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.debug('[intent-router][schick-an-direct] matched', {
+        toNameRaw: toRaw,
+        bodyPreview: bodyHint.substring(0, 50),
+        normalizedPreview: text.substring(0, 80),
+        autoSend: autoSend,
+        hasAutoSendTrigger: hasAutoSendTrigger,
+        hasNegation: hasNegation,
+        excludedByFalsePositive: autoSendExcludedByFalsePositive
+      });
+
       return intent;
     }
   }

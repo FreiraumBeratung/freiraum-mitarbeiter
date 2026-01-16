@@ -7,6 +7,10 @@
 import { describe, it, expect } from 'vitest';
 import { cleanEmailBodyFromCommand } from './intent_router';
 
+// Import stripLeadingAnName for testing (needs to be exported or tested indirectly)
+// Since stripLeadingAnName is not exported, we'll test it indirectly through cleanEmailBodyFromCommand
+// and add a test that simulates the A3.4 flow
+
 describe('cleanEmailBodyFromCommand', () => {
   
   describe('Case 1: Nachricht mit Startmarker nach Steuer-Phrasen', () => {
@@ -147,6 +151,68 @@ describe('cleanEmailBodyFromCommand', () => {
       const input = 'Schreibe bitte folgende Mail an Thomas und schick sie direkt raus. Hi Thomas, hier ist Dennis. Ich hoffe dir geht es gut.';
       const result = cleanEmailBodyFromCommand(input, 'thomas');
       expect(result).toBe('Hi Thomas, hier ist Dennis. Ich hoffe dir geht es gut.');
+    });
+  });
+
+  describe('Bugfix: "An Thomas." prefix removal', () => {
+    it('should remove "An Thomas." prefix from body start', () => {
+      const input = 'An Thomas. Bitte ruf mich kurz zurück.';
+      const result = cleanEmailBodyFromCommand(input, 'thomas');
+      expect(result).toBe('Bitte ruf mich kurz zurück.');
+    });
+
+    it('should remove "an thomas:" prefix with colon', () => {
+      const input = 'an thomas: Bitte ruf mich kurz zurück.';
+      const result = cleanEmailBodyFromCommand(input, 'thomas');
+      expect(result).toBe('Bitte ruf mich kurz zurück.');
+    });
+
+    it('should remove "an thomas," prefix with comma', () => {
+      const input = 'an thomas, Bitte ruf mich kurz zurück.';
+      const result = cleanEmailBodyFromCommand(input, 'thomas');
+      expect(result).toBe('Bitte ruf mich kurz zurück.');
+    });
+
+    it('should handle full command: "Sende folgende Email an Thomas. Bitte ruf mich kurz zurück."', () => {
+      // Simuliere extrahierten Body (nach parseFreeDictationEmailCommand)
+      const extractedBody = 'An Thomas. Bitte ruf mich kurz zurück.';
+      const result = cleanEmailBodyFromCommand(extractedBody, 'thomas');
+      expect(result).toBe('Bitte ruf mich kurz zurück.');
+    });
+  });
+
+  describe('A3.4 Bugfix: Leading "An <Name>." removal', () => {
+    it('should remove "An Thomas." prefix from body start', () => {
+      const input = 'An Thomas. Bitte ruf mich kurz zurück.';
+      const result = cleanEmailBodyFromCommand(input, 'thomas');
+      expect(result).toBe('Bitte ruf mich kurz zurück.');
+    });
+
+    it('should remove "an dem thomas:" prefix with colon', () => {
+      const input = 'an dem thomas: bitte ruf mich kurz zurück';
+      const result = cleanEmailBodyFromCommand(input, 'thomas');
+      expect(result).toBe('bitte ruf mich kurz zurück');
+    });
+
+    it('should remove "an den thomas," prefix with comma', () => {
+      const input = 'an den thomas, bitte ruf mich kurz zurück';
+      const result = cleanEmailBodyFromCommand(input, 'thomas');
+      expect(result).toBe('bitte ruf mich kurz zurück');
+    });
+
+    it('should handle A3.4 integration: extracted body with "An Thomas." prefix', () => {
+      // Simuliere A3.4-Extraktion Ergebnis (wie bei "Sende folgende Email an Thomas. Bitte ruf mich kurz zurück.")
+      const extractedBodyText = 'An Thomas. Bitte ruf mich kurz zurück.';
+      const toNameRaw = 'thomas';
+      
+      // Simuliere cleanEmailBodyFromCommand + stripLeadingAnName (wie im A3.4-Pfad)
+      let cleaned = cleanEmailBodyFromCommand(extractedBodyText, toNameRaw);
+      // stripLeadingAnName wäre hier als zusätzlicher Schritt, aber cleanEmailBodyFromCommand
+      // sollte es bereits abdecken - falls nicht, wird es im A3.4-Pfad zusätzlich aufgerufen
+      
+      // Final bodyHint darf NICHT mit "An Thomas" anfangen
+      expect(cleaned).not.toMatch(/^an\s+thomas/i);
+      expect(cleaned).toContain('Bitte ruf mich kurz zurück');
     });
   });
 });

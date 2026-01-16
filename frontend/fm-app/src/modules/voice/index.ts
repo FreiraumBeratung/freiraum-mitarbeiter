@@ -46,6 +46,50 @@ const WIZARD4_AUTOSEND_ENABLED = true;
 const BACKEND = "http://127.0.0.1:30521";
 
 /**
+ * Helper-Funktion: Entfernt führendes "an <name>" mit optionalen Artikeln und Satzzeichen.
+ * Nur am Anfang (^), case-insensitive.
+ * @param body - Body-Text, der bereinigt werden soll
+ * @param recipientHints - Array von möglichen Empfängernamen (toRaw, resolvedToName, etc.)
+ * @returns Bereinigter Body-Text
+ */
+function stripLeadingAnRecipient(body: string, recipientHints: string[]): string {
+  if (!body || typeof body !== 'string') {
+    return body || '';
+  }
+
+  if (!recipientHints || recipientHints.length === 0) {
+    return body;
+  }
+
+  // Prüfe jeden möglichen Empfängernamen
+  for (const hint of recipientHints) {
+    if (!hint || typeof hint !== 'string') continue;
+    
+    const name = hint.trim();
+    if (!name) continue;
+
+    // Escapen von Sonderzeichen im Namen für Regex
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // Entferne "an <name>" oder "an dem/den/die <name>" mit optionalen Satzzeichen
+    // Pattern 1: Mit Leerzeichen nach Satzzeichen (z.B. "An Thomas. Bitte...")
+    const pattern1 = new RegExp(`^an\\s+(?:dem\\s+|den\\s+|die\\s+)?${escapedName}\\s*[\\.:,\\-]?\\s+`, 'i');
+    let cleaned = body.replace(pattern1, '').trim();
+
+    // Pattern 2: Ohne Leerzeichen nach Satzzeichen (z.B. "an thomas. Bitte...")
+    const pattern2 = new RegExp(`^an\\s+(?:dem\\s+|den\\s+|die\\s+)?${escapedName}[\\.:,\\-]\\s*`, 'i');
+    cleaned = cleaned.replace(pattern2, '').trim();
+
+    // Wenn etwas entfernt wurde, gib das Ergebnis zurück
+    if (cleaned !== body) {
+      return cleaned;
+    }
+  }
+
+  return body;
+}
+
+/**
  * Extrahiert eine E-Mail-Adresse aus einem Text per Regex.
  * Gibt die erste gefundene E-Mail-Adresse zurück oder null.
  */
@@ -654,7 +698,11 @@ export class VoiceController {
                 detail: { result: osmResp.result },
               })
             );
-            await speak(`Gefunden: ${found} Leads. Ergebnisse werden angezeigt.`);
+            if (typeof speak === "function") {
+              await speak(`Gefunden: ${found} Leads. Ergebnisse werden angezeigt.`);
+            } else {
+              console.warn("[fm-voice] speak() not available");
+            }
             return;
           }
         } catch {
@@ -678,7 +726,11 @@ export class VoiceController {
             method: "POST",
           }).catch(() => {});
         }
-        await speak("Verstanden. Ich starte die Suche.");
+        if (typeof speak === "function") {
+          await speak("Verstanden. Ich starte die Suche.");
+        } else {
+          console.warn("[fm-voice] speak() not available");
+        }
       } else if (intent.type === "reminder") {
         // HINWEIS: Diese Ausgabe "Erledigt, Erinnerung ist gesetzt" gehört ausschließlich
         // zur Reminder-/Termin-Logik und darf NICHT im E-Mail-Kontext (Wizard 2/3) ausgelöst werden.
@@ -718,16 +770,28 @@ export class VoiceController {
         } catch {
           // optional trigger
         }
-        await speak("Erledigt. Erinnerung ist gesetzt.");
+        if (typeof speak === "function") {
+          await speak("Erledigt. Erinnerung ist gesetzt.");
+        } else {
+          console.warn("[fm-voice] speak() not available");
+        }
       } else if (intent.type === "cancel") {
         if (voiceState.lastLeadTaskId) {
           await fetch(`${BACKEND}/lead_hunter/cancel/${voiceState.lastLeadTaskId}`, {
             method: "POST",
           }).catch(() => {});
           voiceState.lastLeadTaskId = null;
-          await speak("Alles klar. Ich stoppe die letzte Suche.");
+          if (typeof speak === "function") {
+            await speak("Alles klar. Ich stoppe die letzte Suche.");
+          } else {
+            console.warn("[fm-voice] speak() not available");
+          }
         } else {
-          await speak("Es gibt nichts zu stoppen.");
+          if (typeof speak === "function") {
+            await speak("Es gibt nichts zu stoppen.");
+          } else {
+            console.warn("[fm-voice] speak() not available");
+          }
         }
       } else {
         // Unknown intent – UI/PartnerBot informiert separat über Intent-Router
@@ -736,7 +800,11 @@ export class VoiceController {
     } catch (err) {
       console.warn("[fm-voice] route error:", err);
       this.setState("error");
-      await speak("Da gab es ein Problem bei der Ausführung.");
+      if (typeof speak === "function") {
+        await speak("Da gab es ein Problem bei der Ausführung.");
+      } else {
+        console.warn("[fm-voice] speak() not available");
+      }
       return;
     } finally {
       if (this.state !== "error") {
@@ -1644,10 +1712,20 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // ============================================================
       // POLISH FRÜH STARTEN: Starte Polish parallel, bevor UI gesetzt wird
       // ============================================================
-      // Bevorzuge bodyHintRaw (Original mit Groß-/Kleinschreibung) über bodyHint (normalized)
-      const rawBodyForPolish = (intent.bodyHintRaw && intent.bodyHintRaw.trim().length > 0) 
-        ? intent.bodyHintRaw 
-        : (body || '');
+      // FIX: Wenn bodyHint vorhanden ist (explicit-body), verwende IMMER bodyHint für Polish
+      // bodyHintRaw oder sourceText dürfen NICHT verwendet werden, wenn bodyHint existiert
+      const rawBodyForPolish = (intent.bodyHint && intent.bodyHint.trim().length > 0)
+        ? intent.bodyHint.trim()
+        : ((intent.bodyHintRaw && intent.bodyHintRaw.trim().length > 0) 
+          ? intent.bodyHintRaw 
+          : (body || ''));
+      
+      console.log('[wizard4][explicit-body][polish-input] bodyHint present:', !!(intent.bodyHint && intent.bodyHint.trim().length > 0), {
+        usingBodyHint: !!(intent.bodyHint && intent.bodyHint.trim().length > 0),
+        bodyHintPreview: intent.bodyHint?.substring(0, 50),
+        bodyHintRawPreview: intent.bodyHintRaw?.substring(0, 50),
+        rawBodyForPolishPreview: rawBodyForPolish.substring(0, 50)
+      });
       
       // Detect Status-Brain Quelle: KEIN Polish für Status-Brain Templates (sind bereits sauber)
       // Wiederverwende isStatusBrain aus früherem Block, falls vorhanden, sonst neu berechnen
@@ -1739,7 +1817,21 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               console.log("[wizard4][post-polish-normalize] before:", polished.slice(0, 180));
               console.log("[wizard4][post-polish-normalize] after:", normalizedBody.slice(0, 180));
               
-              finalBodyForUi = normalizedBody;
+              // Safety-Net: Entferne führendes "An <Name>." nach Polish
+              const recipientHints = [
+                intent.toRaw,
+                wizard4Draft?.toName,
+                finalToEmail?.split('@')[0], // E-Mail-Local-Part als Fallback
+              ].filter(Boolean) as string[];
+              
+              finalBodyForUi = stripLeadingAnRecipient(normalizedBody, recipientHints);
+              
+              if (finalBodyForUi !== normalizedBody) {
+                console.log('[wizard4][safety-net] Removed leading "An <Name>" after polish', {
+                  before: normalizedBody.substring(0, 50),
+                  after: finalBodyForUi.substring(0, 50)
+                });
+              }
               
               console.debug("[wizard4][ai-polish][normalize] before:", polished.substring(0, 100));
               console.debug("[wizard4][ai-polish][normalize] after:", finalBodyForUi.substring(0, 100));
@@ -1752,6 +1844,22 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             } else {
               // Fallback: Verwende Original-Body
               finalBodyForUi = rawBodyForUi;
+              
+              // Safety-Net: Entferne führendes "An <Name>." auch im no-polish Fallback
+              const recipientHints = [
+                intent.toRaw,
+                wizard4Draft?.toName,
+                finalToEmail?.split('@')[0], // E-Mail-Local-Part als Fallback
+              ].filter(Boolean) as string[];
+              
+              finalBodyForUi = stripLeadingAnRecipient(finalBodyForUi, recipientHints);
+              
+              if (finalBodyForUi !== rawBodyForUi) {
+                console.log('[wizard4][safety-net] Removed leading "An <Name>" in no-polish fallback', {
+                  before: rawBodyForUi.substring(0, 50),
+                  after: finalBodyForUi.substring(0, 50)
+                });
+              }
               
               // Verbessertes Logging für Fallback
               const logData: any = { 
@@ -1772,6 +1880,15 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             // DEFENSIV: Bei jedem Fehler Fallback auf Original, keine Exceptions werfen
             console.error('[wizard4][ai-polish] error during polishing, using original body:', err);
             finalBodyForUi = rawBodyForUi; // Sicherstellen, dass finalBodyForUi gesetzt ist
+            
+            // Safety-Net: Entferne führendes "An <Name>." auch im Error-Fallback
+            const recipientHints = [
+              intent.toRaw,
+              wizard4Draft?.toName,
+              finalToEmail?.split('@')[0], // E-Mail-Local-Part als Fallback
+            ].filter(Boolean) as string[];
+            
+            finalBodyForUi = stripLeadingAnRecipient(finalBodyForUi, recipientHints);
             
             const sendMode = wizard4Draft.sendMode || 'previewOnly';
             const isSendNow = sendMode === 'sendNow';
