@@ -16,6 +16,7 @@ import { buildWizard4EmailFromInput } from "../../logic/wizard4/email";
 import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 import { polishEmailBody } from "../../logic/wizard4/email_polish";
 import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
+import { resolveVoiceEmailSubject } from "./subject_resolve";
 
 declare global {
   interface Window {
@@ -403,15 +404,87 @@ function isInvalidRecipientToken(name: string): boolean {
 }
 
 /**
+ * Normalisiert wiederholte Empfängernamen.
+ * Entfernt direkt aufeinanderfolgende Duplikate (case-insensitive).
+ * Fallback: Wenn nach Normalisierung ein String ohne Leerzeichen entsteht,
+ * der aus zwei identischen Hälften besteht, wird nur die erste Hälfte zurückgegeben.
+ * 
+ * @param raw - Roher Name (z.B. "Thomas Thomas" oder "thomasthomas")
+ * @returns Normalisierter Name ohne Duplikate
+ */
+export function normalizeRepeatedRecipient(raw: string): string {
+  if (!raw || typeof raw !== 'string') {
+    return raw || '';
+  }
+
+  // Trim und normalisiere Whitespace zu single spaces
+  let text = raw.trim().replace(/\s+/g, ' ');
+
+  if (!text) {
+    return raw; // Defensiv: gib ursprüngliches raw zurück wenn leer
+  }
+
+  // Split in Tokens (space-separated)
+  const tokens = text.split(' ').filter(Boolean);
+
+  if (tokens.length === 0) {
+    return raw; // Defensiv: gib ursprüngliches raw zurück
+  }
+
+  // Entferne direkt aufeinanderfolgende Duplikate (case-insensitive)
+  const deduplicated: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const current = tokens[i].toLowerCase();
+    const previous = deduplicated.length > 0 ? deduplicated[deduplicated.length - 1].toLowerCase() : null;
+    
+    // Nur hinzufügen, wenn es nicht dasselbe wie das vorherige Token ist
+    if (current !== previous) {
+      deduplicated.push(tokens[i]); // Original-Case beibehalten
+    }
+  }
+
+  // Join zurück mit single space
+  const resultWithSpaces = deduplicated.join(' ').trim();
+
+  if (!resultWithSpaces) {
+    return raw; // Defensiv: gib ursprüngliches raw zurück wenn leer
+  }
+
+  // Fallback: Wenn nach finaler "clean/normalize" Verarbeitung (wo Spaces evtl. rausfliegen)
+  // ein String ohne Leerzeichen entsteht, prüfe zusätzlich:
+  // Wenn Länge gerade ist und firstHalf == secondHalf (case-insensitive), dann nimm firstHalf
+  const withoutSpaces = resultWithSpaces.replace(/\s+/g, '');
+  
+  if (withoutSpaces.length > 0 && withoutSpaces.length % 2 === 0) {
+    const halfLength = withoutSpaces.length / 2;
+    const firstHalf = withoutSpaces.substring(0, halfLength).toLowerCase();
+    const secondHalf = withoutSpaces.substring(halfLength).toLowerCase();
+    
+    if (firstHalf === secondHalf && firstHalf.length > 0) {
+      // Gib die erste Hälfte zurück (mit Original-Case wenn möglich, sonst lowercase)
+      const originalFirstHalf = resultWithSpaces.substring(0, Math.min(halfLength, resultWithSpaces.length));
+      return originalFirstHalf || firstHalf;
+    }
+  }
+
+  return resultWithSpaces;
+}
+
+/**
  * Bereinigt einen Namen für die Contact-Resolver-Anfrage
  * Entfernt führende Artikel/Präpositionen, nachgestellte Füllwörter, Kommata
  * Normalisiert für toleranteres Matching (z.B. "freiraum beratung" -> "freiraumberatung")
+ * FIX: Entfernt auch doppelte Empfängernamen (z.B. "Thomas Thomas" -> "Thomas")
  */
 function cleanNameForResolver(raw?: string | null): string | null {
   if (!raw) return null;
 
+  // FIX: Normalisiere wiederholte Empfängernamen ZUERST
+  const deduplicatedRaw = normalizeRepeatedRecipient(raw);
+  const wasDeduplicated = deduplicatedRaw !== raw;
+
   // In Kleinbuchstaben umwandeln
-  let text = raw.trim().toLowerCase();
+  let text = deduplicatedRaw.trim().toLowerCase();
 
   if (!text) return null;
 
@@ -450,12 +523,22 @@ function cleanNameForResolver(raw?: string | null): string | null {
   // Für einzelne Namen wie "thomas" bleibt es bei "thomas"
   const normalizedForMatching = cleaned.replace(/\s+/g, "");
 
-  // Log für Debugging
-  console.log('[fm-voice][wizard4][contact-resolver] Name bereinigt:', {
+  // Log für Debugging (inkl. Deduplication-Info wenn relevant)
+  const logData: any = {
     original: raw,
     cleaned: cleaned,
     normalizedForMatching: normalizedForMatching
-  });
+  };
+  
+  if (wasDeduplicated) {
+    logData.deduplicated = deduplicatedRaw;
+    console.log('[fm-voice][wizard4][contact-resolver] normalized duplicates:', {
+      original: raw,
+      deduplicated: deduplicatedRaw
+    });
+  }
+  
+  console.log('[fm-voice][wizard4][contact-resolver] Name bereinigt:', logData);
 
   // Wir geben beide Varianten zurück - der Resolver kann beide versuchen
   // Für jetzt geben wir die normalisierte Version zurück (ohne Leerzeichen)
@@ -1646,7 +1729,15 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const statusMetaForSubject = emailIntentForSubject?.meta?.statusEmail;
       const freeDictationMetaForSubject = emailIntentForSubject?.meta?.freeDictationMeta;
       
-      let subject = (wizard4Draft && wizard4Draft.subject) || intent.subjectHint || null;
+      // FIX: Verwende resolveVoiceEmailSubject, um bei AutoSend+sendNow nicht stale draftSubject zu verwenden
+      const resolvedSubject = resolveVoiceEmailSubject({
+        subjectHint: intent.subjectHint ?? undefined,
+        draftSubject: wizard4Draft?.subject ?? undefined,
+        sendMode: wizard4Draft?.sendMode ?? undefined,
+        autoSend: Boolean(intent.meta?.autoSend),
+      });
+      
+      let subject = resolvedSubject;
       
       // Wenn Status-Mail oder Free-Diktat → Betreff auf neutrale Standardzeile setzen
       if (statusMetaForSubject?.isStatus || freeDictationMetaForSubject) {

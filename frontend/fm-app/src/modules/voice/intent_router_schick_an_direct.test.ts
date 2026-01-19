@@ -181,4 +181,41 @@ describe('Schick-An-Direct Pattern: "schick das direkt an <name> <body>"', () =>
       }
     });
   });
+
+  describe('Duplicate recipient name handling', () => {
+    it('should handle "Schick das direkt an Thomas Thomas bin im Termin." and normalize to "thomas"', () => {
+      const input = "Schick das direkt an Thomas Thomas bin im Termin.";
+      const intent = routeVoiceIntent(input);
+      
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        // toRaw sollte "thomas" sein, nicht "thomas thomas" oder "thomasthomas"
+        const toRawLower = intent.toRaw?.toLowerCase() || '';
+        expect(toRawLower).toBe('thomas');
+        expect(toRawLower).not.toContain('thomas thomas');
+        expect(toRawLower).not.toContain('thomasthomas');
+        
+        expect(intent.bodyHint).toBeDefined();
+        if (intent.bodyHint) {
+          expect(intent.bodyHint.toLowerCase()).toContain('bin im termin');
+        }
+        // AutoSend sollte aktiviert sein (weil "direkt" im Command)
+        expect(intent.meta?.autoSend).toBe(true);
+        expect(intent.meta?.source).toBe('schick-an-direct');
+      }
+    });
+
+    it('should handle "Schick an Max Max bin gleich da" and normalize to "max"', () => {
+      const input = "Schick an Max Max bin gleich da";
+      const intent = routeVoiceIntent(input);
+      
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        const toRawLower = intent.toRaw?.toLowerCase() || '';
+        expect(toRawLower).toBe('max');
+        expect(toRawLower).not.toContain('max max');
+        expect(intent.meta?.autoSend).toBe(true);
+      }
+    });
+  });
 });

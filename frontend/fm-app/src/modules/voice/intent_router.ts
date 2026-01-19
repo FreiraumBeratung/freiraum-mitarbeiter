@@ -2248,6 +2248,118 @@ function parseEmailCompose(text: string): { toRaw: string; bodyHint?: string } |
 }
 
 /**
+ * Normalisiert Body-Text für schick-rueber Pattern.
+ * Kleine Regeln, kein KI/NLP.
+ * 
+ * @param bodyRaw - Roher Body-Text
+ * @returns Normalisierter Body-Text
+ */
+function normalizeSchickRueberBody(bodyRaw: string): string {
+  let body = bodyRaw.trim();
+  
+  // Entferne führende Kommas/Punkte/Leerzeichen
+  body = body.replace(/^[,\.\s]+/, '').trim();
+  
+  // Entferne führendes "dass " falls noch vorhanden
+  body = body.replace(/^dass\s+/i, '').trim();
+  
+  // Entferne führendes "bitte " falls noch vorhanden
+  body = body.replace(/^bitte\s+/i, '').trim();
+  
+  // Spezial-Regel: "sich alles um X Minuten verschiebt" -> "Alles verschiebt sich um X Minuten."
+  const verschiebtMatch = body.match(/^sich\s+alles\s+um\s+(\d+)\s+minuten\s+verschiebt/i);
+  if (verschiebtMatch) {
+    const minutes = verschiebtMatch[1];
+    body = `Alles verschiebt sich um ${minutes} Minuten.`;
+  } else if (/^sich\s+/i.test(body)) {
+    // Sonst: "sich ..." -> "Es " + body
+    body = 'Es ' + body.replace(/^sich\s+/i, '');
+  }
+  
+  // Stelle sicher, dass body mit einem Großbuchstaben startet
+  if (body.length > 0) {
+    body = body.charAt(0).toUpperCase() + body.slice(1);
+  }
+  
+  // Stelle sicher, dass body mit Punkt endet (wenn noch nicht vorhanden)
+  if (body.length > 0 && !/[.!?]$/.test(body)) {
+    body = body + '.';
+  }
+  
+  return body;
+}
+
+/**
+ * Parst "schick <NAME> kurz rüber, dass <BODY>" Muster.
+ * Unterstützt Varianten:
+ * - "schick Thomas kurz rüber, dass ich später komme"
+ * - "schick Thomas rüber, dass ich später komme"
+ * - "schick Thomas kurz rüber dass ich später komme" (ohne Komma)
+ * - "schick Thomas kurz rüber: ich komme später"
+ * - "schick Thomas kurz rüber, bin im Termin" (ohne "dass")
+ * - "schick Thomas kurz rüber, bitte, ich bin gleich da" (mit "bitte")
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string } | null
+ */
+function detectSchickRueberPattern(original: string, normalized: string): { 
+  toRaw: string; 
+  bodyHint: string; 
+  bodyHintRaw: string;
+} | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
+  const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'sie', 'er', 'mich', 'dich', 'sich'];
+
+  // Pattern: schick <name> (kurz)? rüber(,)? (bitte,)? (dass|:)? <body>
+  // Erkenne "rüber" auch als "ruber" (STT ohne Umlaute)
+  // Case-insensitive, optionales Komma, optional "bitte", optional "dass" oder ":"
+  // WICHTIG: ":" kann direkt nach "rüber" kommen (ohne Leerzeichen)
+  // WICHTIG: "dass" und ":" sind optional - Body kann auch direkt nach Komma/Leerzeichen kommen
+  const pattern = /^schick\s+([a-zäöüß]+)\s+(?:kurz\s+)?r(?:ü|u)ber(?:\s*,\s*|\s+)(?:(?:bitte)\s*,?\s*)?(?:(?:dass)\s+|:\s*)?(.+)$/i;
+  
+  const match = text.match(pattern);
+  if (match && match[1] && match[2]) {
+    const toNameRaw = match[1].trim();
+    const toNameLower = toNameRaw.toLowerCase();
+
+    // Blockiere Pronomen
+    if (blockedPronouns.includes(toNameLower)) {
+      return null;
+    }
+
+    let bodyHintRaw = match[2].trim();
+    
+    // Wenn body leer ist, kein Match
+    if (!bodyHintRaw || bodyHintRaw.length === 0) {
+      return null;
+    }
+
+    // Body normalisieren mit Helper-Funktion
+    bodyHintRaw = normalizeSchickRueberBody(bodyHintRaw);
+
+    // Body normalisieren für bodyHint (lowercase, Unicode clean)
+    let bodyHint = normalize(bodyHintRaw);
+
+    // Wenn body nach Bereinigung leer ist, kein Match
+    if (!bodyHint || bodyHint.length === 0) {
+      return null;
+    }
+
+    return {
+      toRaw: toNameRaw.toLowerCase(), // Normalisiert für toRaw
+      bodyHint: bodyHint,
+      bodyHintRaw: bodyHintRaw, // Original mit Groß-/Kleinschreibung
+    };
+  }
+
+  return null;
+}
+
+/**
  * Parst "schick/sende <NAME> eine kurze mail, <BODY>" Muster für Intent-4.2 Fallback.
  * Unterstützt Varianten:
  * - "schick Thomas eine kurze mail, ich komme 10 Minuten später"
@@ -2344,7 +2456,12 @@ function detectShortImperativePattern(original: string, normalized: string): {
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match && match[2] && match[3]) {
-      const toNameRaw = match[2].trim();
+      let toNameRaw = match[2].trim();
+      
+      // FIX: Entferne "rüber"/"ruber" am Ende des Namens (falls vorhanden)
+      // Verhindert, dass "Schick Thomas rüber, ..." zu toRaw="thomasrüber" wird
+      toNameRaw = toNameRaw.replace(/r(?:ü|u)ber$/i, '').trim();
+      
       const toNameLower = toNameRaw.toLowerCase();
 
       // Blockiere Pronomen
@@ -2546,6 +2663,32 @@ function detectSchickAnDirectPattern(original: string, normalized: string): {
         // Zweites Token ist Teil des Namens (z.B. "Thomas Müller")
         toNameRaw = firstNameToken + ' ' + secondNameToken;
         bodyHintRaw = match[4].trim();
+      }
+      
+      // FIX: Normalisiere wiederholte Empfängernamen (z.B. "Thomas Thomas" -> "Thomas")
+      // Importiere die Funktion dynamisch, um Zirkelabhängigkeiten zu vermeiden
+      // (Die Funktion wird später in index.ts definiert und exportiert)
+      if (typeof toNameRaw === 'string' && toNameRaw.trim()) {
+        const tokens = toNameRaw.trim().split(/\s+/);
+        if (tokens.length > 1) {
+          // Entferne direkt aufeinanderfolgende Duplikate (case-insensitive)
+          const deduplicated: string[] = [];
+          for (let i = 0; i < tokens.length; i++) {
+            const current = tokens[i].toLowerCase();
+            const previous = deduplicated.length > 0 ? deduplicated[deduplicated.length - 1].toLowerCase() : null;
+            if (current !== previous) {
+              deduplicated.push(tokens[i]); // Original-Case beibehalten
+            }
+          }
+          if (deduplicated.length < tokens.length) {
+            // Duplikate wurden entfernt
+            toNameRaw = deduplicated.join(' ').trim();
+            console.debug('[intent-router][schick-an-direct] normalized duplicate recipient name:', {
+              original: firstNameToken + (secondNameToken ? ' ' + secondNameToken : ''),
+              normalized: toNameRaw
+            });
+          }
+        }
       }
       
       const toNameLower = toNameRaw.toLowerCase();
@@ -4218,6 +4361,59 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     
     // Nur wenn NICHT mit "schreib" beginnt (dann hätte der frühe Block schon gegriffen)
     const startsWithSchreib = /^schreib(e)?(\s+(mal|bitte|kurz|eben))?\s+/i.test(text);
+    
+    // ============================================================
+    // SCHICK-RÜBER PATTERN: "schick <name> kurz rüber, dass <body>"
+    // ============================================================
+    // Erkennt Umgangssprache: "Schick Thomas kurz rüber, dass ich später komme."
+    // Muss VOR intent-4.2 Fallback kommen
+    {
+      const schickRueberMatch = detectSchickRueberPattern(original, text);
+      if (schickRueberMatch) {
+        const { toRaw, bodyHint, bodyHintRaw } = schickRueberMatch;
+
+        // Prüfe auf Negation/Preview (höchste Priorität)
+        const negationPatterns = [
+          /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+          /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+          /\b(?:nur|bloß)\s+entwurf\b/i,
+          /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+          /\b(?:vorlesen|vorlese|vorliest)\b/i,
+          /\b(?:preview|vorschau|vorschauen)\b/i,
+        ];
+        const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+        // AutoSend: true weil "schick" Imperativ, aber blockieren wenn Negation oder False-Positive
+        const autoSend = !hasNegation && !autoSendExcludedByFalsePositive;
+
+        const intent: VoiceIntent = {
+          type: "email-compose",
+          toRaw: toRaw,
+          subjectHint: undefined,
+          bodyHint: bodyHint,
+          bodyHintRaw: bodyHintRaw,
+          meta: {
+            source: 'schick-rueber',
+            autoSend: autoSend,
+          },
+        };
+
+        // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+        const extractedEmail = extractEmailAddress(original);
+        if (extractedEmail) {
+          intent.to = extractedEmail;
+          console.log("[intent-router][schick-rueber] E-Mail-Adresse extrahiert:", extractedEmail);
+        }
+
+        console.log('[intent-router][schick-rueber] matched', {
+          toNameRaw: toRaw,
+          bodyTextPreview: bodyHint.substring(0, 50),
+          autoSend: autoSend,
+        });
+
+        return intent;
+      }
+    }
     
     if (hasMailVerb && hasMailNoun && !startsWithSchreib) {
       console.log(
