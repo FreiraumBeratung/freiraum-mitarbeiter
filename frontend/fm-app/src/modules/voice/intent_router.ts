@@ -2417,6 +2417,192 @@ function parseSchickMailPattern(original: string): { toRaw: string; bodyHint?: s
 }
 
 /**
+ * Erkennt "schick <name> direkt <body>" Pattern mit Kommas und Füllwörtern.
+ * 
+ * Unterstützt Muster:
+ * - "Schick, Thomas, bitte direkt, ruf mich kurz zurück."
+ * - "Schick Thomas direkt: bin im Termin."
+ * - "Schick Thomas bitte direkt ruf mich zurück"
+ * 
+ * Regeln:
+ * - Startet mit "schick" oder "schicke" (optional mit Komma)
+ * - EIN Name-Token als Empfänger
+ * - Optional Füllwörter: "bitte", "mal", "kurz", "eben"
+ * - Optional "direkt" (wenn vorhanden -> autoSend true)
+ * - Der Rest ist body (mindestens 2 Tokens oder >= 5 Zeichen)
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase, ohne Kommas)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string; hasAutoSendTrigger: boolean } | null
+ */
+function matchSchickNameDirectBody(original: string, normalized: string): {
+  toRaw: string;
+  bodyHint: string;
+  bodyHintRaw: string;
+  hasAutoSendTrigger: boolean;
+} | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
+  const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'sie', 'er', 'mich', 'dich', 'sich'];
+
+  // Füllwörter, die ignoriert werden können
+  const fillerWords = ['bitte', 'mal', 'kurz', 'eben', 'direkt'];
+
+  // Pattern: "schick" oder "schicke" (optional mit Komma) + optional "das" + optional "an" + Name + optional Füllwörter + optional ("direkt"|"raus"|"sofort"|"jetzt") + Body
+  // Unterstützt auch "schick an <name> raus" Patterns
+  // WICHTIG: Name muss genau EIN Token sein, danach kommt Body
+  // Pattern für original (mit Kommas) - prüfen wir zuerst, da es spezifischer ist:
+  // "Schick, Thomas, bitte direkt, ruf mich kurz zurück."
+  // "Schicks an Thomas raus. Bin gerade beim Kunden."
+  const originalPatterns = [
+    // "Schicks an Thomas raus. Bin gerade beim Kunden."
+    // WICHTIG: Nach Normalisierung ist "schicks" bereits zu "schick" geworden, daher nur "schick" matchen
+    // Muss VOR dem einfachen Pattern kommen, da es spezifischer ist
+    // Pattern erfasst: "schick" + optional "das" + optional "bitte" + "an" + NAME (Gruppe 1) + optional "direkt/sofort/jetzt" + optional "raus/los/ab" + BODY (Gruppe 2)
+    /^schick(?:e)?\s+(?:das\s+)?(?:bitte\s+)?an\s+([a-zäöüß]+)\s+(?:bitte\s+)?(?:direkt\s+|sofort\s+|jetzt\s+)?(?:raus\s*[,:\.]?\s*|los\s*[,:\.]?\s*|ab\s*[,:\.]?\s*)?(.+)$/i,
+    // "Schick, Thomas, bitte direkt, ruf mich kurz zurück."
+    /^schick(?:e)?,?\s*([a-zäöüß]+),?\s*(?:(?:bitte|mal|kurz|eben),?\s*)*(?:direkt,?\s*)?(.+)$/i,
+  ];
+  
+  // Pattern für normalized (ohne Kommas):
+  // WICHTIG: Name muss genau EIN Token sein, danach kommen optional Füllwörter, dann Body
+  const normalizedPatterns = [
+    // "schicks an thomas raus bin gerade beim kunden"
+    // WICHTIG: Nach Normalisierung ist "schicks" bereits zu "schick" geworden, daher nur "schick" matchen
+    // Muss VOR dem einfachen Pattern kommen, da es spezifischer ist
+    /^schick(?:e)?\s+(?:das\s+)?(?:bitte\s+)?an\s+([a-zäöüß]+)\s+(?:bitte\s+)?(?:direkt\s+|sofort\s+|jetzt\s+)?(?:raus\s*[,:\.]?\s*|los\s*[,:\.]?\s*|ab\s*[,:\.]?\s*)?(.+)$/i,
+    // "schick thomas bitte direkt ruf mich zuruck"
+    /^schick(?:e)?\s+([a-zäöüß]+)(?:\s+(?:bitte|mal|kurz|eben))*(?:\s+direkt)?\s+(.+)$/i,
+  ];
+
+  let match: RegExpMatchArray | null = null;
+
+  // Versuche zuerst original Patterns (mit Kommas) - spezifischer
+  for (const pattern of originalPatterns) {
+    match = text.match(pattern);
+    if (match && match[1] && match[2]) {
+      break;
+    }
+  }
+  
+  if (!match || !match[1] || !match[2]) {
+    // Falls nicht gematcht, versuche normalized Patterns (ohne Kommas)
+    for (const pattern of normalizedPatterns) {
+      match = normalized.match(pattern);
+      if (match && match[1] && match[2]) {
+        break;
+      }
+    }
+  }
+
+  if (match && match[1] && match[2]) {
+    let toNameRaw = match[1].trim();
+    const toNameLower = toNameRaw.toLowerCase();
+
+    // FIX: Defensive Check - toRaw darf nicht "s", "an" oder leer sein
+    if (toNameRaw === 's' || toNameRaw === 'an' || toNameRaw.length === 0) {
+      return null;
+    }
+
+    // Blockiere Pronomen (WICHTIG: vor Token-Split prüfen)
+    if (blockedPronouns.includes(toNameLower)) {
+      return null;
+    }
+
+    // Blockiere mehr als 1 Token (Name sollte nur ein Token sein)
+    const nameTokens = toNameRaw.split(/\s+/);
+    if (nameTokens.length > 1) {
+      return null;
+    }
+    
+    // FIX: Entferne "direkt" am Ende des Namens (falls vorhanden)
+    // Verhindert, dass "Schick Thomas direkt: ..." zu toRaw="thomas direkt" wird
+    toNameRaw = toNameRaw.replace(/\s+direkt$/i, '').trim();
+    
+    // Erneute Defensive Check nach Cleanup
+    if (toNameRaw === 's' || toNameRaw === 'an' || toNameRaw.length === 0) {
+      return null;
+    }
+    
+    // Erneute Pronomen-Prüfung nach Cleanup
+    const toNameLowerAfterCleanup = toNameRaw.toLowerCase();
+    if (blockedPronouns.includes(toNameLowerAfterCleanup)) {
+      return null;
+    }
+
+    let bodyRaw = match[2].trim();
+    
+    // Wenn body leer ist, kein Match
+    if (!bodyRaw || bodyRaw.length === 0) {
+      return null;
+    }
+
+    // Prüfe, ob Body lang genug ist (mindestens 2 Tokens oder >= 5 Zeichen)
+    const bodyTokens = bodyRaw.split(/\s+/);
+    if (bodyTokens.length < 2 && bodyRaw.length < 5) {
+      return null;
+    }
+
+    // Prüfe auf AutoSend-Trigger: "direkt", "raus", "sofort", "jetzt" im Command-Teil
+    const hasDirectTrigger = /\b(?:direkt|raus|sofort|jetzt|los|ab)\b/i.test(text);
+
+    // FIX: Body-Clean - Entferne den kompletten Command-Prefix aus dem Body
+    // Entferne: "an <name>", "<name>, raus", "raus", etc.
+    let bodyHintRaw = bodyRaw;
+    
+    // 1. Entferne führendes "an <name>" (auch mit Satzzeichen)
+    const anNamePattern = new RegExp(`^an\\s+${toNameRaw}\\s*[,:\\.]?\\s*`, 'i');
+    bodyHintRaw = bodyHintRaw.replace(anNamePattern, '').trim();
+    
+    // 2. Entferne "<name>, raus" oder "<name> raus" (falls noch vorhanden)
+    const nameRausPattern = new RegExp(`^${toNameRaw}\\s*[,:\\.]?\\s*(?:raus|los|ab)\\s*[,:\\.]?\\s*`, 'i');
+    bodyHintRaw = bodyHintRaw.replace(nameRausPattern, '').trim();
+    
+    // 3. Entferne führende Füllwörter aus dem Body
+    for (const filler of fillerWords) {
+      const fillerRegex = new RegExp(`^${filler}\\s+`, 'i');
+      bodyHintRaw = bodyHintRaw.replace(fillerRegex, '').trim();
+    }
+    
+    // 4. Entferne trailing "raus", "los", "ab" falls vorhanden
+    bodyHintRaw = bodyHintRaw.replace(/\s*(?:raus|los|ab)\s*[,:\.]?\s*$/i, '').trim();
+    
+    // 5. Entferne führendes "raus", "los", "ab" falls vorhanden
+    bodyHintRaw = bodyHintRaw.replace(/^(?:raus|los|ab)\s*[,:\\.]?\s*/i, '').trim();
+
+    // Wenn body nach Bereinigung leer wird, verwende Original
+    if (!bodyHintRaw || bodyHintRaw.length === 0) {
+      bodyHintRaw = bodyRaw.trim();
+    }
+
+    // Prüfe erneut, ob Body lang genug ist
+    const cleanedBodyTokens = bodyHintRaw.split(/\s+/);
+    if (cleanedBodyTokens.length < 2 && bodyHintRaw.length < 5) {
+      return null;
+    }
+
+    // Body normalisieren für bodyHint (lowercase, Unicode clean)
+    let bodyHint = normalize(bodyHintRaw);
+
+    // Wenn body nach Bereinigung leer ist, kein Match
+    if (!bodyHint || bodyHint.length === 0) {
+      return null;
+    }
+
+    return {
+      toRaw: toNameRaw.toLowerCase(),
+      bodyHint: bodyHint,
+      bodyHintRaw: bodyHintRaw,
+      hasAutoSendTrigger: hasDirectTrigger || true, // "schick" allein ist auch AutoSend-Hinweis, "direkt" ist extra Signal
+    };
+  }
+
+  return null;
+}
+
+/**
  * Erkennt kurzes Imperativ-Pattern: "sende <name> bitte, <body>" oder "schick <name>, <body>"
  * 
  * Unterstützt Muster:
@@ -2443,12 +2629,15 @@ function detectShortImperativePattern(original: string, normalized: string): {
   // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
   const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'mich', 'dich', 'sich'];
 
-  // Pattern: Imperativ-Verb + optional "bitte" + <NAME> + optional "bitte" + Separator + <BODY>
+  // Pattern: Imperativ-Verb + optional "bitte" + <NAME> + optional "kurz" + optional "bitte" + Separator + <BODY>
   // Verben: sende, send, schick, schicke
   // Separatoren: ",", ":", "."
+  // WICHTIG: "kurz" ist ein Füllwort und darf NICHT als Teil des Namens erfasst werden
   const patterns = [
     // "sende <name> bitte, <body>"
     /^(sende|send|schick|schicke)\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s+bitte\s*[,:\.]\s*(.+)$/i,
+    // "sende <name> kurz, <body>" (kurz ist Füllwort, nicht Teil des Namens)
+    /^(sende|send|schick|schicke)\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s+kurz\s*[,:\.]\s*(.+)$/i,
     // "sende <name>, <body>"
     /^(sende|send|schick|schicke)\s+([a-zäöüß]+(?:\s+[a-zäöüß]+)?)\s*[,:\.]\s*(.+)$/i,
   ];
@@ -2499,6 +2688,471 @@ function detectShortImperativePattern(original: string, normalized: string): {
         toRaw: toNameRaw.toLowerCase(), // Normalisiert für toRaw
         bodyHint: bodyHint,
         bodyHintRaw: bodyHintRaw, // Original mit Groß-/Kleinschreibung
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Trennt führende Satzzeichen vom Ende eines Wortes.
+ * 
+ * @param token - Eingabewort (z.B. "verzögert." oder "anrufe!")
+ * @returns Objekt mit Kern-Wort und Satzzeichen
+ */
+function splitTrailingPunct(token: string): { core: string; punct: string } {
+  if (!token || typeof token !== 'string') {
+    return { core: token || '', punct: '' };
+  }
+  
+  const match = token.match(/^(.+?)([.!?…]+)?$/);
+  if (match) {
+    return {
+      core: match[1] || token,
+      punct: match[2] || ''
+    };
+  }
+  
+  return { core: token, punct: '' };
+}
+
+/**
+ * Konvertiert einen Nebensatz (verb-final) zu einem Hauptsatz (V2-Wortstellung).
+ * 
+ * @param clause - Einzelner Satz OHNE führendes "dass" (z.B. "Es sich verzögert hat.")
+ * @returns Transformierter Hauptsatz (z.B. "Es hat sich verzögert.")
+ */
+function v2ifyVerbFinalGerman(clause: string): string {
+  if (!clause || typeof clause !== 'string') {
+    return clause;
+  }
+
+  // Trim & collapse whitespace
+  let text = clause.trim().replace(/\s+/g, ' ');
+  if (!text) {
+    return clause;
+  }
+
+  // Tokenisiere
+  const tokens = text.split(/\s+/).filter(t => t.length > 0);
+  
+  // Mindestens 3 Tokens erforderlich: Subject, Middle, Verb
+  if (tokens.length < 3) {
+    return clause; // Nicht genug Information, unverändert zurückgeben
+  }
+
+  // Letztes Token = Verb (kann Satzzeichen enthalten)
+  const lastTokenRaw = tokens[tokens.length - 1];
+  const { core: lastCore, punct } = splitTrailingPunct(lastTokenRaw);
+  
+  // Prüfe auf trennbare Verben (case-insensitive)
+  const separableVerbs: { [key: string]: { main: string; tail: string } } = {
+    // anrufen
+    'anrufe': { main: 'rufe', tail: 'an' },
+    'anrufst': { main: 'rufst', tail: 'an' },
+    'anruft': { main: 'ruft', tail: 'an' },
+    'anrufen': { main: 'rufen', tail: 'an' },
+    // ausfällen (ausfällt)
+    'ausfällt': { main: 'fällt', tail: 'aus' },
+    'ausfalle': { main: 'falle', tail: 'aus' },
+    'ausfällst': { main: 'fällst', tail: 'aus' },
+    'ausfallen': { main: 'fallen', tail: 'aus' },
+  };
+
+  const verbLower = lastCore.toLowerCase();
+  let verbMain: string;
+  let verbTail: string;
+
+  if (separableVerbs[verbLower]) {
+    // Trennbare Verbform
+    verbMain = separableVerbs[verbLower].main;
+    verbTail = separableVerbs[verbLower].tail;
+  } else {
+    // Normales Verb: kein Trennpräfix
+    verbMain = lastCore;
+    verbTail = '';
+  }
+  
+  // Subject = erstes Token
+  let subject = tokens[0];
+  
+  // Prüfe, ob erste zwei Tokens ein Artikel+Nomen-Subjekt bilden (z.B. "Der Termin", "Die Besprechung")
+  const articles = ['der', 'die', 'das', 'ein', 'eine', 'den', 'dem', 'einer', 'einen'];
+  let subjectEnd = 1;
+  
+  if (tokens.length >= 2 && articles.includes(tokens[0].toLowerCase())) {
+    subjectEnd = 2; // Subject = Artikel + Nomen
+  }
+  
+  subject = tokens.slice(0, subjectEnd).join(' ');
+  
+  // Kapitalisiere Subject wenn es ein Pronomen ist
+  const pronouns: { [key: string]: string } = {
+    'ich': 'Ich',
+    'du': 'Du',
+    'er': 'Er',
+    'sie': 'Sie',
+    'es': 'Es',
+    'wir': 'Wir',
+    'ihr': 'Ihr',
+  };
+  
+  const subjectLower = subject.toLowerCase();
+  if (pronouns[subjectLower]) {
+    subject = pronouns[subjectLower];
+  }
+  
+  // Middle = alles zwischen Subject und Verb
+  const middleTokens = tokens.slice(subjectEnd, -1);
+
+  // Baue V2-Hauptsatz: Subject + Verb + Middle + VerbTail + Punctuation
+  let result = subject + ' ' + verbMain;
+  if (middleTokens.length > 0) {
+    result += ' ' + middleTokens.join(' ');
+  }
+  if (verbTail) {
+    result += ' ' + verbTail;
+  }
+  
+  // Verwende ursprüngliche Satzzeichen oder Standard-Punkt
+  const punctuation = punct || '.';
+  result += punctuation;
+
+  return result.trim();
+}
+
+/**
+ * Rewrite "dass ich/wir/es" zu "Ich/Wir/Es" für kurz+dass Patterns.
+ * 
+ * Regeln:
+ * - Input: "dass ich <rest>"  => "Ich <rest>." (mit V2-Transformation)
+ * - Input: "dass wir <rest>"  => "Wir <rest>." (mit V2-Transformation)
+ * - Input: "dass es <rest>"   => "Es <rest>." (mit V2-Transformation)
+ * - Input: "dass der/die/das <rest>" => "Der/Die/Das <rest>." (mit V2-Transformation)
+ * - Entfernt führendes "dass" und stellt sicher, dass Satzzeichen vorhanden ist.
+ * - Großschreibung des ersten Buchstabens.
+ * - WENDET IMMER V2-TRANSFORMATION AN (verb-final → V2-Wortstellung)
+ * 
+ * @param bodyHint - Body-Hint Text (normalisiert, lowercase)
+ * @param bodyHintRaw - Body-Hint Raw Text (mit Groß-/Kleinschreibung)
+ * @returns { bodyHint: string; bodyHintRaw: string } | null (null wenn kein Rewrite nötig)
+ */
+function rewriteKurzDassBody(bodyHint: string, bodyHintRaw: string): { bodyHint: string; bodyHintRaw: string } | null {
+  if (!bodyHint || !bodyHintRaw) {
+    return null;
+  }
+
+  const bodyLower = bodyHint.toLowerCase().trim();
+  
+  // Prüfe, ob Body mit "dass ich/wir/es/der/die/das" beginnt
+  // WICHTIG: Pattern muss auch mit Satzzeichen am Ende funktionieren
+  const dassPatterns = [
+    /^dass\s+ich\s+(.+)$/i,
+    /^dass\s+wir\s+(.+)$/i,
+    /^dass\s+es\s+(.+)$/i,
+    /^dass\s+der\s+(.+)$/i,
+    /^dass\s+die\s+(.+)$/i,
+    /^dass\s+das\s+(.+)$/i,
+  ];
+
+  for (const pattern of dassPatterns) {
+    const match = bodyLower.match(pattern);
+    if (match && match[1]) {
+      const rest = match[1].trim();
+      
+      // Bestimme Pronomen/Artikel basierend auf Pattern
+      let pronoun: string;
+      if (pattern.source.includes('ich')) {
+        pronoun = 'Ich';
+      } else if (pattern.source.includes('wir')) {
+        pronoun = 'Wir';
+      } else if (pattern.source.includes('es')) {
+        pronoun = 'Es';
+      } else if (pattern.source.includes('der')) {
+        pronoun = 'Der';
+      } else if (pattern.source.includes('die')) {
+        pronoun = 'Die';
+      } else if (pattern.source.includes('das')) {
+        pronoun = 'Das';
+      } else {
+        continue;
+      }
+      
+      // Baue neuen Satz: Pronomen + Rest
+      let newBodyRaw = pronoun + ' ' + rest;
+      
+      // Stelle sicher, dass Satzzeichen vorhanden ist
+      if (!/[.!?]$/.test(newBodyRaw)) {
+        newBodyRaw += '.';
+      }
+      
+      // WICHTIG: Wende V2-Transformation an (verb-final → V2-Wortstellung)
+      // Dies behandelt auch Perfekt-Konstruktionen wie "Es sich verzögert hat." → "Es hat sich verzögert."
+      newBodyRaw = v2ifyVerbFinalGerman(newBodyRaw);
+      
+      // Normalisiere für bodyHint (lowercase, Unicode clean)
+      const newBodyHint = normalize(newBodyRaw);
+      
+      return {
+        bodyHint: newBodyHint,
+        bodyHintRaw: newBodyRaw,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Erkennt "sende das (jetzt|direkt|sofort)? an <name> <body>" Pattern.
+ * 
+ * Unterstützt Muster:
+ * - "Sende das jetzt an Thomas. Ich bin gleich wieder da."
+ * - "Sende das direkt an Thomas, bin im Termin."
+ * - "Sende das sofort an Thomas ich melde mich später."
+ * 
+ * Regeln:
+ * - Startet mit "sende" (primär) oder "schick" (optional)
+ * - Optionales Objekt "das" / "die" / "diese"
+ * - Optionales Adverb "jetzt|direkt|sofort"
+ * - "an <name>" (1-2 Tokens)
+ * - Body ist alles NACH dem Name (inkl. Satz nach Punkt/Komma), aber OHNE "an <name>"
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string; hasAutoSendTrigger: boolean } | null
+ */
+function detectSendeDasAnPattern(original: string, normalized: string): {
+  toRaw: string;
+  bodyHint: string;
+  bodyHintRaw: string;
+  hasAutoSendTrigger: boolean;
+} | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
+  const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'sie', 'er', 'mich', 'dich', 'sich'];
+
+  // Pattern: "sende" (primär) oder "schick" + optional "das/die/diese" + optional "jetzt/direkt/sofort" + "an" + <NAME> + <BODY>
+  // Unterstützt Punkt/Komma/Doppelpunkt als Separator zwischen Name und Body
+  const patterns = [
+    // "Sende das jetzt an Thomas. Ich bin gleich wieder da."
+    /^(sende|schick|schicke|schicken)\s+(?:das|die|diese)\s+(?:jetzt|direkt|sofort)\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s*[.,:]\s*(.+)$/i,
+    // "Sende das direkt an Thomas, bin im Termin."
+    /^(sende|schick|schicke|schicken)\s+(?:das|die|diese)\s+(?:jetzt|direkt|sofort)\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s*,\s*(.+)$/i,
+    // "Sende das sofort an Thomas ich melde mich später." (ohne Separator)
+    /^(sende|schick|schicke|schicken)\s+(?:das|die|diese)\s+(?:jetzt|direkt|sofort)\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+(.+)$/i,
+    // "Sende das an Thomas. Ich bin gleich wieder da." (ohne Adverb)
+    /^(sende|schick|schicke|schicken)\s+(?:das|die|diese)\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s*[.,:]\s*(.+)$/i,
+    // "Sende das an Thomas, bin im Termin." (ohne Adverb, mit Komma)
+    /^(sende|schick|schicke|schicken)\s+(?:das|die|diese)\s+an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s*,\s*(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[2] && match[4]) {
+      // match[1] = verb, match[2] = firstName, match[3] = secondName (optional), match[4] = body
+      const firstNameToken = match[2].trim();
+      const secondNameToken = match[3]?.trim();
+      let toNameRaw: string;
+      
+      // Prüfe, ob zweites Token ein Body-Start-Wort ist (dann ist es Teil des Body, nicht des Namens)
+      const bodyStartWords = ['bin', 'ist', 'sind', 'habe', 'hat', 'haben', 'komme', 'kommt', 'kommst', 'ruf', 'rufe', 'ruft', 'ich', 'wir', 'er', 'sie', 'es', 'im', 'in', 'am', 'an', 'auf', 'zu', 'für', 'mit', 'von', 'mich', 'dich', 'sich', 'meld', 'melde', 'meldet'];
+      const isSecondTokenBodyStart = secondNameToken && bodyStartWords.includes(secondNameToken.toLowerCase());
+      
+      if (isSecondTokenBodyStart || !secondNameToken) {
+        // Zweites Token ist Body-Start oder nicht vorhanden -> Name ist nur erstes Token
+        toNameRaw = firstNameToken;
+      } else {
+        // Zweites Token ist Teil des Namens (z.B. "Thomas Müller")
+        toNameRaw = firstNameToken + ' ' + secondNameToken;
+      }
+      
+      const toNameLower = toNameRaw.toLowerCase();
+
+      // Blockiere Pronomen
+      if (blockedPronouns.includes(toNameLower)) {
+        continue;
+      }
+
+      // Blockiere mehr als 2 Tokens (Name sollte max. 2 Tokens sein)
+      const nameTokens = toNameRaw.split(/\s+/);
+      if (nameTokens.length > 2) {
+        continue;
+      }
+
+      // FIX: Wenn Body mit dem zweiten Token beginnt, muss es zum Body hinzugefügt werden
+      let bodyRaw = match[4].trim();
+      if (isSecondTokenBodyStart && secondNameToken) {
+        bodyRaw = secondNameToken + ' ' + bodyRaw;
+      }
+      
+      // Wenn body leer ist, kein Match
+      if (!bodyRaw || bodyRaw.length === 0) {
+        continue;
+      }
+
+      // Prüfe, ob Body lang genug ist (mindestens 2 Tokens oder >= 5 Zeichen)
+      const bodyTokens = bodyRaw.split(/\s+/);
+      if (bodyTokens.length < 2 && bodyRaw.length < 5) {
+        continue;
+      }
+
+      // Prüfe auf AutoSend-Trigger: "jetzt|direkt|sofort" im Command-Teil
+      const hasAutoSendTrigger = /\b(?:jetzt|direkt|sofort)\b/i.test(text);
+
+      // Body-Clean: Entferne führendes "an <name>" falls vorhanden
+      const anNamePattern = new RegExp(`^an\\s+${toNameRaw}\\s*[:\\.]?\\s*`, 'i');
+      bodyRaw = bodyRaw.replace(anNamePattern, '').trim();
+
+      // Wenn body nach Bereinigung leer wird, verwende Original
+      if (!bodyRaw || bodyRaw.length === 0) {
+        bodyRaw = match[4].trim();
+      }
+
+      // Prüfe erneut, ob Body lang genug ist
+      const cleanedBodyTokens = bodyRaw.split(/\s+/);
+      if (cleanedBodyTokens.length < 2 && bodyRaw.length < 5) {
+        continue;
+      }
+
+      // Body normalisieren für bodyHint (lowercase, Unicode clean)
+      let bodyHint = normalize(bodyRaw);
+
+      // Wenn body nach Bereinigung leer ist, kein Match
+      if (!bodyHint || bodyHint.length === 0) {
+        continue;
+      }
+
+      return {
+        toRaw: toNameRaw.toLowerCase(),
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyRaw,
+        hasAutoSendTrigger: hasAutoSendTrigger || true, // "sende" allein ist auch AutoSend-Hinweis
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Erkennt "an <NAME> senden <BODY>" Pattern (passive Wortstellung).
+ * 
+ * Unterstützt Muster:
+ * - "An Thomas senden wir starten 15 Minuten später."
+ * - "An Thomas senden: ich bin im Termin."
+ * - "An Thomas senden bitte: melde mich gleich."
+ * 
+ * Regeln:
+ * - Beginnt mit "an "
+ * - Parse erstes Token nach "an" als Empfängername (bis zum Token "senden")
+ * - Muss "senden" enthalten; sonst kein Match
+ * - bodyText = alles nach dem Token "senden" (inkl. Rest der Phrase)
+ * - Wenn bodyText leer -> kein Match
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string } | null
+ */
+function detectAnSendenPattern(original: string, normalized: string): {
+  toRaw: string;
+  bodyHint: string;
+  bodyHintRaw: string;
+} | null {
+  const text = original.trim();
+  if (!text) return null;
+
+  // Blockierte Pronomen (Empfänger darf nicht Pronomen sein)
+  const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'sie', 'er', 'mich', 'dich', 'sich'];
+
+  // Pattern: "an " + <NAME> + "senden" + <BODY>
+  // Unterstützt optional "bitte" zwischen Name und "senden"
+  // Unterstützt Punkt/Komma/Doppelpunkt als Separator nach "senden"
+  const patterns = [
+    // "An Thomas senden wir starten 15 Minuten später."
+    /^an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+(?:bitte\s+)?senden\s*[,:\.]?\s*(.+)$/i,
+    // "An Thomas senden: ich bin im Termin."
+    /^an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+(?:bitte\s+)?senden\s*:\s*(.+)$/i,
+    // "An Thomas senden bitte: melde mich gleich." (bitte vor senden)
+    /^an\s+([a-zäöüß]+)(?:\s+([a-zäöüß]+))?\s+bitte\s+senden\s*[,:\.]?\s*(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && match[3]) {
+      // match[1] = firstName, match[2] = secondName (optional), match[3] = body
+      const firstNameToken = match[1].trim();
+      const secondNameToken = match[2]?.trim();
+      let toNameRaw: string;
+      
+      // Prüfe, ob zweites Token ein Body-Start-Wort ist (dann ist es Teil des Body, nicht des Namens)
+      const bodyStartWords = ['bin', 'ist', 'sind', 'habe', 'hat', 'haben', 'komme', 'kommt', 'kommst', 'ruf', 'rufe', 'ruft', 'ich', 'wir', 'er', 'sie', 'es', 'im', 'in', 'am', 'an', 'auf', 'zu', 'für', 'mit', 'von', 'mich', 'dich', 'sich', 'meld', 'melde', 'meldet', 'senden', 'schicken'];
+      const isSecondTokenBodyStart = secondNameToken && bodyStartWords.includes(secondNameToken.toLowerCase());
+      
+      if (isSecondTokenBodyStart || !secondNameToken) {
+        // Zweites Token ist Body-Start oder nicht vorhanden -> Name ist nur erstes Token
+        toNameRaw = firstNameToken;
+      } else {
+        // Zweites Token ist Teil des Namens (z.B. "Thomas Müller")
+        toNameRaw = firstNameToken + ' ' + secondNameToken;
+      }
+      
+      const toNameLower = toNameRaw.toLowerCase();
+
+      // Blockiere Pronomen
+      if (blockedPronouns.includes(toNameLower)) {
+        continue;
+      }
+
+      // Blockiere mehr als 2 Tokens (Name sollte max. 2 Tokens sein)
+      const nameTokens = toNameRaw.split(/\s+/);
+      if (nameTokens.length > 2) {
+        continue;
+      }
+
+      let bodyRaw = match[3].trim();
+      
+      // Wenn body leer ist, kein Match
+      if (!bodyRaw || bodyRaw.length === 0) {
+        continue;
+      }
+
+      // Prüfe, ob Body lang genug ist (mindestens 2 Tokens oder >= 5 Zeichen)
+      const bodyTokens = bodyRaw.split(/\s+/);
+      if (bodyTokens.length < 2 && bodyRaw.length < 5) {
+        continue;
+      }
+
+      // Body-Clean: Entferne führendes "an <name>" falls vorhanden
+      const anNamePattern = new RegExp(`^an\\s+${toNameRaw}\\s*[:\\.]?\\s*`, 'i');
+      bodyRaw = bodyRaw.replace(anNamePattern, '').trim();
+
+      // Wenn body nach Bereinigung leer wird, verwende Original
+      if (!bodyRaw || bodyRaw.length === 0) {
+        bodyRaw = match[3].trim();
+      }
+
+      // Prüfe erneut, ob Body lang genug ist
+      const cleanedBodyTokens = bodyRaw.split(/\s+/);
+      if (cleanedBodyTokens.length < 2 && bodyRaw.length < 5) {
+        continue;
+      }
+
+      // Body normalisieren für bodyHint (lowercase, Unicode clean)
+      let bodyHint = normalize(bodyRaw);
+
+      // Wenn body nach Bereinigung leer ist, kein Match
+      if (!bodyHint || bodyHint.length === 0) {
+        continue;
+      }
+
+      return {
+        toRaw: toNameRaw.toLowerCase(),
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyRaw,
       };
     }
   }
@@ -3298,8 +3952,20 @@ function parseFreeDictationA34(normalized: string): VoiceIntent | null {
  * laufen immer zuerst durch Wizard2, bevor sie in ai-chat fallen.
  */
 export function routeVoiceIntent(raw: string): VoiceIntent {
-  const original = (raw || "").trim();
-  const text = normalize(original);
+  // FIX: Normalisiere Kontraktionen "schick's" / "schicks" → "schick" VOR dem Parsing
+  // Verhindert, dass "s" als Empfänger erkannt wird
+  let originalFixed = (raw || "").trim().replace(/\bschick['']?s\b/gi, 'schick');
+  
+  // FIX: STT-safe Normalisierung für "schicksal" → "schick" NUR in Command-Kontext
+  // Pattern: "schicksal an <name>" + Send-Marker (raus|direkt|sofort|jetzt|abschicken|senden)
+  const schicksalPattern = /^schicksal\s+an\s+[a-zäöüß]+/i;
+  const hasSendMarker = /\b(?:raus|direkt|sofort|jetzt|abschicken|senden)\b/i;
+  if (schicksalPattern.test(originalFixed) && hasSendMarker.test(originalFixed)) {
+    originalFixed = originalFixed.replace(/^schicksal\b/i, 'schick');
+  }
+  
+  const original = originalFixed;
+  const text = normalize(originalFixed);
 
   console.log("[fm-voice] routeVoiceIntent raw:", original);
   console.log("[fm-voice] routeVoiceIntent normalized:", text);
@@ -4599,16 +5265,217 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   }
 
   // ============================================================
+  // AN SENDEN PATTERN: "An Thomas senden wir starten 15 Minuten später."
+  // ============================================================
+  // Erkennt passive Wortstellung "an <NAME> senden <BODY>":
+  // - "An Thomas senden wir starten 15 Minuten später."
+  // - "An Thomas senden: ich bin im Termin."
+  // - "An Thomas senden bitte: melde mich gleich."
+  // Muss VOR sende-das-an kommen, da es spezifischer ist
+  // Muss VOR short-imperative kommen
+  // Muss VOR AI-Fallback kommen
+  {
+    const anSendenMatch = detectAnSendenPattern(original, text);
+    if (anSendenMatch) {
+      const { toRaw, bodyHint, bodyHintRaw } = anSendenMatch;
+
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+      // AutoSend: true wenn keine Negation UND kein False-Positive
+      const autoSend = !hasNegation && !autoSendExcludedByFalsePositive;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: undefined,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'an-senden',
+          autoSend: autoSend,
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][an-senden] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][an-senden] matched', {
+        toRaw,
+        bodyPreview: bodyHintRaw.slice(0, 60),
+        autoSend: autoSend,
+        hasNegation: hasNegation,
+        excludedByFalsePositive: autoSendExcludedByFalsePositive
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // SENDE DAS AN PATTERN: "Sende das jetzt an Thomas. Ich bin gleich wieder da."
+  // ============================================================
+  // Erkennt "sende das (jetzt|direkt|sofort)? an <name> <body>" Sätze:
+  // - "Sende das jetzt an Thomas. Ich bin gleich wieder da."
+  // - "Sende das direkt an Thomas, bin im Termin."
+  // - "Sende das sofort an Thomas ich melde mich später."
+  // Muss VOR schick-name-direct-body kommen, da es spezifischer ist
+  // Muss VOR short-imperative kommen
+  // Muss VOR AI-Fallback kommen
+  {
+    const sendeDasAnMatch = detectSendeDasAnPattern(original, text);
+    if (sendeDasAnMatch) {
+      const { toRaw, bodyHint, bodyHintRaw, hasAutoSendTrigger } = sendeDasAnMatch;
+
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+      // AutoSend: true wenn Trigger vorhanden UND keine Negation UND kein False-Positive
+      const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: undefined,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'sende-das-an',
+          autoSend: autoSend,
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][sende-das-an] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][sende-das-an] matched', {
+        toRaw,
+        bodyPreview: bodyHint.slice(0, 60),
+        autoSend: autoSend,
+        hasAutoSendTrigger: hasAutoSendTrigger,
+        hasNegation: hasNegation,
+        excludedByFalsePositive: autoSendExcludedByFalsePositive
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // SCHICK NAME DIRECT BODY PATTERN: "Schick, Thomas, bitte direkt, ruf mich kurz zurück."
+  // ============================================================
+  // Erkennt direkte "schick <name> direkt <body>" Sätze mit Kommas und Füllwörtern:
+  // - "Schick, Thomas, bitte direkt, ruf mich kurz zurück."
+  // - "Schick Thomas direkt: bin im Termin."
+  // - "Schick Thomas bitte direkt ruf mich zurück"
+  // Muss VOR short-imperative kommen, da es spezifischer ist (erkennt "direkt" explizit)
+  // Muss VOR AI-Fallback kommen
+  {
+    const schickNameDirectMatch = matchSchickNameDirectBody(original, text);
+    if (schickNameDirectMatch) {
+      const { toRaw, bodyHint, bodyHintRaw, hasAutoSendTrigger } = schickNameDirectMatch;
+
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+      // AutoSend: true wenn Trigger vorhanden UND keine Negation UND kein False-Positive
+      const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: undefined,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'schick-name-direct-body',
+          autoSend: autoSend,
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][schick-name-direct-body] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][schick-name-direct] matched', {
+        toRaw,
+        bodyPreview: bodyHint.slice(0, 60),
+        autoSend: autoSend,
+        hasAutoSendTrigger: hasAutoSendTrigger,
+        hasNegation: hasNegation,
+        excludedByFalsePositive: autoSendExcludedByFalsePositive
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
   // SHORT IMPERATIVE PATTERN: "sende <name> bitte, <body>"
   // ============================================================
   // Erkennt kurze Imperativ-Sätze wie:
   // - "Sende Thomas bitte, ich melde mich später nochmal."
   // - "Schick Thomas, ich bin gleich da."
-  // Muss VOR AI-Fallback kommen, aber NACH allen anderen Email-Intents
+  // Muss VOR AI-Fallback kommen, aber NACH schick-name-direct-body
   {
     const shortImperativeMatch = detectShortImperativePattern(original, text);
     if (shortImperativeMatch) {
-      const { toRaw, bodyHint, bodyHintRaw } = shortImperativeMatch;
+      let { toRaw, bodyHint, bodyHintRaw } = shortImperativeMatch;
+
+      // FIX: Rewrite "dass ich/wir/es" zu "Ich/Wir/Es" für kurz+dass Patterns
+      // Nur wenn: Verb ist sende/schick UND Text enthält "kurz" UND "dass" UND bodyHint beginnt mit "dass ich/wir/es"
+      const hasKurz = /\bkurz\b/i.test(original) || /\bkurz\b/i.test(text);
+      const hasDass = /\bdass\b/i.test(original) || /\bdass\b/i.test(text);
+      const hasSendVerb = /^(?:sende|send|schick|schicke)/i.test(original) || /^(?:sende|send|schick|schicke)/i.test(text);
+      
+      if (hasKurz && hasDass && hasSendVerb && bodyHint) {
+        const rewritten = rewriteKurzDassBody(bodyHint, bodyHintRaw);
+        if (rewritten) {
+          bodyHint = rewritten.bodyHint;
+          bodyHintRaw = rewritten.bodyHintRaw;
+          console.log('[intent-router][short-imperative][kurz-dass-rewrite] Rewritten body:', {
+            original: shortImperativeMatch.bodyHint,
+            rewritten: bodyHint,
+            originalRaw: shortImperativeMatch.bodyHintRaw,
+            rewrittenRaw: bodyHintRaw
+          });
+        }
+      }
 
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
@@ -4722,13 +5589,73 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   }
 
   // ============================================================
+  // SENDE DAS AN PATTERN: "Sende das jetzt an Thomas. Ich bin gleich wieder da."
+  // ============================================================
+  // Erkennt "sende das (jetzt|direkt|sofort)? an <name> <body>" Sätze:
+  // - "Sende das jetzt an Thomas. Ich bin gleich wieder da."
+  // - "Sende das direkt an Thomas, bin im Termin."
+  // - "Sende das sofort an Thomas ich melde mich später."
+  // Muss VOR schick-an-direct kommen, da es spezifischer ist (erkennt "das" explizit)
+  // Muss VOR AI-Fallback kommen
+  {
+    const sendeDasAnMatch = detectSendeDasAnPattern(original, text);
+    if (sendeDasAnMatch) {
+      const { toRaw, bodyHint, bodyHintRaw, hasAutoSendTrigger } = sendeDasAnMatch;
+
+      // Prüfe auf Negation/Preview (höchste Priorität)
+      const negationPatterns = [
+        /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
+        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:vorlesen|vorlese|vorliest)\b/i,
+        /\b(?:preview|vorschau|vorschauen)\b/i,
+      ];
+      const hasNegation = negationPatterns.some(pattern => pattern.test(original) || pattern.test(text));
+
+      // AutoSend: true wenn Trigger vorhanden UND keine Negation UND kein False-Positive
+      const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: undefined,
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'sende-das-an',
+          autoSend: autoSend,
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][sende-das-an] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][sende-das-an] matched', {
+        toRaw,
+        bodyPreview: bodyHint.slice(0, 60),
+        autoSend: autoSend,
+        hasAutoSendTrigger: hasAutoSendTrigger,
+        hasNegation: hasNegation,
+        excludedByFalsePositive: autoSendExcludedByFalsePositive
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
   // SCHICK-AN-DIRECT PATTERN: "schick das direkt an thomas bin im termin"
   // ============================================================
   // Erkennt direkte "schick an <name> <body>" Sätze ohne Separator:
   // - "Schick das direkt an Thomas bin im Termin."
   // - "Schick bitte an Thomas ich ruf später an"
   // - "Schick an Thomas bin gleich da"
-  // Muss VOR AI-Fallback kommen, aber NACH allen anderen Email-Intents
+  // Muss VOR AI-Fallback kommen, aber NACH sende-das-an
   {
     const schickAnDirectMatch = detectSchickAnDirectPattern(original, text);
     if (schickAnDirectMatch) {
@@ -4781,6 +5708,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       return intent;
     }
   }
+
 
   // Fallback: alles, was nicht gematcht wurde, geht an die KI
   // (Wir erlauben der KI damit, freie Fragen, Smalltalk und komplexe Aufgaben zu beantworten.)

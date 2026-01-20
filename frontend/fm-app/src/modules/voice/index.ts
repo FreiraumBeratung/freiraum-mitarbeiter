@@ -17,6 +17,7 @@ import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 import { polishEmailBody } from "../../logic/wizard4/email_polish";
 import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
 import { resolveVoiceEmailSubject } from "./subject_resolve";
+import { rewriteLeadingDassClause } from "./dass_rewrite";
 
 declare global {
   interface Window {
@@ -1154,10 +1155,27 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           // EXPLICIT BODY WINS: Wenn ein expliziter bodyHint vorhanden ist, überschreibe den generierten Body sofort
           // ABER: NICHT bei Status-Brain (dort wird Body später mit aufgelöstem Namen gesetzt)
           if (hasExplicitBody && !isStatusBrain) {
-            wizard4Draft.body = intent.bodyHint.trim();
+            let bodyHint = intent.bodyHint.trim();
+            
+            // FIX: Rewrite führende "dass"-Klausel für autoSend-Intents
+            // Wird VOR polish und VOR __fm_set_mail_body angewendet
+            if (intent.meta?.autoSend && typeof bodyHint === 'string') {
+              const rewritten = rewriteLeadingDassClause(bodyHint);
+              if (rewritten !== bodyHint) {
+                bodyHint = rewritten;
+                // Aktualisiere auch intent.bodyHint für spätere Verwendung
+                (intent as any).bodyHint = rewritten;
+                console.log('[wizard4][dass-rewrite] Rewrote leading "dass" clause', {
+                  original: intent.bodyHint.substring(0, 80),
+                  rewritten: rewritten.substring(0, 80)
+                });
+              }
+            }
+            
+            wizard4Draft.body = bodyHint;
             console.log('[wizard4][explicit-body] Overwrote draft.body with explicit bodyHint', {
               oldBodyPreview: (wizard4Draft.body || '').substring(0, 50),
-              newBodyPreview: intent.bodyHint.substring(0, 80)
+              newBodyPreview: bodyHint.substring(0, 80)
             });
           }
           
@@ -1760,7 +1778,23 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         console.log('[wizard4][explicit-body] skipped due to status-brain source, using draft body');
       } else {
         // EXPLICIT BODY WINS: Prüfe zuerst, ob ein expliziter bodyHint vorhanden ist (nur bei Nicht-Status-Brain)
-        const explicitBodyHint = intent.bodyHint && intent.bodyHint.trim().length > 0 ? intent.bodyHint.trim() : null;
+        let explicitBodyHint = intent.bodyHint && intent.bodyHint.trim().length > 0 ? intent.bodyHint.trim() : null;
+        
+        // FIX: Rewrite führende "dass"-Klausel für autoSend-Intents
+        // Wird VOR polish und VOR __fm_set_mail_body angewendet
+        if (explicitBodyHint && intent.meta?.autoSend && typeof explicitBodyHint === 'string') {
+          const rewritten = rewriteLeadingDassClause(explicitBodyHint);
+          if (rewritten !== explicitBodyHint) {
+            explicitBodyHint = rewritten;
+            // Aktualisiere auch intent.bodyHint für spätere Verwendung
+            (intent as any).bodyHint = rewritten;
+            console.log('[wizard4][dass-rewrite] Rewrote leading "dass" clause', {
+              original: intent.bodyHint.substring(0, 80),
+              rewritten: rewritten.substring(0, 80)
+            });
+          }
+        }
+        
         if (explicitBodyHint) {
           bodyForUi = explicitBodyHint;
           console.log('[wizard4][explicit-body] Using explicit bodyHint as final body', {
