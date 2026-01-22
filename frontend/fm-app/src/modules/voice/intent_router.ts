@@ -12,6 +12,11 @@ import {
   hasNoSendNegation,
   stripTrailingSendPhrases as stripTrailingSendPhrasesV4,
 } from "../../logic/wizard4/intent/send_phrase_strip";
+import { tryParseDraftPrepare } from "../../logic/wizard4/draft_prepare_parser";
+import { tryParseDraftFolgende } from "../../logic/wizard4/draft_folgende_parser";
+import { tryParseWritePreview } from "../../logic/wizard4/write_preview_parser";
+import { tryParseCancelledSendToPreview } from "../../logic/wizard4/cancel_preview_parser";
+import { hasCancelPhrase, stripCancelPhraseFromBody } from "../../logic/wizard4/cancel_phrase";
 
 export type Wizard3OneShotPayload = {
   rawText: string; // komplette Original-Sprachnachricht
@@ -993,10 +998,21 @@ function detectLassWissenCommand(normalized: string, original: string): VoiceInt
     }
   }
 
+  // Cancel-Phrase Prüfung: überschreibt autoSend
+  if (autoSend && hasCancelPhrase({ raw: original, normalized: text })) {
+    autoSend = false;
+    console.log('[intent-router][lass-wissen] AutoSend blocked - cancel phrase detected');
+  }
+
   // bodyHint ist jetzt final (ohne trailing send phrases, ohne Name-Duplikat)
   // bodyHint behält Groß-/Kleinschreibung für bodyHintRaw
-  const bodyHintRaw = bodyHint;
+  let bodyHintRaw = bodyHint;
   const bodyHintNormalized = bodyHint.toLowerCase();
+
+  // Body von Cancel-Phrasen bereinigen
+  if (hasCancelPhrase({ raw: original, normalized: text })) {
+    bodyHintRaw = stripCancelPhraseFromBody(bodyHintRaw);
+  }
 
   const freeDictationMeta: FreeDictationMeta = {
     normalized: text,
@@ -1025,7 +1041,8 @@ function detectLassWissenCommand(normalized: string, original: string): VoiceInt
     autoSend,
   });
 
-  return intent;
+  // Finaler Cancel-Phrase Override
+  return applyCancelPhraseOverride(intent, original, text);
 }
 
 /**
@@ -1049,6 +1066,15 @@ function detectLassWissenCommand(normalized: string, original: string): VoiceInt
 function detectStatusBrainCommand(normalized: string, original: string): VoiceIntent | null {
   const text = normalized.trim();
   const origText = original.trim();
+
+  // ============================================================
+  // EXCLUSION: Status-Brain DARF NICHT greifen bei "schreib ... nicht senden"
+  // ============================================================
+  // Guard: Wenn Text mit "schreib " beginnt, überspringe Status-Brain
+  // (wird bereits von write-preview Matcher behandelt)
+  if (text.startsWith('schreib ')) {
+    return null;
+  }
 
   // ============================================================
   // EXCLUSION: Status-Brain DARF NICHT greifen bei expliziten Text-Markern
@@ -1233,7 +1259,8 @@ function detectStatusBrainCommand(normalized: string, original: string): VoiceIn
     console.log('[status-brain] E-Mail-Adresse extrahiert:', extractedEmail);
   }
 
-  return intent;
+  // Finaler Cancel-Phrase Override
+  return applyCancelPhraseOverride(intent, original, normalized);
 }
 
 /**
@@ -2603,6 +2630,278 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
 }
 
 /**
+ * [intent-router][draft-entwurf]
+ * Erkennt "Entwurf an <name>" Pattern für Preview-only Email-Intents.
+ * 
+ * Unterstützt Muster:
+ * - "entwurf an thomas sag ihm ich rufe gleich zuruck"
+ * - "entwurf an thomas, sag ihm, ich rufe gleich zurück"
+ * - "entwurf an thomas ich rufe gleich zurück"
+ * - "draft an thomas ich rufe gleich zurück" (nice-to-have)
+ * 
+ * WICHTIG: Setzt IMMER autoSend=false und sendMode=preview (kein Autosend).
+ * 
+ * @param original - Originaler Text (mit Groß-/Kleinschreibung)
+ * @param normalized - Normalisierter Text (lowercase)
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string } | null
+ */
+function detectDraftEntwurfPattern(original: string, normalized: string): { 
+  toRaw: string; 
+  bodyHint: string; 
+  bodyHintRaw: string;
+} | null {
+  const text = normalized.trim();
+  if (!text) return null;
+
+  // Pattern: "entwurf an <name>" oder "draft an <name>"
+  // Case-insensitive, bereits normalisiert
+  const prefixPattern = /^(entwurf|draft)\s+an\s+/i;
+  if (!prefixPattern.test(text)) {
+    return null;
+  }
+
+  // Finde die Position nach "entwurf an " oder "draft an "
+  const prefixMatch = text.match(prefixPattern);
+  if (!prefixMatch) return null;
+  
+  const afterPrefix = text.slice(prefixMatch[0].length).trim();
+  if (!afterPrefix) return null;
+
+  // Stopwords, die das Ende des Namens markieren
+  const nameStopWords = ['sag', 'dass', 'ich', 'wir', 'du', 'er', 'sie', 'es'];
+  
+  // Extrahiere Name: 1-3 Tokens bis zu Stopword oder Komma
+  const tokens = afterPrefix.split(/\s+/);
+  let nameTokens: string[] = [];
+  let bodyStartIndex = -1;
+
+  for (let i = 0; i < Math.min(tokens.length, 3); i++) {
+    const token = tokens[i].toLowerCase();
+    // Entferne Satzzeichen für Vergleich
+    const cleanToken = token.replace(/[,.;:!?]/g, '');
+    
+    // Wenn Stopword gefunden, Name ist vorher
+    if (nameStopWords.includes(cleanToken)) {
+      bodyStartIndex = i;
+      break;
+    }
+    
+    // Wenn Komma im Token, Name endet hier
+    if (token.includes(',')) {
+      nameTokens.push(token.replace(/,.*$/, ''));
+      bodyStartIndex = i + 1;
+      break;
+    }
+    
+    nameTokens.push(tokens[i]);
+  }
+
+  // Wenn kein Stopword gefunden und weniger als 3 Tokens, nimm alle als Name
+  if (bodyStartIndex === -1) {
+    if (tokens.length <= 3) {
+      // Prüfe, ob das letzte Token ein Komma enthält
+      if (tokens.length > 0 && tokens[tokens.length - 1].includes(',')) {
+        const lastToken = tokens[tokens.length - 1];
+        nameTokens.push(lastToken.replace(/,.*$/, ''));
+        bodyStartIndex = tokens.length;
+      } else {
+        // Alle Tokens sind Name, Body beginnt danach
+        nameTokens = tokens.slice(0, Math.min(3, tokens.length));
+        bodyStartIndex = nameTokens.length;
+      }
+    } else {
+      // Mehr als 3 Tokens: nimm die ersten 3 als Name
+      nameTokens = tokens.slice(0, 3);
+      bodyStartIndex = 3;
+    }
+  }
+
+  if (nameTokens.length === 0) {
+    return null;
+  }
+
+  // Name zusammenfügen (Original-Case aus original Text)
+  const nameInOriginal = extractNameFromOriginal(original, nameTokens);
+  const toRaw = nameInOriginal.trim();
+  
+  if (!toRaw) {
+    return null;
+  }
+
+  // Body extrahieren: Alles nach dem Namen
+  let bodyCandidate = '';
+  if (bodyStartIndex >= 0 && bodyStartIndex < tokens.length) {
+    // Extrahiere Body aus original Text (bessere Groß-/Kleinschreibung)
+    const nameEndInOriginal = findNameEndInOriginal(original, nameTokens);
+    if (nameEndInOriginal >= 0) {
+      bodyCandidate = original.slice(nameEndInOriginal).trim();
+    } else {
+      // Fallback: aus normalized, aber dann wieder aus original extrahieren
+      // Finde Position im original basierend auf normalized tokens
+      const prefixMatchOriginal = original.match(/^(entwurf|draft)\s+an\s+/i);
+      if (prefixMatchOriginal) {
+        const afterPrefixOriginal = original.slice(prefixMatchOriginal[0].length).trim();
+        // Finde das Ende des Namens im Original
+        const nameEndMatch = findNameEndPositionInOriginal(afterPrefixOriginal, nameTokens);
+        if (nameEndMatch >= 0) {
+          bodyCandidate = afterPrefixOriginal.slice(nameEndMatch).trim();
+        } else {
+          // Letzter Fallback: aus normalized
+          bodyCandidate = afterPrefix.split(/\s+/).slice(bodyStartIndex).join(' ');
+        }
+      } else {
+        bodyCandidate = afterPrefix.split(/\s+/).slice(bodyStartIndex).join(' ');
+      }
+    }
+  } else {
+    // Kein Body gefunden
+    return null;
+  }
+
+  // Entferne führende Kommata und Leerzeichen
+  bodyCandidate = bodyCandidate.replace(/^[,.\s]+/, '').trim();
+
+  // Strip "sag ihm", "sag ihr", "sag ihm bitte", "sag ihr bitte"
+  const sagPhrases = [
+    /^sag\s+ihm\s+bitte\s*,?\s*/i,
+    /^sag\s+ihr\s+bitte\s*,?\s*/i,
+    /^sag\s+ihm\s*,?\s*/i,
+    /^sag\s+ihr\s*,?\s*/i,
+  ];
+  
+  for (const phrase of sagPhrases) {
+    bodyCandidate = bodyCandidate.replace(phrase, '').trim();
+  }
+
+  // Optional: "bitte" allein am Anfang entfernen
+  bodyCandidate = bodyCandidate.replace(/^bitte\s*,?\s*/i, '').trim();
+
+  if (!bodyCandidate) {
+    return null;
+  }
+
+  // Body normalisieren für bodyHint: Erste Buchstabe groß, Rest wie im Original
+  // Aber für bodyHint (normalized) verwenden wir lowercase für den Rest
+  let bodyHint = bodyCandidate.toLowerCase();
+  bodyHint = bodyHint.charAt(0).toUpperCase() + bodyHint.slice(1);
+
+  // Stelle sicher, dass Body mit Punkt endet (wenn nicht bereits . ! ?)
+  if (!/[.!?]$/.test(bodyHint)) {
+    bodyHint += '.';
+    bodyCandidate += '.';
+  }
+
+  // bodyHintRaw: Original mit Groß-/Kleinschreibung, erste Buchstabe groß
+  const bodyHintRaw = bodyCandidate.charAt(0).toUpperCase() + bodyCandidate.slice(1);
+
+  return {
+    toRaw: toRaw, // Original-Case beibehalten für besseres Matching
+    bodyHint: bodyHint,
+    bodyHintRaw: bodyHintRaw,
+  };
+}
+
+/**
+ * Hilfsfunktion: Extrahiert den Namen aus dem Original-Text basierend auf normalisierten Tokens.
+ */
+function extractNameFromOriginal(original: string, nameTokens: string[]): string {
+  if (!original || nameTokens.length === 0) return '';
+  
+  // Finde "entwurf an " oder "draft an " im Original
+  const prefixMatch = original.match(/^(entwurf|draft)\s+an\s+/i);
+  if (!prefixMatch) return '';
+  
+  const afterPrefix = original.slice(prefixMatch[0].length).trim();
+  if (!afterPrefix) return '';
+  
+  // Finde die Position des ersten Tokens im Original
+  const firstTokenLower = nameTokens[0].toLowerCase();
+  // Escape special regex chars, but handle umlauts
+  const firstTokenEscaped = firstTokenLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const firstTokenInOriginal = afterPrefix.match(new RegExp(`\\b${firstTokenEscaped}\\b`, 'i'));
+  
+  if (!firstTokenInOriginal) {
+    // Fallback: nimm einfach die ersten Tokens
+    return nameTokens.join(' ');
+  }
+  
+  const startPos = firstTokenInOriginal.index!;
+  let endPos = startPos + firstTokenInOriginal[0].length;
+  
+  // Für weitere Tokens, suche sie nach dem ersten
+  for (let i = 1; i < nameTokens.length; i++) {
+    const tokenLower = nameTokens[i].toLowerCase();
+    const tokenEscaped = tokenLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const remaining = afterPrefix.slice(endPos);
+    const tokenMatch = remaining.match(new RegExp(`\\s+${tokenEscaped}\\b`, 'i'));
+    if (tokenMatch) {
+      endPos += tokenMatch.index! + tokenMatch[0].length;
+    } else {
+      break;
+    }
+  }
+  
+  // Extrahiere Name (bis zum ersten Komma, falls vorhanden)
+  let name = afterPrefix.slice(startPos, endPos).trim();
+  name = name.replace(/,.*$/, '').trim(); // Entferne alles nach Komma
+  
+  return name;
+}
+
+/**
+ * Hilfsfunktion: Findet das Ende des Namens im Original-Text.
+ */
+function findNameEndInOriginal(original: string, nameTokens: string[]): number {
+  if (!original || nameTokens.length === 0) return -1;
+  
+  const prefixMatch = original.match(/^(entwurf|draft)\s+an\s+/i);
+  if (!prefixMatch) return -1;
+  
+  const afterPrefix = original.slice(prefixMatch[0].length);
+  
+  // Finde das Ende des letzten Name-Tokens
+  const lastTokenLower = nameTokens[nameTokens.length - 1].toLowerCase();
+  const lastTokenMatch = afterPrefix.match(new RegExp(`\\b${lastTokenLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
+  
+  if (!lastTokenMatch) return -1;
+  
+  const endPos = lastTokenMatch.index! + lastTokenMatch[0].length;
+  
+  // Suche nach Komma oder Leerzeichen nach dem Namen
+  const afterName = afterPrefix.slice(endPos);
+  const commaMatch = afterName.match(/^[,.\s]+/);
+  if (commaMatch) {
+    return prefixMatch[0].length + endPos + commaMatch[0].length;
+  }
+  
+  return prefixMatch[0].length + endPos;
+}
+
+/**
+ * Hilfsfunktion: Findet die Position nach dem Namen im Original-Text.
+ */
+function findNameEndPositionInOriginal(afterPrefix: string, nameTokens: string[]): number {
+  if (!afterPrefix || nameTokens.length === 0) return -1;
+  
+  // Finde das Ende des letzten Name-Tokens
+  const lastTokenLower = nameTokens[nameTokens.length - 1].toLowerCase();
+  const lastTokenMatch = afterPrefix.match(new RegExp(`\\b${lastTokenLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
+  
+  if (!lastTokenMatch) return -1;
+  
+  const endPos = lastTokenMatch.index! + lastTokenMatch[0].length;
+  
+  // Suche nach Komma oder Leerzeichen nach dem Namen
+  const afterName = afterPrefix.slice(endPos);
+  const commaMatch = afterName.match(/^[,.\s]+/);
+  if (commaMatch) {
+    return endPos + commaMatch[0].length;
+  }
+  
+  return endPos;
+}
+
+/**
  * Erkennt kurzes Imperativ-Pattern: "sende <name> bitte, <body>" oder "schick <name>, <body>"
  * 
  * Unterstützt Muster:
@@ -3926,7 +4225,26 @@ function parseFreeDictationA34(normalized: string): VoiceIntent | null {
     },
   };
 
-  if (autoSend) {
+  // Cancel-Phrase Prüfung: überschreibt autoSend
+  // NOTE: normalized wird hier verwendet, da parseFreeDictationA34 nur normalized bekommt
+  // Der finale Override in applyCancelPhraseOverride verwendet raw+normalized
+  if (intent.meta?.autoSend && hasCancelPhrase({ raw: normalized, normalized: normalized })) {
+    intent.meta.autoSend = false;
+    if (intent.meta.freeDictationMeta) {
+      intent.meta.freeDictationMeta.autoSend = false;
+    }
+    console.log('[intent-router][A3.4] AutoSend blocked - cancel phrase detected');
+  }
+
+  // Body von Cancel-Phrasen bereinigen
+  if (hasCancelPhrase({ raw: normalized, normalized: normalized }) && intent.bodyHint) {
+    intent.bodyHint = stripCancelPhraseFromBody(intent.bodyHint);
+    if (intent.bodyHintRaw) {
+      intent.bodyHintRaw = stripCancelPhraseFromBody(intent.bodyHintRaw);
+    }
+  }
+
+  if (intent.meta?.autoSend) {
     if (hasImperativeAutoSend) {
       console.log('[intent-router][A3.4][autosend-imperative] AutoSend detected (imperative "sende") - intent.meta.autoSend=true');
     } else {
@@ -3934,6 +4252,52 @@ function parseFreeDictationA34(normalized: string): VoiceIntent | null {
     }
   }
 
+  // Finaler Cancel-Phrase Override
+  // NOTE: parseFreeDictationA34 bekommt nur normalized, daher verwenden wir normalized als raw
+  return applyCancelPhraseOverride(intent, normalized, normalized);
+}
+
+/**
+ * Helper: Finaler Cancel-Phrase Override für Email-Compose Intents
+ * Prüft Cancel-Phrasen und überschreibt autoSend=false + bereinigt Body
+ */
+function applyCancelPhraseOverride(intent: VoiceIntent, raw: string, normalized: string): VoiceIntent {
+  if (intent.type !== 'email-compose') {
+    return intent;
+  }
+
+  const cancel = hasCancelPhrase({ raw, normalized });
+  if (!cancel) {
+    return intent;
+  }
+
+  // Cancel-Phrase erkannt: autoSend überschreiben
+  if (intent.meta) {
+    intent.meta.autoSend = false;
+  }
+  
+  // Body von Cancel-Phrasen bereinigen
+  if (intent.bodyHint) {
+    intent.bodyHint = stripCancelPhraseFromBody(intent.bodyHint);
+  }
+  if (intent.bodyHintRaw) {
+    intent.bodyHintRaw = stripCancelPhraseFromBody(intent.bodyHintRaw);
+  }
+
+  // Auch in freeDictationMeta falls vorhanden
+  if (intent.meta?.freeDictationMeta) {
+    intent.meta.freeDictationMeta.autoSend = false;
+    if (intent.meta.freeDictationMeta.bodyText) {
+      intent.meta.freeDictationMeta.bodyText = stripCancelPhraseFromBody(intent.meta.freeDictationMeta.bodyText);
+    }
+  }
+
+  // Auch in statusEmail falls vorhanden
+  if (intent.meta?.statusEmail) {
+    intent.meta.statusEmail.autoSend = false;
+  }
+
+  console.log("[intent-router][cancel-override] applied");
   return intent;
 }
 
@@ -4004,7 +4368,91 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       toName: lassWissenIntent.toRaw,
       autoSend: lassWissenIntent.meta?.autoSend,
     });
-    return lassWissenIntent;
+    // Finaler Cancel-Phrase Override
+    return applyCancelPhraseOverride(lassWissenIntent, original, text);
+  }
+
+  // --------------------------------------------------
+  // WRITE-PREVIEW: "schreib ... nicht senden" (Preview-only)
+  // Muss VOR Status-Brain kommen, damit "schreib ... nicht senden" nicht als Status-Brain erkannt wird.
+  // --------------------------------------------------
+  {
+    const writePreviewMatch = tryParseWritePreview(text);
+    if (writePreviewMatch) {
+      const { toName, bodyHint } = writePreviewMatch;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toName,
+        subjectHint: "Kurze Info",
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHint,
+        meta: {
+          source: 'write-preview',
+          autoSend: false, // WICHTIG: Kein Autosend für Write-Preview
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][write-preview] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][write-preview] matched', {
+        toNameRaw: toName,
+        bodyPreview: bodyHint.substring(0, 50),
+        bodyHintRawPreview: bodyHint.substring(0, 50),
+        autoSend: false,
+        sendMode: 'preview'
+      });
+
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
+    }
+  }
+
+  // --------------------------------------------------
+  // CANCELLED-SEND->PREVIEW: "sende/schick ... nicht senden" (Preview-only)
+  // Erkennt Sätze mit Send-Verb + Negation und konvertiert sie zu Preview-only Email-Intents.
+  // Muss VOR Status-Brain kommen, damit diese Sätze nicht als Status-Brain erkannt werden.
+  // --------------------------------------------------
+  {
+    const cancelledMatch = tryParseCancelledSendToPreview(text);
+    if (cancelledMatch) {
+      const { toName, bodyHint } = cancelledMatch;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toName,
+        subjectHint: "Kurze Info",
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHint,
+        meta: {
+          source: 'cancelled-send->preview',
+          autoSend: false, // WICHTIG: Kein Autosend für Cancelled-Send
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][cancelled-send->preview] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][cancelled-send->preview] matched', {
+        toNameRaw: toName,
+        bodyPreview: bodyHint.substring(0, 50),
+        bodyHintRawPreview: bodyHint.substring(0, 50),
+        autoSend: false,
+        sendMode: 'preview'
+      });
+
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
+    }
   }
 
   // --------------------------------------------------
@@ -4062,7 +4510,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       console.log("[intent-router][free-dictation][A3.4] E-Mail-Adresse extrahiert:", extractedEmail);
     }
 
-    return fdIntent;
+    // Finaler Cancel-Phrase Override
+    return applyCancelPhraseOverride(fdIntent, original, text);
   }
 
   // Fallback: Bisherige parseFreeDictation aus free_dictation.ts
@@ -4090,7 +4539,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       console.log("[intent-router][free-dictation][A3.4] E-Mail-Adresse extrahiert:", extractedEmail);
     }
 
-    return emailIntent;
+    // Finaler Cancel-Phrase Override
+    return applyCancelPhraseOverride(emailIntent, original, text);
   }
 
   // ============================================================
@@ -4134,10 +4584,22 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       console.log('[intent-router][autosend-guard] autosend blocked due to false-positive exclusion');
     }
     
+    // Cancel-Phrase Prüfung: überschreibt autoSend
+    if (autoSend && hasCancelPhrase({ raw: original, normalized: text })) {
+      autoSend = false;
+      console.log('[intent-router][intent-4.2][schicken-form] AutoSend blocked - cancel phrase detected');
+    }
+    
+    // Body von Cancel-Phrasen bereinigen
+    let cleanedBodyText = bodyText;
+    if (hasCancelPhrase({ raw: original, normalized: text }) && cleanedBodyText) {
+      cleanedBodyText = stripCancelPhraseFromBody(cleanedBodyText);
+    }
+    
     console.log('[intent-router][intent-4.2][schicken-form] "Schicken-Form" erkannt', {
       name,
       verb: verbMatch,
-      bodyPreview: bodyText ? bodyText.substring(0, 60) : null,
+      bodyPreview: cleanedBodyText ? cleanedBodyText.substring(0, 60) : null,
       autoSend
     });
     
@@ -4145,7 +4607,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       type: "email-compose",
       toRaw: name,
       subjectHint: undefined,
-      bodyHint: bodyText || undefined,
+      bodyHint: cleanedBodyText || undefined,
       meta: {
         statusEmail: {
           isStatus: true,
@@ -4165,7 +4627,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       console.log("[intent-router][intent-4.2][schicken-form] E-Mail-Adresse extrahiert:", extractedEmail);
     }
     
-    return intent;
+    // Finaler Cancel-Phrase Override
+    return applyCancelPhraseOverride(intent, original, text);
   }
 
   // Spezial-Route: ALLE Sätze mit "schreib ..."
@@ -4199,6 +4662,18 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       }
     }
 
+    // Cancel-Phrase Prüfung: überschreibt autoSend
+    if (autoSend && hasCancelPhrase({ raw: original, normalized: text })) {
+      autoSend = false;
+      console.log('[intent-router][intent-4.2] AutoSend blocked - cancel phrase detected');
+    }
+    
+    // Body von Cancel-Phrasen bereinigen
+    let cleanedStatusText = statusText;
+    if (hasCancelPhrase({ raw: original, normalized: text }) && cleanedStatusText) {
+      cleanedStatusText = stripCancelPhraseFromBody(cleanedStatusText);
+    }
+
     // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
     const extractedEmail = extractEmailAddress(original);
 
@@ -4207,7 +4682,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         isStatus: true,
         rawText: text,
         toNameRaw: toNameRaw,
-        statusText: statusText,
+        statusText: cleanedStatusText,
         autoSend: autoSend,
       },
     };
@@ -4216,7 +4691,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       type: "email-compose",
       toRaw: toNameRaw || undefined,
       subjectHint: undefined,
-      bodyHint: statusText || undefined,
+      bodyHint: cleanedStatusText || undefined,
       meta,
     };
 
@@ -4226,7 +4701,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       console.log("[intent-router][intent-4.2] E-Mail-Adresse extrahiert:", extractedEmail);
     }
 
-    return intent;
+    // Finaler Cancel-Phrase Override
+    return applyCancelPhraseOverride(intent, original, text);
   }
 
   // 1) Wizard3-OneShot: E-Mail mit Inhalt erkennen (VOR email-compose)
@@ -4259,7 +4735,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       console.log("[fm-voice] E-Mail-Adresse per Regex extrahiert:", extractedEmail);
     }
     
-    return intent;
+    // Finaler Cancel-Phrase Override
+    return applyCancelPhraseOverride(intent, original, text);
   }
 
   // navigation
@@ -4568,7 +5045,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
             console.log("[intent-router][compose-precedence] E-Mail-Adresse extrahiert:", extractedEmail);
           }
           
-          return intent;
+          // Finaler Cancel-Phrase Override
+          return applyCancelPhraseOverride(intent, original, text);
         }
       }
     }
@@ -4964,25 +5442,40 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           }
         }
         
-        const autoSend = hasExtendedAutoSend || hasSendenAutoSend;
+        let autoSend = hasExtendedAutoSend || hasSendenAutoSend;
+        
+        // Cancel-Phrase Prüfung: überschreibt autoSend
+        if (autoSend && hasCancelPhrase({ raw: original, normalized: normalized })) {
+          autoSend = false;
+          console.log('[intent-router][lass-uns] AutoSend blocked - cancel phrase detected');
+        }
+        
+        // Body von Cancel-Phrasen bereinigen
+        let cleanedBodyHint = bodyHint;
+        if (hasCancelPhrase({ raw: original, normalized: normalized }) && cleanedBodyHint) {
+          cleanedBodyHint = stripCancelPhraseFromBody(cleanedBodyHint);
+        }
         
         // TASK 1: Create email-compose intent with same shape as A3.4
         // Use FreeDictationMeta structure so Wizard4 treats it the same way
         const freeDictationMeta: FreeDictationMeta = {
           normalized: normalized,
           toNameRaw: toNameRaw,
-          bodyText: bodyHint || "",
+          bodyText: cleanedBodyHint || "",
           autoSend: autoSend,
         };
         
         // Extract bodyHintRaw from original raw text (behält Groß-/Kleinschreibung)
-        const bodyHintRaw = bodyHint ? extractBodyFromRaw(original, normalized, bodyHint) : undefined;
+        let bodyHintRaw = cleanedBodyHint ? extractBodyFromRaw(original, normalized, cleanedBodyHint) : undefined;
+        if (hasCancelPhrase({ raw: original, normalized: normalized }) && bodyHintRaw) {
+          bodyHintRaw = stripCancelPhraseFromBody(bodyHintRaw);
+        }
         
         const intent: VoiceIntent = {
           type: "email-compose",
           toRaw: toNameRaw,
           subjectHint: undefined,
-          bodyHint: bodyHint, // Top-level field, same as A3.4
+          bodyHint: cleanedBodyHint, // Top-level field, same as A3.4
           bodyHintRaw: bodyHintRaw, // Raw version with capitalization preserved
           meta: {
             freeDictationMeta: freeDictationMeta, // Same structure as A3.4
@@ -5001,7 +5494,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         });
         console.log('[intent-router][lass-uns] intent bodyHint field:', intent.bodyHint);
         
-        return intent;
+        // Finaler Cancel-Phrase Override
+        return applyCancelPhraseOverride(intent, original, text);
       }
     }
   }
@@ -5077,7 +5571,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           autoSend: autoSend,
         });
 
-        return intent;
+        // Finaler Cancel-Phrase Override
+        return applyCancelPhraseOverride(intent, original, text);
       }
     }
     
@@ -5156,7 +5651,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         hasNegation
       });
       
-      return intent;
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
     }
   }
 
@@ -5226,21 +5722,33 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         console.debug("[intent-router][autosend] disabled due to negation");
       }
       
+      // Cancel-Phrase Prüfung: überschreibt autoSend
+      if (autoSend && hasCancelPhrase({ raw: original, normalized: text })) {
+        autoSend = false;
+        console.log('[intent-router][intent-4.2][schicken-direct] AutoSend blocked - cancel phrase detected');
+      }
+      
+      // Body von Cancel-Phrasen bereinigen
+      let cleanedBodyText = bodyText;
+      if (hasCancelPhrase({ raw: original, normalized: text }) && cleanedBodyText) {
+        cleanedBodyText = stripCancelPhraseFromBody(cleanedBodyText);
+      }
+      
       console.log('[intent-router][intent-4.2][schicken-direct] erkannt', {
         toNameRaw,
         verb: verbMatch,
-        bodyPreview: bodyText ? bodyText.substring(0, 60) : null,
+        bodyPreview: cleanedBodyText ? cleanedBodyText.substring(0, 60) : null,
         autoSend
       });
       console.log('[intent-router][intent-4.2][schicken-direct] toNameRaw:', toNameRaw);
-      console.log('[intent-router][intent-4.2][schicken-direct] bodyHint:', bodyText ? bodyText.substring(0, 80) : null);
+      console.log('[intent-router][intent-4.2][schicken-direct] bodyHint:', cleanedBodyText ? cleanedBodyText.substring(0, 80) : null);
       console.log('[intent-router][intent-4.2][schicken-direct] autoSend=' + autoSend);
       
       const intent: VoiceIntent = {
         type: "email-compose",
         toRaw: toNameRaw,
         subjectHint: undefined,
-        bodyHint: bodyText || undefined,
+        bodyHint: cleanedBodyText || undefined,
         meta: {
           statusEmail: {
             isStatus: true,
@@ -5260,7 +5768,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         console.log("[intent-router][intent-4.2][schicken-direct] E-Mail-Adresse extrahiert:", extractedEmail);
       }
       
-      return intent;
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
     }
   }
 
@@ -5320,7 +5829,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         excludedByFalsePositive: autoSendExcludedByFalsePositive
       });
 
-      return intent;
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
     }
   }
 
@@ -5441,6 +5951,136 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         excludedByFalsePositive: autoSendExcludedByFalsePositive
       });
 
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
+    }
+  }
+
+  // ============================================================
+  // DRAFT-ENTWURF PATTERN: "entwurf an <name> ..." (Preview-only)
+  // ============================================================
+  // Erkennt "Entwurf an <name>" Pattern für Preview-only Email-Intents.
+  // WICHTIG: Muss VOR short-imperative kommen, damit "entwurf an ..." nicht als
+  // autosend-imperative erkannt wird.
+  // Setzt IMMER autoSend=false und sendMode=preview (kein Autosend).
+  {
+    const draftEntwurfMatch = detectDraftEntwurfPattern(original, text);
+    if (draftEntwurfMatch) {
+      const { toRaw, bodyHint, bodyHintRaw } = draftEntwurfMatch;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toRaw,
+        subjectHint: "Kurze Info",
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHintRaw,
+        meta: {
+          source: 'draft-entwurf',
+          autoSend: false, // WICHTIG: Kein Autosend für Entwurf
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][draft-entwurf] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][draft-entwurf] matched', {
+        toNameRaw: toRaw,
+        bodyPreview: bodyHint.substring(0, 50),
+        bodyHintRawPreview: bodyHintRaw.substring(0, 50),
+        autoSend: false,
+        sendMode: 'preview'
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // DRAFT-PREPARE PATTERN: "an <name> vorbereiten <text>" (Preview-only)
+  // ============================================================
+  // Erkennt "an <name> vorbereiten" und "für <name> vorbereiten" Pattern für Preview-only Email-Intents.
+  // WICHTIG: Muss VOR short-imperative kommen, damit "an <name> vorbereiten ..." nicht als
+  // autosend-imperative erkannt wird.
+  // Setzt IMMER autoSend=false (kein Autosend).
+  {
+    const draftPrepareMatch = tryParseDraftPrepare(text);
+    if (draftPrepareMatch) {
+      const { toName, bodyHint } = draftPrepareMatch;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toName,
+        subjectHint: "Kurze Info",
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHint, // Für draft-prepare verwenden wir bodyHint auch als bodyHintRaw
+        meta: {
+          source: 'draft-prepare',
+          autoSend: false, // WICHTIG: Kein Autosend für Prepare
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][draft-prepare] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][draft-prepare] matched', {
+        toNameRaw: toName,
+        bodyPreview: bodyHint.substring(0, 50),
+        bodyHintRawPreview: bodyHint.substring(0, 50),
+        autoSend: false,
+        sendMode: 'preview'
+      });
+
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // DRAFT-FOLGENDE PATTERN: "folgende mail/nachricht an <name> <body> (doch) nicht rausschicken" (Preview-only)
+  // ============================================================
+  // Erkennt "folgende mail/nachricht an <name>" Pattern für Preview-only Email-Intents.
+  // WICHTIG: Muss VOR short-imperative kommen, damit "folgende mail an ..." nicht als
+  // autosend-imperative erkannt wird.
+  // Setzt IMMER autoSend=false (kein Autosend).
+  {
+    const draftFolgendeMatch = tryParseDraftFolgende(text);
+    if (draftFolgendeMatch) {
+      const { toName, bodyHint } = draftFolgendeMatch;
+
+      const intent: VoiceIntent = {
+        type: "email-compose",
+        toRaw: toName,
+        subjectHint: "Kurze Info",
+        bodyHint: bodyHint,
+        bodyHintRaw: bodyHint, // Für draft-folgende verwenden wir bodyHint auch als bodyHintRaw
+        meta: {
+          source: 'draft-folgende',
+          autoSend: false, // WICHTIG: Kein Autosend für Folgende
+        },
+      };
+
+      // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) {
+        intent.to = extractedEmail;
+        console.log("[intent-router][draft-folgende] E-Mail-Adresse extrahiert:", extractedEmail);
+      }
+
+      console.log('[intent-router][draft-folgende] matched', {
+        toNameRaw: toName,
+        bodyPreview: bodyHint.substring(0, 50),
+        bodyHintRawPreview: bodyHint.substring(0, 50),
+        autoSend: false,
+        sendMode: 'preview'
+      });
+
       return intent;
     }
   }
@@ -5519,7 +6159,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         excludedByFalsePositive: autoSendExcludedByFalsePositive
       });
 
-      return intent;
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
     }
   }
 
@@ -5674,7 +6315,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
       // AutoSend: true wenn AutoSend-Trigger vorhanden UND keine Negation UND kein False-Positive
       // Wenn "schick" verwendet wird, setze autoSend=true (wie bei anderen schick-Patterns)
-      const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
+      let autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
 
       const intent: VoiceIntent = {
         type: "email-compose",
@@ -5705,7 +6346,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         excludedByFalsePositive: autoSendExcludedByFalsePositive
       });
 
-      return intent;
+      // Finaler Cancel-Phrase Override
+      return applyCancelPhraseOverride(intent, original, text);
     }
   }
 
