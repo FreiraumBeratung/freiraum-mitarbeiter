@@ -25,6 +25,7 @@ declare global {
     __fm_get_mail_to?: () => string | null;
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
+    __fm_last_hint?: { kind: string; message: string; ts: number } | null;
   }
 }
 
@@ -34,6 +35,7 @@ export default function MailCompose() {
   const [subject, setSubject] = useState(sp.get("subject") || "");
   const [body, setBody] = useState(sp.get("body") || "");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [autosendHint, setAutosendHint] = useState<string | null>(null);
 
   // Automatische "Vorschau oder sofort senden?" Nachricht entfernt
   // Die Nachricht wird jetzt nur noch vom Voice-Modul gesteuert
@@ -212,6 +214,20 @@ export default function MailCompose() {
     }
   }, []);
 
+  // Prüfe auf UI-Hinweis beim Mount
+  useEffect(() => {
+    const hint = (window as any).__fm_last_hint;
+    if (hint?.kind === "autosend_safety_preview" && (Date.now() - hint.ts) < 30000) {
+      setAutosendHint(hint.message);
+      // Clear hint
+      (window as any).__fm_last_hint = null;
+      // Auto-hide nach 6 Sekunden
+      setTimeout(() => {
+        setAutosendHint(null);
+      }, 6000);
+    }
+  }, []);
+
   return (
     <>
       {/* Toast-Notification für erfolgreichen Versand */}
@@ -233,6 +249,30 @@ export default function MailCompose() {
           }}
         >
           {successMessage}
+        </div>
+      )}
+      
+      {/* AutoSend-Safety-Hinweis */}
+      {autosendHint && (
+        <div
+          className="glass-card"
+          style={{
+            position: "fixed",
+            top: 20,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 999,
+            padding: "12px 24px",
+            borderRadius: 8,
+            backgroundColor: "rgba(40, 40, 40, 0.95)",
+            color: "white",
+            fontSize: 13,
+            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.3)",
+            maxWidth: "600px",
+            textAlign: "center",
+          }}
+        >
+          {autosendHint}
         </div>
       )}
       <div className="glass-card" style={{ margin: "16px auto", maxWidth: 980, padding: 18 }}>

@@ -74,6 +74,14 @@ describe('hasCancelPhrase', () => {
       
       expect(result).toBe(false);
     });
+
+    it('should match "ich hab dich gern lieber doch nicht" (ending cancel tail)', () => {
+      const raw = "ich hab dich gern lieber doch nicht";
+      const normalized = "ich hab dich gern lieber doch nicht";
+      const result = hasCancelPhrase({ raw, normalized });
+      
+      expect(result).toBe(true);
+    });
   });
 
   describe('Normalized cancel phrases', () => {
@@ -180,5 +188,12 @@ describe('stripCancelPhraseFromBody', () => {
       const result = stripCancelPhraseFromBody(input);
       
       expect(result).toBe('Ich bin gleich da');
+    });
+
+    it('should remove "lieber doch nicht" from end (ending cancel tail)', () => {
+      const input = "ich hab dich gern lieber doch nicht";
+      const result = stripCancelPhraseFromBody(input);
+      
+      expect(result).toBe('ich hab dich gern');
     });
 });

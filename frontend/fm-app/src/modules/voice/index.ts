@@ -16,6 +16,7 @@ import { buildWizard4EmailFromInput } from "../../logic/wizard4/email";
 import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 import { polishEmailBody } from "../../logic/wizard4/email_polish";
 import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
+import { stripLeadingFillerWords } from "../../logic/wizard4/filler_words";
 import { resolveVoiceEmailSubject } from "./subject_resolve";
 import { rewriteLeadingDassClause } from "./dass_rewrite";
 
@@ -1289,6 +1290,38 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         
         wizard4Draft.sendMode = sendMode;
         console.log('[autosend] final sendMode:', wizard4Draft.sendMode, 'sourceText:', wizard4Draft.sourceText);
+        
+        // UI-Hinweis: Wenn AutoSend erkannt wurde, aber trotzdem previewOnly gewählt wurde
+        const metaAutoSend = !!emailIntent?.meta?.autoSend;
+        const isPreviewOnly = (sendMode === "previewOnly");
+        const intentSource = emailIntent?.meta?.source;
+        
+        // Guards: Kein Hinweis bei expliziten Preview-Intents oder Cancel
+        const isExplicitPreviewIntent = [
+          'draft-entwurf',
+          'draft-prepare',
+          'draft-folgende',
+          'write-preview',
+          'cancelled-send->preview'
+        ].includes(intentSource);
+        
+        // Prüfe ob Cancel-Phrase erkannt wurde:
+        // - Wenn meta.autoSend explizit false ist, obwohl es ursprünglich true war (durch applyCancelPhraseOverride)
+        // - Oder wenn bodyHint bereinigt wurde (bodyHint !== bodyHintRaw)
+        const wasCanceledByOverride = metaAutoSend && emailIntent?.meta?.autoSend === false;
+        const hasCancelPhraseInBody = emailIntent?.bodyHint && emailIntent?.bodyHintRaw && 
+          emailIntent.bodyHint !== emailIntent.bodyHintRaw;
+        const hasCancelPhrase = wasCanceledByOverride || hasCancelPhraseInBody;
+        
+        if (metaAutoSend && isPreviewOnly && !isExplicitPreviewIntent && !hasCancelPhrase) {
+          // Setze window-Flag für UI-Hinweis
+          (window as any).__fm_last_hint = {
+            kind: "autosend_safety_preview",
+            message: 'Ich habe "Senden" erkannt, bleibe aber zur Sicherheit im Entwurf. Sag: "schick jetzt raus".',
+            ts: Date.now()
+          };
+          console.log("[wizard4][ui-hint] autosend recognized but kept previewOnly -> hint shown");
+        }
       }
       
       // ============================================================
@@ -1839,11 +1872,21 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // ============================================================
       // FIX: Wenn bodyHint vorhanden ist (explicit-body), verwende IMMER bodyHint für Polish
       // bodyHintRaw oder sourceText dürfen NICHT verwendet werden, wenn bodyHint existiert
-      const rawBodyForPolish = (intent.bodyHint && intent.bodyHint.trim().length > 0)
+      let rawBodyForPolish = (intent.bodyHint && intent.bodyHint.trim().length > 0)
         ? intent.bodyHint.trim()
         : ((intent.bodyHintRaw && intent.bodyHintRaw.trim().length > 0) 
           ? intent.bodyHintRaw 
           : (body || ''));
+      
+      // Entferne führende Füllwörter vor Polish
+      const cleanedBodyForPolish = stripLeadingFillerWords(rawBodyForPolish);
+      if (cleanedBodyForPolish !== rawBodyForPolish) {
+        console.log('[wizard4][filler-strip] applied', {
+          before: rawBodyForPolish.substring(0, 50),
+          after: cleanedBodyForPolish.substring(0, 50)
+        });
+        rawBodyForPolish = cleanedBodyForPolish;
+      }
       
       console.log('[wizard4][explicit-body][polish-input] bodyHint present:', !!(intent.bodyHint && intent.bodyHint.trim().length > 0), {
         usingBodyHint: !!(intent.bodyHint && intent.bodyHint.trim().length > 0),
@@ -1936,7 +1979,13 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             if (polishResult.ok && polishResult.usedAi && polishResult.body.trim().length > 0) {
               // Der Body wurde bereits in polishEmailBody sanitized, normalisiere zusätzlich
               const polished = polishResult.body;
-              const normalizedBody = normalizeEmailBodyAfterPolish(polished);
+              let normalizedBody = normalizeEmailBodyAfterPolish(polished);
+              
+              // Entferne Füllwörter auch nach Polish (falls welche durch Polish wieder eingefügt wurden)
+              const cleanedAfterPolish = stripLeadingFillerWords(normalizedBody);
+              if (cleanedAfterPolish !== normalizedBody) {
+                normalizedBody = cleanedAfterPolish;
+              }
               
               // Debug-Logs für Post-Polish-Normalisierung
               console.log("[wizard4][post-polish-normalize] before:", polished.slice(0, 180));

@@ -67,6 +67,14 @@ export function hasCancelPhrase(params: { raw: string; normalized: string }): bo
     return true;
   }
 
+  // G) Raw ENDING CANCEL TAIL: Matcht Cancel am Ende, auch wenn davor Text steht
+  // Beispiel: "ich hab dich gern lieber doch nicht"
+  // WICHTIG: Nur am Ende ($), dadurch kein Trigger mitten im Satz
+  const endingCancelTail = /\b(?:doch\s+nicht|lieber\s+(?:doch\s+)?nicht|besser\s+(?:doch\s+)?nicht)\b\s*[.!?]?\s*$/i;
+  if (endingCancelTail.test(rawLower)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -91,8 +99,8 @@ export function stripCancelPhraseFromBody(body: string): string {
   const cancelPhrases = [
     // "Schick sie nicht raus." / "Schick sie doch nicht raus."
     /\s*[.,]?\s*schick(?:e|en)?\s+(?:sie|das)\s+(?:doch\s+)?nicht\s+raus\s*[.!?]?\s*$/i,
-    // "Besser doch nicht." / "Lieber doch nicht."
-    /\s*[.,]?\s*(?:besser\s+doch\s+nicht|lieber\s+doch\s+nicht)\s*[.!?]?\s*$/i,
+    // "Besser doch nicht." / "Lieber doch nicht." / "Lieber nicht."
+    /\s*[.,]?\s*(?:besser\s+doch\s+nicht|lieber\s+(?:doch\s+)?nicht)\s*[.!?]?\s*$/i,
     // "Ah nein." / "Ah nee." / "Ach nein." / "Ach nee."
     /\s*[.,]?\s*(?:ah\s+nein|ah\s+nee|ach\s+nein|ach\s+nee)\s*[.!?]?\s*$/i,
     // "Doch nicht." / "Lieber nicht."
@@ -101,6 +109,8 @@ export function stripCancelPhraseFromBody(body: string): string {
     /\s*[.,]?\s*(?:nee|nein)\s*[.!?]?\s*$/i,
     // "Nicht senden." / "Nicht abschicken." / "Nicht schicken."
     /\s*[.,]?\s*nicht\s+(?:senden|abschicken|schicken)\s*[.!?]?\s*$/i,
+    // Ending cancel tail: "doch nicht" / "lieber doch nicht" / "besser doch nicht" am Ende (auch ohne vorherigen Satztrenner)
+    /\b(?:doch\s+nicht|lieber\s+(?:doch\s+)?nicht|besser\s+(?:doch\s+)?nicht)\b\s*[.!?]?\s*$/i,
   ];
 
   for (const phrase of cancelPhrases) {
