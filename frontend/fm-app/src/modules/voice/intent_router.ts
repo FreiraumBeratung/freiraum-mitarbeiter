@@ -24,7 +24,7 @@ export type Wizard3OneShotPayload = {
 
 export type VoiceIntent =
   | { type: "navigate"; target: "control-center" | "lead-radar" | "leads" | "mail-compose" | "voice-diagnostics" }
-  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; bodyHintRaw?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean }; statusBrain?: { category: StatusCategory; usedTemplate: boolean }; freeDictationMeta?: FreeDictationMeta; source?: string; autoSend?: boolean } }
+  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; bodyHintRaw?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean }; statusBrain?: { category: StatusCategory; usedTemplate: boolean }; freeDictationMeta?: FreeDictationMeta; source?: string; autoSend?: boolean; forcePreviewOnly?: boolean; forcePreviewOnlyReason?: string; uiHint?: string; cancelled?: boolean; disableSendPhraseDetection?: boolean } }
   | { type: "email-append"; meta?: { autoSend?: boolean }; payload: { appendText: string } }
   | { type: "wizard3-one-shot"; payload: Wizard3OneShotPayload }
   | { type: "wizard2-edit-anrede"; newAnrede: string }
@@ -72,6 +72,16 @@ const SOFT_WORDS = [
 const ARTICLES = [
   "dem", "den", "der", "die", "das", "an", "für"
 ];
+
+/**
+ * Stopwörter für Empfänger-Kandidaten (toName). Kein Eintrag darf jemals als toRaw/toName durchgehen.
+ * "an" = Präposition ("An Thomas" → Name ist "Thomas", nicht "an"); "raus"/"los"/"ab" = Sendewörter;
+ * "die"/"das" = Artikel ("Schick die Mail" → nie "die" als Empfänger); "mail"/"email"/"nachricht" = Nomen.
+ */
+const TO_STOPWORDS = new Set<string>([
+  "an", "raus", "los", "ab", "jetzt", "sofort", "bitte", "mail", "email", "e-mail", "nachricht",
+  "die", "das", "der", "den", "dem",
+]);
 
 function normalize(text: string) {
   let normalized = (text || "")
@@ -453,6 +463,39 @@ function extractBodyFromRaw(
 }
 
 /**
+ * Entfernt Send-Steuerphrasen am Anfang oder Ende des Body-Texts (nicht in der Mitte).
+ * 
+ * @param text - Body-Text (normalisiert/cleaned)
+ * @returns Bereinigter Text ohne Send-Steuerphrasen am Anfang/Ende
+ * 
+ * @example
+ * stripSendControlPhrases("sofort raus. Bin im Termin...") // => "Bin im Termin..."
+ * stripSendControlPhrases("Bin gleich da. Sofort senden.") // => "Bin gleich da."
+ * stripSendControlPhrases("Ich sage dir sofort: ...") // => "Ich sage dir sofort: ..." (nicht entfernt, da in Mitte)
+ */
+function stripSendControlPhrases(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  
+  let result = text.trim();
+  
+  // Pattern für Send-Steuerphrasen
+  const sendPhrasePattern = '(?:sofort\\s+raus|schick(?:s|\'s)?\\s+raus|raus\\s+damit|jetzt\\s+raus|sofort\\s+senden|direkt\\s+senden|jetzt\\s+senden|abschicken|rausschicken|verschicken)';
+  
+  // A) Entfernen am ANFANG
+  const startPattern = new RegExp(`^\\s*${sendPhrasePattern}\\b[\\s,.:;!?-]*`, 'i');
+  result = result.replace(startPattern, '').trim();
+  
+  // B) Entfernen am ENDE
+  const endPattern = new RegExp(`[\\s,.:;!?-]*${sendPhrasePattern}\\s*$`, 'i');
+  result = result.replace(endPattern, '').trim();
+  
+  // C) Sauberes Trimmen
+  result = result.replace(/^[,.\s]+/, '').replace(/[,.\s]+$/, '').trim();
+  
+  return result;
+}
+
+/**
  * Bereinigt Body-Text von Steuer-Phrasen und extrahiert nur die eigentliche Nachricht.
  * 
  * Regeln:
@@ -605,6 +648,10 @@ export function cleanEmailBodyFromCommand(rawBodyText: string, toNameRaw?: strin
     console.log('[intent-router][body-clean] after:', text.substring(0, 100));
   }
 
+  // Entferne Send-Steuerphrasen am Anfang/Ende (nach body-clean)
+  text = stripSendControlPhrases(text);
+  console.log('[intent-router][body-clean] after-send-strip:', text.substring(0, 120));
+
   return text;
 }
 
@@ -739,7 +786,21 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
     };
   }
 
-  // TASK 3: Pattern "an <name>"
+  // TASK 3: Pattern "an <name>" / "für <name>" am Anfang (toName nicht "an")
+  const anFuerStartMatch = text.match(/^\s*(?:an|für)\s+([a-zäöüß][a-zäöüß\-]*)\b/i);
+  if (anFuerStartMatch && anFuerStartMatch[1]) {
+    const name = anFuerStartMatch[1].trim();
+    const bodyStart = anFuerStartMatch.index! + anFuerStartMatch[0].length;
+    const rawBodyText = text.slice(bodyStart).trim();
+    const bodyText = cleanEmailBodyFromCommand(rawBodyText, name);
+    console.log('[intent-router][intent4.2][fixed-name] Extracted name from "an/für <name>":', name);
+    return {
+      toNameRaw: name,
+      statusText: bodyText || null,
+    };
+  }
+
+  // TASK 3: Pattern "an <name>" (irgendwo)
   const anNameMatch = text.match(/\ban\s+([a-z0-9äöüß]+)\b/i);
   if (anNameMatch && anNameMatch[1]) {
     const name = anNameMatch[1].trim();
@@ -905,6 +966,12 @@ function detectLassWissenCommand(normalized: string, original: string): VoiceInt
 
   if (!toNameRaw || !rawBodyText || rawBodyText.length < 3) {
     return null;
+  }
+
+  // FIX: "An Thomas" darf nie zu "an" werden
+  const fixedToName = fixAnFuerToName(toNameRaw, original);
+  if (fixedToName) {
+    toNameRaw = fixedToName;
   }
 
   // Validiere Name (nicht "uns", "eine", "der", etc.)
@@ -1350,6 +1417,11 @@ function parseFreeDictationCommand(normalized: string): FreeDictationParseResult
     const match = work.match(pattern);
     if (match && match[1] && match[2]) {
       let toNameRaw = match[1].trim();
+      // FIX: "An Thomas" darf nie zu "an" werden
+      const fixedToName = fixAnFuerToName(toNameRaw, undefined, text);
+      if (fixedToName) {
+        toNameRaw = fixedToName;
+      }
       let bodyText = match[2].trim();
 
       // Doppelpunkt am Ende des Namens entfernen (falls vorhanden)
@@ -2350,7 +2422,12 @@ function detectSchickRueberPattern(original: string, normalized: string): {
   
   const match = text.match(pattern);
   if (match && match[1] && match[2]) {
-    const toNameRaw = match[1].trim();
+    let toNameRaw = match[1].trim();
+    // FIX: "An Thomas" darf nie zu "an" werden
+    const fixedToName = fixAnFuerToName(toNameRaw, original);
+    if (fixedToName) {
+      toNameRaw = fixedToName;
+    }
     const toNameLower = toNameRaw.toLowerCase();
 
     // Blockiere Pronomen
@@ -2417,7 +2494,12 @@ function parseSchickMailPattern(original: string): { toRaw: string; bodyHint?: s
     const match = text.match(pattern);
     // Groups: match[1] = verb, match[2] = name, match[3] = body
     if (match && match[2] && match[3]) {
-      const toNameRaw = match[2].trim();
+      let toNameRaw = match[2].trim();
+      // FIX: "An Thomas" darf nie zu "an" werden
+      const fixedToName = fixAnFuerToName(toNameRaw, original);
+      if (fixedToName) {
+        toNameRaw = fixedToName;
+      }
       let bodyHint = match[3].trim();
 
       // Body-Hint bereinigen: Entferne trailing "aber nicht senden" / "nicht senden" etc.
@@ -2526,6 +2608,11 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
 
   if (match && match[1] && match[2]) {
     let toNameRaw = match[1].trim();
+    // FIX: "An Thomas" darf nie zu "an" werden - extrahiere Name aus "an|für <name>"
+    const fixedToName = fixAnFuerToName(toNameRaw, original);
+    if (fixedToName) {
+      toNameRaw = fixedToName;
+    }
     const toNameLower = toNameRaw.toLowerCase();
 
     // FIX: Defensive Check - toRaw darf nicht "s", "an" oder leer sein
@@ -3500,7 +3587,12 @@ function detectPassiveSendPattern(original: string, normalized: string): {
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match && match[1] && match[2]) {
-      const toNameRaw = match[1].trim();
+      let toNameRaw = match[1].trim();
+      // FIX: "An Thomas" darf nie zu "an" werden
+      const fixedToName = fixAnFuerToName(toNameRaw, original);
+      if (fixedToName) {
+        toNameRaw = fixedToName;
+      }
       const toNameLower = toNameRaw.toLowerCase();
 
       // Blockiere Pronomen
@@ -4258,6 +4350,24 @@ function parseFreeDictationA34(normalized: string): VoiceIntent | null {
 }
 
 /**
+ * Korrigiert toRaw wenn es "an" oder "für" ist - extrahiert den tatsächlichen Namen.
+ */
+function fixAnFuerToName(toRaw: string | null | undefined, originalText?: string, normalizedText?: string): string | null {
+  if (!toRaw || (toRaw !== 'an' && toRaw !== 'für')) {
+    return toRaw || null;
+  }
+  const textToSearch = originalText || normalizedText || '';
+  if (!textToSearch || typeof textToSearch !== 'string') {
+    return null;
+  }
+  const anFuerm = textToSearch.match(/^\s*(?:an|für)\s+([a-zäöüß][a-zäöüß\-]*)\b/i);
+  if (anFuerm && anFuerm[1]) {
+    return anFuerm[1];
+  }
+  return null;
+}
+
+/**
  * Helper: Finaler Cancel-Phrase Override für Email-Compose Intents
  * Prüft Cancel-Phrasen und überschreibt autoSend=false + bereinigt Body
  */
@@ -4271,10 +4381,12 @@ function applyCancelPhraseOverride(intent: VoiceIntent, raw: string, normalized:
     return intent;
   }
 
-  // Cancel-Phrase erkannt: autoSend überschreiben
-  if (intent.meta) {
-    intent.meta.autoSend = false;
-  }
+  // Cancel-Phrase erkannt: AutoSend final killen
+  intent.meta = intent.meta || {};
+  intent.meta.forcePreviewOnly = true;
+  intent.meta.autoSend = false;
+  intent.meta.cancelled = true;
+  intent.meta.disableSendPhraseDetection = true;
   
   // Body von Cancel-Phrasen bereinigen
   if (intent.bodyHint) {
@@ -4421,7 +4533,16 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   {
     const cancelledMatch = tryParseCancelledSendToPreview(text);
     if (cancelledMatch) {
-      const { toName, bodyHint } = cancelledMatch;
+      let { toName, bodyHint } = cancelledMatch;
+      
+      // FIX: "An Thomas" darf nie zu "an" werden - extrahiere Name aus "an|für <name>"
+      if ((toName === 'an' || toName === 'für' || !toName) && original) {
+        const anFuerm = String(original).match(/^\s*(?:an|für)\s+([a-zäöüß][a-zäöüß\-]*)\b/i);
+        if (anFuerm && anFuerm[1]) {
+          toName = anFuerm[1];
+          console.log('[intent-router][cancelled-send->preview] Fixed toName from "an"/"für" to:', toName);
+        }
+      }
 
       const intent: VoiceIntent = {
         type: "email-compose",
@@ -4452,6 +4573,54 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
       // Finaler Cancel-Phrase Override
       return applyCancelPhraseOverride(intent, original, text);
+    }
+  }
+
+  // --------------------------------------------------
+  // SEND-NOW-ADVERB: "Sende jetzt an <Name> <message>" / "Schick sofort an <Name> <message>"
+  // Matcht auf RAW (original), damit Großschreibung den Namen begrenzt ("Wir" nie Teil des Namens).
+  // --------------------------------------------------
+  {
+    const sendNowAdverbRe = /^\s*(Sende|Schick)\s+(jetzt|sofort)\s+(bitte\s+)?an\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]*)(?:\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]*))?\b\s*[\:\,\.\-]?\s*(.*)\s*$/;
+    const m = original.match(sendNowAdverbRe);
+    if (m && m[4]) {
+      const toName = (m[4] + (m[5] ? ' ' + m[5] : '')).trim();
+      const bodyRaw = (m[6] ?? '').trim();
+      const blocked = ['du', 'ihr', 'er', 'sie', 'es', 'wir', 'mir', 'dir', 'ihm'];
+      if (!blocked.includes(toName.toLowerCase())) {
+        let bodyHint = bodyRaw;
+        if (bodyHint) {
+          bodyHint = bodyHint.charAt(0).toUpperCase() + bodyHint.slice(1);
+          if (!/[.!?]$/.test(bodyHint)) bodyHint += '.';
+        }
+        const missingBody = !bodyHint || bodyHint.trim().length < 5;
+        const intent: VoiceIntent = {
+          type: 'email-compose',
+          toRaw: toName,
+          subjectHint: 'Kurze Info',
+          bodyHint: bodyHint ?? '',
+          bodyHintRaw: bodyHint ?? '',
+          meta: {
+            source: 'send-now-adverb',
+            autoSend: !missingBody,
+            ...(missingBody && {
+              forcePreviewOnly: true,
+              forcePreviewOnlyReason: 'missing_body',
+              uiHint: "Empfänger erkannt, aber keine Nachricht. Sag den Text – oder sag 'schick jetzt raus', nachdem der Text da ist.",
+            }),
+          },
+        };
+        if (missingBody) {
+          console.log("[send-guard] missing body -> forcePreviewOnly", { toName });
+        }
+        const extractedEmail = extractEmailAddress(original);
+        if (extractedEmail) {
+          intent.to = extractedEmail;
+          console.log("[intent-router][send-now-adverb] E-Mail-Adresse extrahiert:", extractedEmail);
+        }
+        console.log("[intent-router][send-now-adverb] toName:", toName, "body:", (bodyHint || '').slice(0, 80));
+        return applyCancelPhraseOverride(intent, original, text);
+      }
     }
   }
 
@@ -5184,6 +5353,20 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       /^setz\s+noch\s+dahinter\s*[:.]?\s*/i, // "setz noch dahinter"
       /^mach\s+noch\s+dazu\s*[:.]?\s*/i, // "mach noch dazu"
       /^hau\s+noch\s+dran\s*[:.]?\s*/i, // "hau noch dran"
+      // Spec: "füg noch hinzu", "häng dran", "hänge dran", "setz/setze noch dazu", "noch dazu:", "ergänze/füge bitte"
+      /^füg\s+noch\s+hinzu\s*[,.:–\-]?\s*/i,
+      /^fug\s+noch\s+hinzu\s*[,.:–\-]?\s*/i,
+      /^häng\s+dran\s*[,.:–\-]?\s*/i,
+      /^hang\s+dran\s*[,.:–\-]?\s*/i,
+      /^hänge\s+dran\s*[,.:–\-]?\s*/i,
+      /^hange\s+dran\s*[,.:–\-]?\s*/i,
+      /^setz\s+noch\s+dazu\s*[,.:–\-]?\s*/i,
+      /^setze\s+noch\s+dazu\s*[,.:–\-]?\s*/i,
+      /^noch\s+dazu\s*[,.:–\-]?\s*/i, // "noch dazu:" / "noch dazu,"
+      /^ergänze\s+bitte\s*[,.:–\-]?\s*/i,
+      /^erganze\s+bitte\s*[,.:–\-]?\s*/i,
+      /^füge\s+bitte\s+hinzu\s*[,.:–\-]?\s*/i,
+      /^fuge\s+bitte\s+hinzu\s*[,.:–\-]?\s*/i,
     ];
 
     let matchedTrigger: RegExpMatchArray | null = null;
@@ -5218,8 +5401,10 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       const extractIndex = originalTriggerIndex >= 0 ? originalTriggerIndex : triggerIndex;
       let appendTextRaw = original.substring(extractIndex).trim();
       
-      // Trim punctuation/leading commas/colons
-      appendTextRaw = appendTextRaw.replace(/^[,.:;!?\s]+/, '').trim();
+      // Trim punctuation/leading commas/colons/dash (Spec: ":" "," "–" ".")
+      appendTextRaw = appendTextRaw.replace(/^[,.:;!?\s\u2013–\-]+/, '').trim();
+      // Füllwörter nach Trigger entfernen: "bitte", "mal", "kurz", "eben" (beliebig oft)
+      appendTextRaw = appendTextRaw.replace(/^(\s*(?:bitte|mal|kurz|eben)\s*)+/gi, '').trim();
 
       // Detect AutoSend phrases (MUST be done BEFORE sanitization, use normalized for detection)
       const normalizedAppendText = appendTextRaw.toLowerCase();
@@ -5265,26 +5450,33 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         .replace(/\s+/g, ' ')
         .trim();
 
+      console.log('[email-append] normalized appendText=' + (appendText.length > 60 ? appendText.substring(0, 60) + '...' : appendText));
+
       if (appendText.length > 0) {
         const intent: VoiceIntent = {
           type: "email-append",
           meta: {
-            autoSend: hasAutoSend,
-          },
+            autoSend: false,
+          }, // append ist Bearbeitung, niemals senden (Spec)
           payload: {
             appendText: appendText,
           },
         };
 
+        console.log('[fm-voice] intent-router matched email-append');
         console.log('[email-append] appendText=' + appendText.substring(0, 50) + (appendText.length > 50 ? '...' : ''));
-        console.log('[email-append] autoSend=' + hasAutoSend);
 
         return intent;
       } else {
-        // If appendText is empty after sanitization, do NOT create intent
-        // This prevents fallthrough to fm-ai
-        console.log('[email-append] detected but appendText empty after extraction, ignoring');
-        return { type: "unknown" }; // Return unknown instead of falling through to ai-chat
+        // Append-Trigger erkannt, aber kein Zusatztext → email-append mit leerem appendText,
+        // damit applyVoiceIntent den Hint "Zusatz erkannt – sag den Text..." zeigen kann (kein AI-Fallback).
+        const intent: VoiceIntent = {
+          type: "email-append",
+          meta: { autoSend: false },
+          payload: { appendText: "" },
+        };
+        console.log('[fm-voice] intent-router matched email-append (appendText empty -> hint)');
+        return intent;
       }
     }
   }
@@ -6351,6 +6543,131 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
   }
 
+  // ============================================================
+  // AN-NAME-SEND-OUT: "An <Name> <body> schick raus" (VOR name-first, damit "an" nie toName wird)
+  // ============================================================
+  // Erkennt: "An Thomas bin beim Kunden schick raus." -> toRaw=thomas, bodyHint="Bin beim Kunden.", autoSend=true
+  // Name ist genau das Wort nach "an"; "an" darf niemals toName werden (TO_STOPWORDS).
+  {
+    // Mit Body: "an thomas bin beim kunden schick raus" – Name = genau ein Wort (kein "thomas bin")
+    const anNameWithBodyRe = /^an\s+([a-z0-9]+)\s+(.+?)\s+(schick\s+raus|schick\s+ab|schick\s+los|sende\s+sofort|sofort\s+senden|send\s+sofort|raus\s+damit|jetzt\s+raus)\s*$/i;
+    // Ohne Body: "an thomas schick raus"
+    const anNameNoBodyRe = /^an\s+([a-z0-9]+)\s+(schick\s+raus|schick\s+ab|schick\s+los|sende\s+sofort|sofort\s+senden|send\s+sofort|raus\s+damit|jetzt\s+raus)\s*$/i;
+
+    let m = text.match(anNameWithBodyRe);
+    let noBody = false;
+    if (!m || !m[1]) {
+      m = text.match(anNameNoBodyRe);
+      noBody = !!m;
+    }
+    if (m && m[1]) {
+      const toName = m[1].trim().toLowerCase();
+      if (TO_STOPWORDS.has(toName)) {
+        // "an" oder anderes Stopword als Name -> nicht matchen (fallthrough zu name-first oder ai)
+      } else {
+        const sendPhrase = (noBody ? m[2] : m[3]) || '';
+        let bodyCandidate = noBody ? '' : (m[2] || '').trim();
+        bodyCandidate = bodyCandidate.replace(/\s*(schick\s+raus|schick\s+ab|schick\s+los|sende\s+sofort|sofort\s+senden|send\s+sofort|raus\s+damit|jetzt\s+raus)\s*$/i, '').trim();
+        if (!noBody && bodyCandidate.length > 0) {
+          bodyCandidate = bodyCandidate.charAt(0).toUpperCase() + bodyCandidate.slice(1);
+          if (!/[.!?]$/.test(bodyCandidate)) bodyCandidate += '.';
+        }
+        const missingBody = noBody || !bodyCandidate || bodyCandidate.length < 5;
+        console.log("[intent-router][an-name-send-out] parsed toName=" + toName + ", body=" + (bodyCandidate.slice(0, 50) || "(empty)") + ", send=" + sendPhrase + ", missingBody=" + missingBody);
+        const intent: VoiceIntent = {
+          type: "email-compose",
+          toRaw: toName,
+          subjectHint: undefined,
+          bodyHint: bodyCandidate || '',
+          bodyHintRaw: bodyCandidate || '',
+          meta: {
+            source: 'an-name-send-out',
+            autoSend: !missingBody,
+            ...(missingBody && {
+              forcePreviewOnly: true,
+              forcePreviewOnlyReason: 'missing_body',
+              uiHint: "Empfänger erkannt, aber keine Nachricht. Sag den Text – oder sag 'schick jetzt raus', nachdem der Text da ist.",
+            }),
+          },
+        };
+        if (missingBody) {
+          console.log("[send-guard] missing body -> forcePreviewOnly (an-name-send-out)", { toName });
+        }
+        const extractedEmail = extractEmailAddress(original);
+        if (extractedEmail) {
+          intent.to = extractedEmail;
+          console.log("[intent-router][an-name-send-out] E-Mail-Adresse extrahiert:", extractedEmail);
+        }
+        return applyCancelPhraseOverride(intent, original, text);
+      }
+    }
+  }
+
+  // ============================================================
+  // NAME-FIRST-SEND-OUT PATTERN: "<name> <body> schick raus" (AutoSend)
+  // ============================================================
+  // Erkennt Sätze wie:
+  // - "Thomas bin im Termin schick raus"
+  // - "Thomas, ich melde mich gleich. schick raus"
+  // - "Thomas bin im Termin jetzt raus"
+  // Muss VOR AI-Fallback kommen, aber NACH preview-only/cancel Matchern
+  {
+    // Regex auf NORMALIZED (Kommas sind bereits weg)
+    // Pattern: ^([a-zäöüß]+)\s+(.+?)\s+(schick\s+raus|schicks\s+raus|schick's\s+raus|raus\s+damit|jetzt\s+raus|abschicken|sende\s+jetzt)\s*$
+    const nameFirstSendOutPattern = /^([a-zäöüß]+)\s+(.+?)\s+(schick\s+raus|schicks\s+raus|schick's\s+raus|raus\s+damit|jetzt\s+raus|abschicken|sende\s+jetzt)\s*$/i;
+    const match = text.match(nameFirstSendOutPattern);
+    
+    if (match && match[1] && match[2] && match[3]) {
+      const nameCandidate = match[1].trim();
+      let bodyCandidate = match[2].trim();
+      const sendPhrase = match[3].trim();
+      const nameCandidateLower = nameCandidate.toLowerCase();
+      if (TO_STOPWORDS.has(nameCandidateLower)) {
+        // "an", "raus", "die" etc. dürfen nie Empfänger sein
+      } else {
+      const blockedPronouns = ['mir', 'dir', 'uns', 'euch', 'ihm', 'ihr', 'sie', 'er', 'mich', 'dich', 'sich', 'du', 'ihr', 'wir', 'es'];
+      if (blockedPronouns.includes(nameCandidateLower)) {
+        // Kein Match, weiter zum nächsten Matcher
+      } else if (bodyCandidate.length < 3) {
+        // Body zu kurz, kein Match
+      } else {
+        // Body formatieren: ersten Buchstaben groß, Satzpunkt am Ende falls fehlt
+        bodyCandidate = bodyCandidate.charAt(0).toUpperCase() + bodyCandidate.slice(1);
+        if (!/[.!?]$/.test(bodyCandidate)) {
+          bodyCandidate += '.';
+        }
+        
+        const intent: VoiceIntent = {
+          type: "email-compose",
+          toRaw: nameCandidate,
+          subjectHint: undefined,
+          bodyHint: bodyCandidate,
+          bodyHintRaw: bodyCandidate,
+          meta: {
+            source: 'name-first-send-out',
+            autoSend: true, // Explizite Send-Phrase erkannt
+          },
+        };
+
+        // Versuche auch, E-Mail-Adresse zu extrahieren (falls vorhanden)
+        const extractedEmail = extractEmailAddress(original);
+        if (extractedEmail) {
+          intent.to = extractedEmail;
+          console.log("[intent-router][name-first-send-out] E-Mail-Adresse extrahiert:", extractedEmail);
+        }
+
+        console.log("[intent-router][name-first-send-out] matched", {
+          nameCandidate,
+          sendPhrase,
+          bodyPreview: bodyCandidate.substring(0, 50)
+        });
+
+        // Finaler Cancel-Phrase Override
+        return applyCancelPhraseOverride(intent, original, text);
+      }
+    }
+  }
+  }
 
   // Fallback: alles, was nicht gematcht wurde, geht an die KI
   // (Wir erlauben der KI damit, freie Fragen, Smalltalk und komplexe Aufgaben zu beantworten.)
@@ -6361,3 +6678,13 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
   // return { type: "unknown" };  // dieser Return wird dadurch effektiv nie erreicht
 }
+
+/*
+ * Mini-Testliste email-append / email-send (für Denis, Console-Logs prüfen):
+ * --------------------------------------------------------------------------
+ * 1) "Sende jetzt an Thomas." -> leere Mail + Hint (bestehend)
+ * 2) "Hallo Thomas, hier ist Dennis. ..." -> wird in Body gesetzt (bestehend)
+ * 3) "Ergänze: Ich hoffe dir geht's gut." -> muss appended werden (neu)
+ * 4) "Ergänze bitte" -> darf NICHT AI generieren, sondern Hint "Zusatz erkannt – sag den Text..." (neu)
+ * 5) "Ergänze: ..." wenn Composer nicht offen -> darf NICHT append (sicher bleiben)
+ */

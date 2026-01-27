@@ -36,23 +36,23 @@ export async function polishEmailBody(
   body: string,
   opts: PolishEmailBodyOptions = {}
 ): Promise<PolishEmailBodyResult> {
-  // Wenn body leer oder nur whitespace => return original
+  // Wenn body leer oder nur whitespace => return original, kein API-Call
   if (!body || typeof body !== 'string' || body.trim().length === 0) {
     return {
-      ok: false,
+      ok: true,
       body: body || '',
       usedAi: false,
       reason: 'body empty or whitespace only'
     };
   }
 
-  // Edgecase: Wenn body extrem kurz ist (< 10 Zeichen), skip polish
-  if (body.trim().length < 10) {
+  // Body zu kurz (< 5 Zeichen): kein /api/ai/chat, Body unverändert zurück
+  if (body.trim().length < 5) {
     return {
-      ok: false,
+      ok: true,
       body: body.trim(),
       usedAi: false,
-      reason: 'body too short (< 10 characters)'
+      reason: 'body too short (< 5 characters)'
     };
   }
 

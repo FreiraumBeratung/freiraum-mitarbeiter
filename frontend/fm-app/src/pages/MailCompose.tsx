@@ -214,19 +214,26 @@ export default function MailCompose() {
     }
   }, []);
 
-  // Prüfe auf UI-Hinweis beim Mount
-  useEffect(() => {
+  const showHintFromWindow = useCallback(() => {
     const hint = (window as any).__fm_last_hint;
-    if (hint?.kind === "autosend_safety_preview" && (Date.now() - hint.ts) < 30000) {
+    if (hint && (hint.kind === "autosend_safety_preview" || hint.kind === "missing_body" || hint.kind === "missing_to" || hint.kind === "append_missing_text") && (Date.now() - hint.ts) < 30000) {
       setAutosendHint(hint.message);
-      // Clear hint
       (window as any).__fm_last_hint = null;
-      // Auto-hide nach 6 Sekunden
-      setTimeout(() => {
-        setAutosendHint(null);
-      }, 6000);
+      setTimeout(() => setAutosendHint(null), 6000);
     }
   }, []);
+
+  // Prüfe auf UI-Hinweis beim Mount
+  useEffect(() => {
+    showHintFromWindow();
+  }, [showHintFromWindow]);
+
+  // Reagieren, wenn Voice „append_missing_text“ setzt, während Composer schon offen ist
+  useEffect(() => {
+    const onHint = () => showHintFromWindow();
+    window.addEventListener("fm-hint-update", onHint);
+    return () => window.removeEventListener("fm-hint-update", onHint);
+  }, [showHintFromWindow]);
 
   return (
     <>

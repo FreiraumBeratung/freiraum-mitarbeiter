@@ -287,6 +287,47 @@ function buildBodyFromSource(sourceText: string, toName?: string): string | null
 }
 
 /**
+ * Stellt sicher, dass der Text mit einem Satzzeichen endet (. ! ? …), ohne ?/!/… zu überschreiben.
+ * - leer -> "";
+ * - endet mit . ! ? … -> unverändert;
+ * - endet mit , : ; -> letztes Zeichen durch "." ersetzen;
+ * - sonst -> "." anhängen.
+ * Nur anwenden wenn text.length > 0 (missing-body-lock: leere Bodies bleiben leer).
+ */
+export function ensureTerminalPunctuation(text: string): string {
+  const t = (text ?? '').trim();
+  if (t.length === 0) return '';
+  if (/[.!?\u2026]$/.test(t)) return t;
+  if (/[,;:]$/.test(t)) return t.slice(0, -1) + '.';
+  return t + '.';
+}
+
+/**
+ * Entfernt Send-Steuerphrasen am Anfang/Ende des Body-Texts (nur als eigenständige Command-Phrase).
+ * Wenn Ergebnis leer: original zurückgeben.
+ * WICHTIG: Entfernt am Ende nur noch Leerzeichen, keine Punkte – Satzendzeichen bleiben erhalten.
+ */
+export function stripSendControlPhrasesFinal(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  const original = text;
+  let result = text.trim();
+
+  const sendPhrasePattern = '(?:sofort\\s+raus|schick(?:s|\'s)?\\s+raus|raus\\s+damit|jetzt\\s+raus|sofort\\s+senden|direkt\\s+senden|jetzt\\s+senden|abschicken|rausschicken|verschicken)';
+
+  const startPattern = new RegExp(`^\\s*${sendPhrasePattern}\\b[\\s,.:;!?-]*`, 'i');
+  result = result.replace(startPattern, '').trim();
+
+  const endPattern = new RegExp(`[\\s,.:;!?-]*${sendPhrasePattern}\\s*$`, 'i');
+  result = result.replace(endPattern, '').trim();
+
+  result = result.replace(/^[,\s.]+/, '').replace(/\s+$/, '').trim();
+  result = result.replace(/\s+/g, ' ').trim();
+
+  if (!result) return original;
+  return result;
+}
+
+/**
  * Bereinigt den finalen Body von Sende-Phrasen-Markern (z.B. "Schick sie." am Ende)
  */
 function cleanupSendMarkersInBody(text: string | undefined | null): string {
@@ -330,7 +371,10 @@ function generateWizard4Body(draft: Wizard4EmailDraft): string {
     console.log('[wizard4][explicit-body][email.ts] Existing explicit body detected -> skip template generation', {
       bodyPreview: currentBody.substring(0, 80)
     });
-    return currentBody.trim();
+    const cleaned = stripSendControlPhrasesFinal(currentBody);
+    draft.body = cleaned;
+    console.log("[wizard4][send-control-strip] applied", { before: currentBody.slice(0, 80), after: cleaned.slice(0, 80) });
+    return cleaned;
   }
 
   let body = currentBody.trim();
@@ -467,7 +511,7 @@ export function buildWizard4EmailFromInput(rawInput: string): Wizard4EmailDraft 
   
   // 8) Finalen Body von Sende-Phrasen wie "schick sie ..." säubern
   const safeBody = cleanupSendMarkersInBody(draft.body);
-  draft.body = safeBody;
+  draft.body = stripSendControlPhrasesFinal(safeBody);
   
   // 9) Fertigen Entwurf zurückgeben
   return draft;
