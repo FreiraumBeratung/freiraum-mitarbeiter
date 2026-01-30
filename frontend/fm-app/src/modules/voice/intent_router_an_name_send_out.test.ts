@@ -70,4 +70,47 @@ describe('An-Name-Send-Out Pattern', () => {
     }
     expect(intent.type === 'email-send' || (intent.type === 'email-compose' && intent.toRaw?.toLowerCase() !== 'die')).toBe(true);
   });
+
+  describe('ab dafür / dafur / dafuer (STT-Varianten)', () => {
+    it('"An Thomas bin beim Kunden ab dafür." -> email-compose, toRaw=thomas, body=Bin beim Kunden., autoSend=true', () => {
+      const input = 'An Thomas bin beim Kunden ab dafür.';
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint?.toLowerCase()).toMatch(/bin\s+beim\s+kunden/);
+        expect(intent.bodyHint?.toLowerCase()).not.toMatch(/ab\s+dafur|dafuer|dafür/);
+        expect(intent.meta?.autoSend).toBe(true);
+        expect(intent.meta?.source).toBe('an-name-send-out');
+      }
+    });
+
+    it('"An Thomas bin beim Kunden ab dafur." -> email-compose, body ohne Sendphrase', () => {
+      const input = 'An Thomas bin beim Kunden ab dafur.';
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint?.toLowerCase()).toMatch(/bin\s+beim\s+kunden/);
+        expect(intent.meta?.autoSend).toBe(true);
+      }
+    });
+
+    it('"An Thomas bin beim Kunden ab dafuer!" -> email-compose, body ohne Sendphrase', () => {
+      const input = 'An Thomas bin beim Kunden ab dafuer!';
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint?.toLowerCase()).toMatch(/bin\s+beim\s+kunden/);
+        expect(intent.meta?.autoSend).toBe(true);
+      }
+    });
+
+    it('"Ich sag ab dafür nur so." -> darf NICHT email-compose werden (Phrase in der Mitte)', () => {
+      const input = 'Ich sag ab dafür nur so.';
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).not.toBe('email-compose');
+    });
+  });
 });

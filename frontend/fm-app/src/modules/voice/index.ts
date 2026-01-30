@@ -12,7 +12,7 @@ import { cleanEmailBodyFromAi } from "../../utils/email_text_utils";
 import { parseWizard4Intent } from "../../logic/wizard4/intent";
 import { generateWizard4Subject } from "../../logic/wizard4/subject";
 import { generateWizard4Body } from "../../logic/wizard4/body";
-import { buildWizard4EmailFromInput, ensureTerminalPunctuation, stripSendControlPhrasesFinal } from "../../logic/wizard4/email";
+import { buildWizard4EmailFromInput, ensureTerminalPunctuation, stripEndOfSentenceSendCommands, stripSendControlPhrasesFinal } from "../../logic/wizard4/email";
 import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 import { polishEmailBody } from "../../logic/wizard4/email_polish";
 import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
@@ -1317,6 +1317,27 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                   original: intent.bodyHint.substring(0, 80),
                   rewritten: rewritten.substring(0, 80)
                 });
+                // Pronoun-Fix: "Ich ... ihn/ihm" -> "dich/dir" wenn Empfänger gesetzt (Mail an jemanden)
+                const toName = (intent as any).toRaw ?? (intent as any).toName ?? wizard4Draft?.toName;
+                if (toName && (typeof toName === 'string' && toName.trim().length > 0) && /^Ich\s/i.test(bodyHint) && !/^Wir\s/i.test(bodyHint)) {
+                  const beforeFix = bodyHint;
+                  bodyHint = bodyHint.replace(/\bihn\b/gi, 'dich').replace(/\bihm\b/gi, 'dir');
+                  if (bodyHint !== beforeFix) {
+                    (intent as any).bodyHint = bodyHint;
+                    console.log('[wizard4][dass-rewrite][pronoun-fix] before:', beforeFix.slice(0, 80));
+                    console.log('[wizard4][dass-rewrite][pronoun-fix] after:', bodyHint.slice(0, 80));
+                  }
+                }
+                // STT formal guard: "Ihnen" (STT-Fehler für "ihn") -> "dich" nur bei "Ich "-Satz und Empfänger, ohne "Sie"
+                if (toName && (typeof toName === 'string' && toName.trim().length > 0) && /^Ich\s/i.test(bodyHint) && /\bIhnen\b/i.test(bodyHint) && !/\bSie\b/.test(bodyHint)) {
+                  const beforeGuard = bodyHint;
+                  bodyHint = bodyHint.replace(/\bIhnen\b/gi, 'dich').replace(/\bihnen\b/gi, 'dich');
+                  if (bodyHint !== beforeGuard) {
+                    (intent as any).bodyHint = bodyHint;
+                    console.log('[wizard4][dass-rewrite][stt-formal-guard] before:', beforeGuard.slice(0, 80));
+                    console.log('[wizard4][dass-rewrite][stt-formal-guard] after:', bodyHint.slice(0, 80));
+                  }
+                }
               }
             }
             
@@ -1325,8 +1346,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             sanitizedBody = stripSendControlPhrasesFinal(sanitizedBody);
             const recipientHints = [(intent as any).toRaw, (intent as any).toName, wizard4Draft?.toName].filter(Boolean) as string[];
             sanitizedBody = stripLeadingAnRecipient(sanitizedBody, recipientHints);
+            sanitizedBody = stripEndOfSentenceSendCommands(sanitizedBody);
             if (sanitizedBody && sanitizedBody.trim().length > 0) {
               sanitizedBody = ensureTerminalPunctuation(sanitizedBody);
+            } else if (!sanitizedBody || sanitizedBody.trim().length === 0) {
+              (intent as any).meta = { ...(intent as any).meta, forcePreviewOnly: true, forcePreviewOnlyReason: 'missing_body', uiHint: "Empfänger erkannt, aber keine Nachricht. Sag den Text – oder sag 'schick jetzt raus', nachdem der Text da ist." };
             }
             console.log("[wizard4][explicit-body][sanitize] before:", bodyHint.slice(0, 120));
             console.log("[wizard4][explicit-body][sanitize] after:", sanitizedBody.slice(0, 120));
@@ -2027,6 +2051,27 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               original: intent.bodyHint.substring(0, 80),
               rewritten: rewritten.substring(0, 80)
             });
+            // Pronoun-Fix: "Ich ... ihn/ihm" -> "dich/dir" wenn Empfänger gesetzt (Mail an jemanden)
+            const toNameForFix = (intent as any).toRaw ?? (intent as any).toName ?? wizard4Draft?.toName;
+            if (toNameForFix && (typeof toNameForFix === 'string' && toNameForFix.trim().length > 0) && /^Ich\s/i.test(explicitBodyHint) && !/^Wir\s/i.test(explicitBodyHint)) {
+              const beforeFix = explicitBodyHint;
+              explicitBodyHint = explicitBodyHint.replace(/\bihn\b/gi, 'dich').replace(/\bihm\b/gi, 'dir');
+              if (explicitBodyHint !== beforeFix) {
+                (intent as any).bodyHint = explicitBodyHint;
+                console.log('[wizard4][dass-rewrite][pronoun-fix] before:', beforeFix.slice(0, 80));
+                console.log('[wizard4][dass-rewrite][pronoun-fix] after:', explicitBodyHint.slice(0, 80));
+              }
+            }
+            // STT formal guard: "Ihnen" (STT-Fehler für "ihn") -> "dich" nur bei "Ich "-Satz und Empfänger, ohne "Sie"
+            if (toNameForFix && (typeof toNameForFix === 'string' && toNameForFix.trim().length > 0) && /^Ich\s/i.test(explicitBodyHint) && /\bIhnen\b/i.test(explicitBodyHint) && !/\bSie\b/.test(explicitBodyHint)) {
+              const beforeGuard = explicitBodyHint;
+              explicitBodyHint = explicitBodyHint.replace(/\bIhnen\b/gi, 'dich').replace(/\bihnen\b/gi, 'dich');
+              if (explicitBodyHint !== beforeGuard) {
+                (intent as any).bodyHint = explicitBodyHint;
+                console.log('[wizard4][dass-rewrite][stt-formal-guard] before:', beforeGuard.slice(0, 80));
+                console.log('[wizard4][dass-rewrite][stt-formal-guard] after:', explicitBodyHint.slice(0, 80));
+              }
+            }
           }
         }
         

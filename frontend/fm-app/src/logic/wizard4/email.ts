@@ -303,6 +303,47 @@ export function ensureTerminalPunctuation(text: string): string {
 }
 
 /**
+ * Send-Command-Endphrasen (Deutsch): nur am ENDE des Textes entfernen, nie in der Mitte.
+ * Reihenfolge: längere zuerst, damit "schick es raus" vor "schick raus" greift.
+ */
+const SEND_COMMAND_END_PHRASES = [
+  'schick es raus', 'raus damit', 'ab dafür', 'weg damit', 'und los',
+  'schick raus', 'sofort raus', 'direkt raus', 'los damit',
+];
+
+/**
+ * Entfernt umgangssprachliche Send-Befehle nur am Ende des Textes (optional Komma/Punkt davor, optional .!? dahinter).
+ * NUR wenn die Phrase am Ende steht – "Ich sage raus damit nur so." bleibt unverändert.
+ * Soll NACH stripSendControlPhrasesFinal laufen; nur Body ändern, nicht sendMode/Intent.
+ */
+export function stripEndOfSentenceSendCommands(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  let result = text.trim();
+  if (!result) return text;
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const phrase of SEND_COMMAND_END_PHRASES) {
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      const re = new RegExp(`(\\s*[,.]?\\s*${escaped}\\s*[.!?]?\\s*)$`, 'i');
+      const before = result;
+      result = result.replace(re, '').trim();
+      if (result !== before) {
+        if (typeof console !== 'undefined' && console.log) {
+          console.log('[send-command-strip] matchedPhrase:', phrase);
+          console.log('[send-command-strip] before:', before.slice(0, 120));
+          console.log('[send-command-strip] after:', result.slice(0, 120));
+        }
+        changed = true;
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+/**
  * Entfernt Send-Steuerphrasen am Anfang/Ende des Body-Texts (nur als eigenständige Command-Phrase).
  * Wenn Ergebnis leer: original zurückgeben.
  * WICHTIG: Entfernt am Ende nur noch Leerzeichen, keine Punkte – Satzendzeichen bleiben erhalten.
