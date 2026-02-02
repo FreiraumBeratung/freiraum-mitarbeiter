@@ -1347,6 +1347,17 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             const recipientHints = [(intent as any).toRaw, (intent as any).toName, wizard4Draft?.toName].filter(Boolean) as string[];
             sanitizedBody = stripLeadingAnRecipient(sanitizedBody, recipientHints);
             sanitizedBody = stripEndOfSentenceSendCommands(sanitizedBody);
+            // Leading Send-Adverb nur bei AutoSend entfernen (vor ensureTerminalPunctuation)
+            if ((intent as any).meta?.autoSend === true && sanitizedBody?.trim()) {
+              const trimmed = sanitizedBody.trim();
+              const re = /^(sofort|jetzt|direkt)\b\s*[,:;.]?\s*/i;
+              if (re.test(trimmed)) {
+                const before = sanitizedBody;
+                sanitizedBody = trimmed.replace(re, '').trim();
+                console.log('[wizard4][send-control-strip][send-adverb-leading] before:', before.slice(0, 80));
+                console.log('[wizard4][send-control-strip][send-adverb-leading] after:', sanitizedBody.slice(0, 80));
+              }
+            }
             if (sanitizedBody && sanitizedBody.trim().length > 0) {
               sanitizedBody = ensureTerminalPunctuation(sanitizedBody);
             } else if (!sanitizedBody || sanitizedBody.trim().length === 0) {
@@ -2350,6 +2361,18 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           body = '';
           if (wizard4Draft) wizard4Draft.body = '';
           console.log('[wizard4][missing-body-lock] forcing empty body, skipping any draft/template');
+        }
+        
+        // Post-Polish: Führende Send-Adverbien entfernen (AI-Polish fügt sie ggf. wieder ein)
+        if ((intent as any)?.meta?.autoSend === true && finalBodyForUi?.trim()) {
+          const re = /^(sofort|jetzt|direkt)\b\s*[,:;.]?\s*/i;
+          if (re.test(finalBodyForUi.trim())) {
+            const before = finalBodyForUi;
+            finalBodyForUi = finalBodyForUi.trim().replace(re, '').trim();
+            if (finalBodyForUi) finalBodyForUi = ensureTerminalPunctuation(finalBodyForUi);
+            console.log('[wizard4][send-control-strip][send-adverb-leading][post-polish] before:', before.slice(0, 80));
+            console.log('[wizard4][send-control-strip][send-adverb-leading][post-polish] after:', finalBodyForUi.slice(0, 80));
+          }
         }
         
         // Sicherheitsnetz: Send-Steuerphrasen entfernen, bevor Body ins UI geht

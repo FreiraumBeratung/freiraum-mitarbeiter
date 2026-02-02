@@ -209,6 +209,88 @@ describe('Draft-Entwurf Pattern: "entwurf an <name> ..."', () => {
     });
   });
 
+  describe('Hi/Greeting: Empfänger nur Name, Body ab Greeting', () => {
+    it('A) "Entwurf an Thomas Hi Thomas, hier ist Dennis." -> toRaw nur "thomas", bodyHint startet mit "hi thomas"', () => {
+      const input = "Entwurf an Thomas Hi Thomas, hier ist Dennis.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint).toBeDefined();
+        if (intent.bodyHint) {
+          expect(intent.bodyHint.toLowerCase().startsWith('hi thomas')).toBe(true);
+        }
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+
+    it('B) "Entwurf an Thomas, Hi Thomas, hier ist Dennis." -> wie A', () => {
+      const input = "Entwurf an Thomas, Hi Thomas, hier ist Dennis.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint?.toLowerCase().startsWith('hi thomas')).toBe(true);
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+
+    it('C) "Entwurf an Thomas Betreff kurze Info. Hi Thomas ..." -> toRaw=thomas, subjectHint, bodyHint startet mit "hi thomas"', () => {
+      const input = "Entwurf an Thomas Betreff kurze Info. Hi Thomas ...";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.subjectHint?.toLowerCase()).toBe('kurze info');
+        expect(intent.bodyHint).toBeDefined();
+        if (intent.bodyHint) {
+          expect(intent.bodyHint.toLowerCase().startsWith('hi thomas')).toBe(true);
+        }
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+  });
+
+  describe('Duplicate name + Betreff (Draft/Entwurf Parsing)', () => {
+    it('TEST1: "Entwurf an Thomas Thomas Hier ist Dennis. Ich hoffe dir gehts gut." -> toRaw=thomas, bodyHint beginnt mit "thomas hier ist dennis"', () => {
+      const input = "Entwurf an Thomas Thomas Hier ist Dennis. Ich hoffe dir gehts gut.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint).toBeDefined();
+        if (intent.bodyHint) {
+          const bl = intent.bodyHint.toLowerCase();
+          expect(bl.startsWith('thomas hier ist dennis') || bl.startsWith('thomas hier ist dennis.')).toBe(true);
+        }
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+
+    it('TEST2: "Entwurf an Thomas Hi Thomas, kurze Info Ich bin im Termin." -> toRaw=thomas, bodyHint beginnt mit "hi thomas"', () => {
+      const input = "Entwurf an Thomas Hi Thomas, kurze Info Ich bin im Termin.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint?.toLowerCase().startsWith('hi thomas')).toBe(true);
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+
+    it('TEST3: "Entwurf an Thomas, Betreff Rückruf Hi Thomas, Ruf mich bitte kurz zurück." -> toRaw=thomas, subjectHint=Rückruf, bodyHint beginnt mit "hi thomas"', () => {
+      const input = "Entwurf an Thomas, Betreff Rückruf Hi Thomas, Ruf mich bitte kurz zurück.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(['rückruf', 'rueckruf', 'ruckruf']).toContain(intent.subjectHint?.toLowerCase());
+        expect(intent.bodyHint?.toLowerCase().startsWith('hi thomas')).toBe(true);
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+  });
+
   describe('Edge cases', () => {
     it('should handle "draft an" variant (nice-to-have)', () => {
       const input = "draft an thomas ich rufe gleich zuruck";

@@ -2915,6 +2915,103 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
   return null;
 }
 
+const DRAFT_GREETING_TOKENS = new Set(['hi', 'hallo', 'hey', 'moin', 'servus', 'guten', 'lieber', 'liebe']);
+const DRAFT_RECIPIENT_STOP_TOKENS = new Set(['sag', 'dass', 'ich', 'wir', 'du', 'er', 'sie', 'es', 'betreff', 'hier', 'kurze', 'kurzer', 'bitte', 'danke', 'hoffe']);
+
+/** Nur auf Betreff anwenden: ASR liefert z.B. "ruckruf", titlecase wird "Ruckruf" – korrigieren zu "Rückruf". */
+function fixGermanSubjectUmlauts(input: string): string {
+  const s = (input ?? '').trim();
+  if (!s) return s;
+  const map: Array<[RegExp, string]> = [
+    [/^ruckruf$/i, 'Rückruf'],
+    [/^ruckruf\s/i, 'Rückruf '],
+    [/\bruckruf\b/gi, 'Rückruf'],
+  ];
+  let out = s;
+  for (const [re, rep] of map) out = out.replace(re, rep);
+  return out;
+}
+
+function isRecipientStopToken(tokens: string[], i: number): boolean {
+  if (i >= tokens.length) return false;
+  const t = tokens[i].toLowerCase();
+  if (DRAFT_GREETING_TOKENS.has(t) || DRAFT_RECIPIENT_STOP_TOKENS.has(t)) return true;
+  if (t === 'hier' && i + 1 < tokens.length && tokens[i + 1].toLowerCase() === 'ist') return true;
+  return false;
+}
+
+/**
+ * [intent-router][draft-entwurf] Helper
+ * Teilt normalisierten Text nach "entwurf an" in Empfänger, optional Betreff und Body.
+ * Output: { toRaw, subject?, bodyHint }
+ */
+function splitDraftRecipientSubjectBody(text: string): { toRaw: string; subject?: string; bodyHint: string } | null {
+  const t = (text || '').trim().replace(/\s+/g, ' ').trim();
+  const prefixPattern = /^(entwurf|draft)\s+an\s+/i;
+  if (!prefixPattern.test(t)) return null;
+  const prefixMatch = t.match(prefixPattern);
+  if (!prefixMatch) return null;
+  const afterPrefix = t.slice(prefixMatch[0].length).trim();
+  if (!afterPrefix) return null;
+
+  const tokens = afterPrefix.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  // A) Spezialfall: gleiches Wort doppelt am Anfang -> toRaw = erstes Wort, Body ab zweitem (inkl. zweites Wort)
+  if (tokens.length >= 2 && tokens[0].toLowerCase() === tokens[1].toLowerCase()) {
+    const toRaw = tokens[0];
+    let rest = tokens.slice(1).join(' ').trim(); // ab zweitem Token (Body beginnt bei zweitem "Thomas")
+    let subject: string | undefined;
+    const restTokens = rest.split(/\s+/).filter(Boolean);
+    const betreffIdx = restTokens.findIndex((x) => x.toLowerCase() === 'betreff');
+    if (betreffIdx >= 0 && betreffIdx + 1 < restTokens.length) {
+      const subjectTokens: string[] = [];
+      for (let k = betreffIdx + 1; k < restTokens.length; k++) {
+        if (DRAFT_GREETING_TOKENS.has(restTokens[k].toLowerCase())) break;
+        subjectTokens.push(restTokens[k]);
+      }
+      subject = subjectTokens.join(' ').trim() || undefined;
+      const bodyStartIdx = betreffIdx + 1 + subjectTokens.length;
+      rest = restTokens.slice(bodyStartIdx).join(' ').trim();
+    }
+    return { toRaw, subject, bodyHint: rest.replace(/\s+/g, ' ').trim() };
+  }
+
+  // Empfänger bis Stop
+  let recipientEnd = -1;
+  for (let i = 0; i < tokens.length; i++) {
+    if (isRecipientStopToken(tokens, i)) {
+      recipientEnd = i;
+      break;
+    }
+  }
+  if (recipientEnd < 0) {
+    const nameLen = Math.min(2, tokens.length);
+    recipientEnd = nameLen;
+  }
+
+  const toRaw = tokens.slice(0, recipientEnd).join(' ').trim();
+  let restAfterRecipient = tokens.slice(recipientEnd).join(' ').trim();
+
+  // B) Betreff: "betreff X" -> subject = X, bodyHint = Rest nach X bis Greeting/Body
+  let subject: string | undefined;
+  const restTokens = restAfterRecipient.split(/\s+/).filter(Boolean);
+  const betreffIdx = restTokens.findIndex((x) => x.toLowerCase() === 'betreff');
+  if (betreffIdx >= 0) {
+    const subjectTokens: string[] = [];
+    for (let k = betreffIdx + 1; k < restTokens.length; k++) {
+      if (DRAFT_GREETING_TOKENS.has(restTokens[k].toLowerCase())) break;
+      subjectTokens.push(restTokens[k]);
+    }
+    subject = subjectTokens.join(' ').trim() || undefined;
+    const bodyStartIdx = betreffIdx + 1 + subjectTokens.length;
+    restAfterRecipient = restTokens.slice(bodyStartIdx).join(' ').trim();
+  }
+
+  const bodyHint = restAfterRecipient.replace(/\s+/g, ' ').trim();
+  return { toRaw, subject, bodyHint };
+}
+
 /**
  * [intent-router][draft-entwurf]
  * Erkennt "Entwurf an <name>" Pattern für Preview-only Email-Intents.
@@ -2922,130 +3019,64 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
  * Unterstützt Muster:
  * - "entwurf an thomas sag ihm ich rufe gleich zuruck"
  * - "entwurf an thomas, sag ihm, ich rufe gleich zurück"
- * - "entwurf an thomas ich rufe gleich zurück"
+ * - "entwurf an thomas hi thomas hier ist dennis" -> toRaw=thomas, bodyHint=hi thomas ...
  * - "draft an thomas ich rufe gleich zurück" (nice-to-have)
  * 
  * WICHTIG: Setzt IMMER autoSend=false und sendMode=preview (kein Autosend).
  * 
  * @param original - Originaler Text (mit Groß-/Kleinschreibung)
  * @param normalized - Normalisierter Text (lowercase)
- * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string } | null
+ * @returns { toRaw: string; bodyHint: string; bodyHintRaw: string; subjectHint?: string } | null
  */
 function detectDraftEntwurfPattern(original: string, normalized: string): { 
   toRaw: string; 
   bodyHint: string; 
   bodyHintRaw: string;
+  subjectHint?: string;
 } | null {
   const text = normalized.trim();
   if (!text) return null;
 
-  // Pattern: "entwurf an <name>" oder "draft an <name>"
-  // Case-insensitive, bereits normalisiert
-  const prefixPattern = /^(entwurf|draft)\s+an\s+/i;
-  if (!prefixPattern.test(text)) {
-    return null;
-  }
+  const split = splitDraftRecipientSubjectBody(text);
+  if (!split) return null;
 
-  // Finde die Position nach "entwurf an " oder "draft an "
-  const prefixMatch = text.match(prefixPattern);
-  if (!prefixMatch) return null;
-  
-  const afterPrefix = text.slice(prefixMatch[0].length).trim();
-  if (!afterPrefix) return null;
+  const nameTokens = split.toRaw.split(/\s+/).filter(Boolean);
+  if (nameTokens.length === 0) return null;
 
-  // Stopwords, die das Ende des Namens markieren
-  const nameStopWords = ['sag', 'dass', 'ich', 'wir', 'du', 'er', 'sie', 'es'];
-  
-  // Extrahiere Name: 1-3 Tokens bis zu Stopword oder Komma
-  const tokens = afterPrefix.split(/\s+/);
-  let nameTokens: string[] = [];
-  let bodyStartIndex = -1;
+  // Name in Original-Case für Resolver
+  const toRaw = extractNameFromOriginal(original, nameTokens).trim();
+  if (!toRaw) return null;
 
-  for (let i = 0; i < Math.min(tokens.length, 3); i++) {
-    const token = tokens[i].toLowerCase();
-    // Entferne Satzzeichen für Vergleich
-    const cleanToken = token.replace(/[,.;:!?]/g, '');
-    
-    // Wenn Stopword gefunden, Name ist vorher
-    if (nameStopWords.includes(cleanToken)) {
-      bodyStartIndex = i;
-      break;
-    }
-    
-    // Wenn Komma im Token, Name endet hier
-    if (token.includes(',')) {
-      nameTokens.push(token.replace(/,.*$/, ''));
-      bodyStartIndex = i + 1;
-      break;
-    }
-    
-    nameTokens.push(tokens[i]);
-  }
-
-  // Wenn kein Stopword gefunden und weniger als 3 Tokens, nimm alle als Name
-  if (bodyStartIndex === -1) {
-    if (tokens.length <= 3) {
-      // Prüfe, ob das letzte Token ein Komma enthält
-      if (tokens.length > 0 && tokens[tokens.length - 1].includes(',')) {
-        const lastToken = tokens[tokens.length - 1];
-        nameTokens.push(lastToken.replace(/,.*$/, ''));
-        bodyStartIndex = tokens.length;
-      } else {
-        // Alle Tokens sind Name, Body beginnt danach
-        nameTokens = tokens.slice(0, Math.min(3, tokens.length));
-        bodyStartIndex = nameTokens.length;
-      }
-    } else {
-      // Mehr als 3 Tokens: nimm die ersten 3 als Name
-      nameTokens = tokens.slice(0, 3);
-      bodyStartIndex = 3;
-    }
-  }
-
-  if (nameTokens.length === 0) {
-    return null;
-  }
-
-  // Name zusammenfügen (Original-Case aus original Text)
-  const nameInOriginal = extractNameFromOriginal(original, nameTokens);
-  const toRaw = nameInOriginal.trim();
-  
-  if (!toRaw) {
-    return null;
-  }
-
-  // Body extrahieren: Alles nach dem Namen
+  // Body aus Original (Groß-/Kleinschreibung) ab Ende des Namens
   let bodyCandidate = '';
-  if (bodyStartIndex >= 0 && bodyStartIndex < tokens.length) {
-    // Extrahiere Body aus original Text (bessere Groß-/Kleinschreibung)
-    const nameEndInOriginal = findNameEndInOriginal(original, nameTokens);
-    if (nameEndInOriginal >= 0) {
-      bodyCandidate = original.slice(nameEndInOriginal).trim();
-    } else {
-      // Fallback: aus normalized, aber dann wieder aus original extrahieren
-      // Finde Position im original basierend auf normalized tokens
-      const prefixMatchOriginal = original.match(/^(entwurf|draft)\s+an\s+/i);
-      if (prefixMatchOriginal) {
-        const afterPrefixOriginal = original.slice(prefixMatchOriginal[0].length).trim();
-        // Finde das Ende des Namens im Original
-        const nameEndMatch = findNameEndPositionInOriginal(afterPrefixOriginal, nameTokens);
-        if (nameEndMatch >= 0) {
-          bodyCandidate = afterPrefixOriginal.slice(nameEndMatch).trim();
-        } else {
-          // Letzter Fallback: aus normalized
-          bodyCandidate = afterPrefix.split(/\s+/).slice(bodyStartIndex).join(' ');
-        }
-      } else {
-        bodyCandidate = afterPrefix.split(/\s+/).slice(bodyStartIndex).join(' ');
-      }
-    }
+  const nameEndInOriginal = findNameEndInOriginal(original, nameTokens);
+  if (nameEndInOriginal >= 0) {
+    bodyCandidate = original.slice(nameEndInOriginal).trim();
   } else {
-    // Kein Body gefunden
-    return null;
+    const prefixMatchOriginal = original.match(/^(entwurf|draft)\s+an\s+/i);
+    if (prefixMatchOriginal) {
+      const afterPrefixOriginal = original.slice(prefixMatchOriginal[0].length).trim();
+      const nameEndMatch = findNameEndPositionInOriginal(afterPrefixOriginal, nameTokens);
+      if (nameEndMatch >= 0) {
+        bodyCandidate = afterPrefixOriginal.slice(nameEndMatch).trim();
+      } else {
+        bodyCandidate = split.bodyHint; // Fallback: aus Helper (normalized)
+      }
+    } else {
+      bodyCandidate = split.bodyHint;
+    }
   }
 
-  // Entferne führende Kommata und Leerzeichen
   bodyCandidate = bodyCandidate.replace(/^[,.\s]+/, '').trim();
+
+  // Wenn Betreff extrahiert: "Betreff <subject>" am Body-Anfang entfernen (Anzahl Wörter = split.subject, damit Greeting "Hi" nicht mit entfernt wird)
+  if (split.subject) {
+    const nWords = split.subject.split(/\s+/).filter(Boolean).length;
+    if (nWords >= 1) {
+      const wordPart = nWords === 1 ? '\\S+' : `(?:\\S+\\s+){${nWords - 1}}\\S+`;
+      bodyCandidate = bodyCandidate.replace(new RegExp(`^betreff\\s+${wordPart}\\s*[,.:]?\\s*`, 'i'), '').trim();
+    }
+  }
 
   // Strip "sag ihm", "sag ihr", "sag ihm bitte", "sag ihr bitte"
   const sagPhrases = [
@@ -3054,37 +3085,28 @@ function detectDraftEntwurfPattern(original: string, normalized: string): {
     /^sag\s+ihm\s*,?\s*/i,
     /^sag\s+ihr\s*,?\s*/i,
   ];
-  
   for (const phrase of sagPhrases) {
     bodyCandidate = bodyCandidate.replace(phrase, '').trim();
   }
-
-  // Optional: "bitte" allein am Anfang entfernen
   bodyCandidate = bodyCandidate.replace(/^bitte\s*,?\s*/i, '').trim();
 
-  if (!bodyCandidate) {
-    return null;
-  }
+  if (!bodyCandidate) return null;
 
-  // Body normalisieren für bodyHint: Erste Buchstabe groß, Rest wie im Original
-  // Aber für bodyHint (normalized) verwenden wir lowercase für den Rest
   let bodyHint = bodyCandidate.toLowerCase();
   bodyHint = bodyHint.charAt(0).toUpperCase() + bodyHint.slice(1);
-
-  // Stelle sicher, dass Body mit Punkt endet (wenn nicht bereits . ! ?)
   if (!/[.!?]$/.test(bodyHint)) {
     bodyHint += '.';
     bodyCandidate += '.';
   }
-
-  // bodyHintRaw: Original mit Groß-/Kleinschreibung, erste Buchstabe groß
   const bodyHintRaw = bodyCandidate.charAt(0).toUpperCase() + bodyCandidate.slice(1);
 
-  return {
-    toRaw: toRaw, // Original-Case beibehalten für besseres Matching
-    bodyHint: bodyHint,
-    bodyHintRaw: bodyHintRaw,
-  };
+  // subjectHint: aus Helper (subject ist normalisiert); für UI ggf. erste Buchstabe groß; Umlaut-Korrektur (Ruckruf -> Rückruf)
+  let subjectHint = split.subject
+    ? (split.subject.charAt(0).toUpperCase() + split.subject.slice(1).toLowerCase()).trim()
+    : undefined;
+  if (subjectHint) subjectHint = fixGermanSubjectUmlauts(subjectHint);
+
+  return { toRaw, bodyHint, bodyHintRaw, subjectHint };
 }
 
 /**
@@ -3788,9 +3810,10 @@ function parseSubjectFromBody(bodyHint: string, bodyHintRaw: string): {
     bodyPartStart += 1;
   }
   const bodyHintRawNew = afterKeyword.substring(bodyPartStart).trim();
-  const subjectHint = subjectPart
+  let subjectHint = subjectPart
     ? subjectPart.split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
     : '';
+  if (subjectHint) subjectHint = fixGermanSubjectUmlauts(subjectHint);
   const bodyHintNew = bodyHintRawNew ? normalize(bodyHintRawNew) : '';
   return {
     subjectHint: subjectHint || undefined,
@@ -6482,12 +6505,12 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   {
     const draftEntwurfMatch = detectDraftEntwurfPattern(original, text);
     if (draftEntwurfMatch) {
-      const { toRaw, bodyHint, bodyHintRaw } = draftEntwurfMatch;
+      const { toRaw, bodyHint, bodyHintRaw, subjectHint } = draftEntwurfMatch;
 
       const intent: VoiceIntent = {
         type: "email-compose",
         toRaw: toRaw,
-        subjectHint: "Kurze Info",
+        subjectHint: subjectHint ?? "Kurze Info",
         bodyHint: bodyHint,
         bodyHintRaw: bodyHintRaw,
         meta: {
