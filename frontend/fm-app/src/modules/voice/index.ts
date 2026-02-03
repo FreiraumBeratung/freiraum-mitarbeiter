@@ -1298,6 +1298,13 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             hasExplicitBody: hasExplicitBody && !isStatusBrain,
             isStatusBrain: isStatusBrain,
           });
+
+          // Subject aus Intent übernehmen (höhere Priorität)
+          const intentSubject = (intent as any)?.subject ?? intent.subjectHint;
+          if (intentSubject && typeof intentSubject === 'string' && intentSubject.trim() && wizard4Draft) {
+            wizard4Draft.subject = intentSubject.trim();
+            console.log('[wizard4][subject-from-intent] subject übernommen:', wizard4Draft.subject);
+          }
           
           // EXPLICIT BODY WINS: Wenn ein expliziter bodyHint vorhanden ist, überschreibe den generierten Body sofort
           // ABER: NICHT bei Status-Brain (dort wird Body später mit aufgelöstem Namen gesetzt)
@@ -2026,9 +2033,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       });
       
       let subject = resolvedSubject;
-      
-      // Wenn Status-Mail oder Free-Diktat → Betreff auf neutrale Standardzeile setzen
-      if (statusMetaForSubject?.isStatus || freeDictationMetaForSubject) {
+      // Intent-Subject hat Vorrang; Default "Kurze Info" nur wenn subject leer
+      const intentSubjectForFinal = (intent as any)?.subject ?? intent.subjectHint;
+      if (intentSubjectForFinal && typeof intentSubjectForFinal === 'string' && intentSubjectForFinal.trim()) {
+        subject = intentSubjectForFinal.trim();
+      }
+      if ((statusMetaForSubject?.isStatus || freeDictationMetaForSubject) && !subject?.trim()) {
         subject = "Kurze Info";
       }
       

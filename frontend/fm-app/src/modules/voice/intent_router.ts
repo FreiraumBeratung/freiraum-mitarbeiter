@@ -2916,7 +2916,11 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
 }
 
 const DRAFT_GREETING_TOKENS = new Set(['hi', 'hallo', 'hey', 'moin', 'servus', 'guten', 'lieber', 'liebe']);
-const DRAFT_RECIPIENT_STOP_TOKENS = new Set(['sag', 'dass', 'ich', 'wir', 'du', 'er', 'sie', 'es', 'betreff', 'hier', 'kurze', 'kurzer', 'bitte', 'danke', 'hoffe']);
+// Empfänger endet vor Body-Start: Verben/Starter (bin, ich, wir, habe, kann, …) + Greeting + Betreff
+const DRAFT_RECIPIENT_STOP_TOKENS = new Set([
+  'sag', 'dass', 'ich', 'wir', 'du', 'er', 'sie', 'es', 'betreff', 'hier', 'kurze', 'kurzer', 'bitte', 'danke', 'hoffe',
+  'bin', 'habe', 'hab', 'kann', 'brauche', 'moechte', 'mochte', 'will', 'komme', 'brauch', 'moecht',
+]);
 
 /** Nur auf Betreff anwenden: ASR liefert z.B. "ruckruf", titlecase wird "Ruckruf" – korrigieren zu "Rückruf". */
 function fixGermanSubjectUmlauts(input: string): string {
@@ -3012,6 +3016,153 @@ function splitDraftRecipientSubjectBody(text: string): { toRaw: string; subject?
   return { toRaw, subject, bodyHint };
 }
 
+// ============================================================
+// WHATSAPP-STYLE: "<Name>: <body>" oder "<Name> <body> <Send-Phrase>"
+// Triggert nur bei ":" nach Name ODER Send-Phrase am Ende. Kein Match bei "Thomas bin im Termin" (Safety).
+// ============================================================
+const WHATSAPP_STYLE_SEND_PHRASES = [
+  /\bschick\s*'?s?\s*raus\s*[.,]?\s*$/i,
+  /\bschicks\s+raus\s*[.,]?\s*$/i,
+  /\bschick\s+raus\s*[.,]?\s*$/i,
+  /\bjetzt\s+senden\s*[.,]?\s*$/i,
+  /\bab\s+dafür\s*[.,]?\s*$/i,
+  /\braus\s+damit\s*[.,]?\s*$/i,
+];
+
+const WHATSAPP_STYLE_COMMAND_FIRST = new Set<string>([
+  'entwurf', 'nachricht', 'mail', 'email', 'schick', 'sende', 'schreib', 'schreibe', 'schicken', 'setz', 'setze', 'tippe', 'tipp', 'hau', 'mach', 'mache',
+]);
+
+/** Body-Start-Tokens: Subject endet davor (WhatsApp-Style Betreff-Parsing). */
+const WHATSAPP_BODY_START = ['hi', 'hallo', 'ich', 'wir', 'bitte', 'ruf', 'rufe', 'kannst', 'könnt', 'denk', 'erinner'];
+
+/**
+ * Extrahiert optional "betreff <X>" aus Rest-Text (WhatsApp-Style). Priorität RAW (Umlaute).
+ * Akzeptiert "betreff pizza", "betreff: pizza", "betreff, pizza". Subject endet bei Body-Start (hi, hallo, …).
+ */
+function parseWhatsAppSubjectFromRest(restRaw: string, restNorm: string): {
+  subjectHint?: string;
+  bodyRaw: string;
+  bodyNorm: string;
+  subjectDetected: boolean;
+} {
+  const re = /\b(betreff|titel|subject)\s*[,:.]?\s*(.+)$/is;
+  const matchRaw = restRaw.match(re);
+  if (!matchRaw) {
+    return { bodyRaw: restRaw, bodyNorm: restNorm, subjectDetected: false };
+  }
+  const afterKeywordRaw = matchRaw[2].trim();
+  const wordsRaw = afterKeywordRaw.split(/\s+/).filter(Boolean);
+  if (wordsRaw.length === 0) return { bodyRaw: restRaw, bodyNorm: restNorm, subjectDetected: false };
+
+  const bodyStartIdx = wordsRaw.findIndex((w) => WHATSAPP_BODY_START.includes(w.toLowerCase()));
+  const subjectWordCount = bodyStartIdx >= 0 ? bodyStartIdx : Math.min(2, wordsRaw.length);
+  if (subjectWordCount === 0) return { bodyRaw: restRaw, bodyNorm: restNorm, subjectDetected: false };
+
+  const bodyWordsRaw = wordsRaw.slice(subjectWordCount);
+  const bodyPartStart = bodyWordsRaw.length > 0 ? afterKeywordRaw.indexOf(bodyWordsRaw[0]!) : afterKeywordRaw.length;
+  const bodyRawNew = (bodyPartStart >= 0 && bodyPartStart < afterKeywordRaw.length ? afterKeywordRaw.substring(bodyPartStart) : bodyWordsRaw.join(' ')).trim();
+  if (!bodyRawNew || bodyRawNew.length < 2) return { bodyRaw: restRaw, bodyNorm: restNorm, subjectDetected: false };
+
+  let subjectHint = (bodyPartStart > 0 ? afterKeywordRaw.substring(0, bodyPartStart) : wordsRaw.slice(0, subjectWordCount).join(' ')).trim();
+  if (!subjectHint) return { bodyRaw: restRaw, bodyNorm: restNorm, subjectDetected: false };
+
+  subjectHint = subjectHint.charAt(0).toUpperCase() + subjectHint.slice(1);
+  subjectHint = fixGermanSubjectUmlauts(subjectHint);
+
+  const matchNorm = restNorm.match(re);
+  let bodyNormNew = restNorm;
+  if (matchNorm) {
+    const afterKeywordNorm = matchNorm[2].trim();
+    const wordsNorm = afterKeywordNorm.split(/\s+/).filter(Boolean);
+    bodyNormNew = wordsNorm.slice(subjectWordCount).join(' ').trim() || bodyNormNew;
+  }
+
+  return { subjectHint, bodyRaw: bodyRawNew, bodyNorm: bodyNormNew, subjectDetected: true };
+}
+
+function detectWhatsAppStylePattern(original: string, normalized: string): {
+  toRaw: string;
+  bodyHint: string;
+  bodyHintRaw: string;
+  subjectHint?: string;
+  autoSend: boolean;
+} | null {
+  const text = (normalized || '').trim().toLowerCase();
+  const raw = (original || '').trim();
+  if (!text || !raw) return null;
+
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+
+  const nameCandidate = tokens[0];
+  if (TO_STOPWORDS.has(nameCandidate) || WHATSAPP_STYLE_COMMAND_FIRST.has(nameCandidate)) return null;
+
+  const restNormalized = tokens.slice(1).join(' ').trim();
+  if (!restNormalized) return null;
+
+  const rawFirstWordMatch = raw.match(/^\s*(\S+)\s*:?\s*(.*)$/s);
+  const firstWordRaw = rawFirstWordMatch?.[1] ?? '';
+  const restRaw = (rawFirstWordMatch?.[2] ?? '').trim();
+
+  const afterFirstWord = raw.slice(raw.indexOf(firstWordRaw) + firstWordRaw.length).trimStart();
+  const hasColon = afterFirstWord.startsWith(':');
+
+  let hasSendPhrase = false;
+  for (const re of WHATSAPP_STYLE_SEND_PHRASES) {
+    if (re.test(restNormalized) || re.test(restRaw)) {
+      hasSendPhrase = true;
+      break;
+    }
+  }
+
+  if (!hasColon && !hasSendPhrase) return null;
+
+  let bodyNorm = restNormalized;
+  let bodyRaw = restRaw;
+
+  const sendPhraseStripEnd = /(?:schick\s*'?s?\s*raus|schicks\s+raus|schick\s+raus|jetzt\s+senden|ab\s+daf[uü]r|raus\s+damit)\s*[.,]?\s*$/i;
+  if (hasSendPhrase) {
+    bodyNorm = bodyNorm.replace(sendPhraseStripEnd, '').trim();
+    bodyRaw = bodyRaw.replace(sendPhraseStripEnd, '').trim();
+  }
+
+  if (!bodyNorm || bodyNorm.length === 0) return null;
+
+  let subjectHint: string | undefined;
+  const subjectParsed = parseWhatsAppSubjectFromRest(bodyRaw, bodyNorm);
+  if (subjectParsed.subjectDetected && subjectParsed.subjectHint) {
+    subjectHint = subjectParsed.subjectHint;
+    bodyNorm = subjectParsed.bodyNorm;
+    bodyRaw = subjectParsed.bodyRaw;
+    if (!bodyNorm || bodyNorm.length === 0) return null;
+  }
+
+  let bodyHint = bodyNorm.trim();
+  let bodyHintRaw = bodyRaw.trim();
+  if (!bodyHint) return null;
+
+  bodyHint = bodyHint.charAt(0).toUpperCase() + bodyHint.slice(1);
+  if (!/[.!?]$/.test(bodyHint)) bodyHint += '.';
+  if (bodyHintRaw) {
+    bodyHintRaw = bodyHintRaw.charAt(0).toUpperCase() + bodyHintRaw.slice(1);
+    if (!/[.!?]$/.test(bodyHintRaw)) bodyHintRaw += '.';
+  } else {
+    bodyHintRaw = bodyHint;
+  }
+
+  let toRaw = firstWordRaw.replace(/:+$/, '').trim();
+  if (!toRaw) toRaw = nameCandidate.charAt(0).toUpperCase() + nameCandidate.slice(1);
+
+  return {
+    toRaw,
+    bodyHint,
+    bodyHintRaw,
+    subjectHint,
+    autoSend: hasSendPhrase,
+  };
+}
+
 /**
  * [intent-router][draft-entwurf]
  * Erkennt "Entwurf an <name>" Pattern für Preview-only Email-Intents.
@@ -3039,6 +3190,7 @@ function detectDraftEntwurfPattern(original: string, normalized: string): {
 
   const split = splitDraftRecipientSubjectBody(text);
   if (!split) return null;
+  console.log('[intent-router][draft-entwurf][split] toRaw=', split.toRaw, 'body=', split.bodyHint);
 
   const nameTokens = split.toRaw.split(/\s+/).filter(Boolean);
   if (nameTokens.length === 0) return null;
@@ -4557,6 +4709,20 @@ function parseFreeDictationA34(normalized: string, raw?: string): VoiceIntent | 
     return null;
   }
 
+  // Betreff-Extraktion VOR body-clean: "betreff <subject> <body>" -> subject setzen, Body ohne Betreff-Teil
+  let subjectExtracted: string | undefined;
+  const betreffMatch = bodyText.match(/^\s*betreff\s+(\S+)\s+(.+)$/i);
+  if (betreffMatch) {
+    const subjectWord = betreffMatch[1];
+    const rest = betreffMatch[2].trim();
+    const greetingStart = /^(hi|hallo|guten|moin)\b/i.test(rest);
+    if (greetingStart || rest.length > 0) {
+      subjectExtracted = subjectWord.charAt(0).toUpperCase() + subjectWord.slice(1).toLowerCase();
+      bodyText = rest;
+      console.log('[intent-router][subject-parse] subject="' + subjectExtracted + '" bodyAfter="' + bodyText.substring(0, 60) + '"');
+    }
+  }
+
   // Cancel-Suffix VOR body-clean strippen, damit "bin gleich da" nicht verloren geht
   const rawForCondition = raw ?? normalized;
   const hasCancelSuffixCondition = (/\blieber\b/i.test(rawForCondition) && /\bnicht\b/i.test(rawForCondition)) || hasCancelPhrase({ raw: rawForCondition, normalized });
@@ -4594,7 +4760,7 @@ function parseFreeDictationA34(normalized: string, raw?: string): VoiceIntent | 
   const intent: VoiceIntent = {
     type: "email-compose",
     toRaw: toNameRaw,
-    subjectHint: undefined,
+    subjectHint: subjectExtracted ?? undefined,
     bodyHint: bodyText,
     // bodyHintRaw wird in routeVoiceIntent gesetzt (siehe unten)
     meta: {
@@ -6534,6 +6700,178 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         sendMode: 'preview'
       });
 
+      return intent;
+    }
+  }
+
+  // ============================================================
+  // NACHRICHT AN: "Nachricht an <Name>, Betreff <X> <Body>" / "Nachricht an <Name> <Body>"
+  // Muss VOR AI-Fallback laufen. Betreff optional; Umlaut-Fix (Ruckruf -> Rückruf).
+  // ============================================================
+  {
+    const t = text.trim();
+    const prefixMatch = t.match(/^(nachricht|mail|email)\s+an\s+/i);
+    if (prefixMatch) {
+      const prefixLen = prefixMatch[0].length;
+      let rest = t.slice(prefixLen).trim();
+
+      let toPart = rest;
+      let remainder = '';
+      const idxBetreff = rest.indexOf(' betreff ');
+      if (idxBetreff >= 0) {
+        toPart = rest.slice(0, idxBetreff).trim();
+        remainder = rest.slice(idxBetreff).trim();
+      } else {
+        const parts = rest.split(/\s+/).filter(Boolean);
+        toPart = (parts.slice(0, 1).join(' ') || '').trim();
+        remainder = parts.slice(1).join(' ').trim();
+      }
+
+      const toNameNormalized = toPart.trim();
+      if (!toNameNormalized) {
+        // kein Empfänger -> nicht matchen
+      } else {
+        let subjectHint: string | undefined;
+        let bodyAfter = '';
+
+        if (remainder.startsWith('betreff ')) {
+          const after = remainder.replace(/^betreff\s+/i, '').trim();
+          const p = after.split(/\s+/).filter(Boolean);
+          const subjectRaw = (p[0] ?? '').trim();
+          bodyAfter = p.slice(1).join(' ').trim();
+          subjectHint = subjectRaw ? fixGermanSubjectUmlauts(subjectRaw.charAt(0).toUpperCase() + subjectRaw.slice(1).toLowerCase()) : undefined;
+          console.log('[intent-router][nachricht-an][subject]', { subject: subjectHint, bodyAfter: bodyAfter.slice(0, 50) });
+        } else {
+          bodyAfter = remainder.trim();
+        }
+
+        const origPrefix = original.match(/^(?:nachricht|mail|email)\s+an\s+/i);
+        const afterPrefix = origPrefix ? original.slice(origPrefix[0].length) : '';
+        const firstWord = afterPrefix.split(/[\s,]+/).filter(Boolean)[0];
+        const toRaw = (firstWord && firstWord.trim()) || toNameNormalized;
+
+        const bodyHintRaw = bodyAfter
+          ? (bodyAfter.charAt(0).toUpperCase() + bodyAfter.slice(1).toLowerCase()).trim()
+          : '';
+
+        const intent: VoiceIntent = {
+          type: 'email-compose',
+          toRaw,
+          subjectHint: subjectHint ?? 'Kurze Info',
+          bodyHint: bodyAfter,
+          bodyHintRaw: bodyHintRaw || bodyAfter,
+          meta: {
+            source: 'nachricht-an',
+            autoSend: false,
+          },
+        };
+
+        const extractedEmail = extractEmailAddress(original);
+        if (extractedEmail) {
+          intent.to = extractedEmail;
+        }
+
+        console.log('[intent-router][nachricht-an] matched', { toName: toRaw, subject: subjectHint, bodyPreview: bodyAfter.slice(0, 50) });
+        return intent;
+      }
+    }
+  }
+
+  // ============================================================
+  // WHATSAPP-STYLE PREVIEW (smart): "<name>, <body>" ODER "<name> <body>" => previewOnly, kein AutoSend.
+  // Komma-Variante wie bisher; ohne Komma: first token = Name, Rest = Body (STT liefert oft kein Komma).
+  // Send-Phrase am Ende => nicht hier matchen, Fall durch an detectWhatsAppStylePattern (sendNow).
+  // ============================================================
+  {
+    const rawTrim = original.trim();
+    const tokens = text.trim().split(/\s+/).filter(Boolean);
+    let nameRaw = '';
+    let restAfterName = '';
+
+    const commaMatch = rawTrim.match(/^\s*(\S+)\s*,\s*(.*)$/s);
+    if (commaMatch) {
+      nameRaw = commaMatch[1].trim();
+      restAfterName = commaMatch[2].trim();
+    } else {
+      if (tokens.length >= 2) {
+        const firstWord = rawTrim.match(/^\s*(\S+)/)?.[1] ?? '';
+        if (firstWord) {
+          const restStart = rawTrim.indexOf(firstWord) + firstWord.length;
+          restAfterName = rawTrim.slice(restStart).trim();
+          if (restAfterName.length >= 2) {
+            nameRaw = firstWord;
+          }
+        }
+      }
+    }
+
+    if (nameRaw && restAfterName) {
+      const nameLower = nameRaw.toLowerCase();
+      if (TO_STOPWORDS.has(nameLower) || WHATSAPP_STYLE_COMMAND_FIRST.has(nameLower)) { /* skip */ } else {
+        const hasSendPhraseAtEnd = WHATSAPP_STYLE_SEND_PHRASES.some((re) => re.test(restAfterName) || re.test(normalize(restAfterName)));
+        if (hasSendPhraseAtEnd) { /* Fall durch an whatsapp-style (sendNow) */ } else {
+          const restNorm = normalize(restAfterName);
+          let bodyRaw = restAfterName;
+          let bodyNorm = restNorm;
+          let subjectHint: string | undefined;
+          const subjectParsed = parseWhatsAppSubjectFromRest(restAfterName, restNorm);
+          if (subjectParsed.subjectDetected && subjectParsed.subjectHint) {
+            subjectHint = subjectParsed.subjectHint;
+            bodyRaw = subjectParsed.bodyRaw;
+            bodyNorm = subjectParsed.bodyNorm;
+            console.log('[intent-router][subject-parse] subject="' + (subjectHint ?? '') + '" bodyAfter="' + (bodyRaw.slice(0, 50) ?? '') + '"');
+          }
+          if (bodyNorm && bodyNorm.length > 0) {
+            let bodyHint = bodyNorm.trim();
+            let bodyHintRaw = bodyRaw.trim();
+            bodyHint = bodyHint.charAt(0).toUpperCase() + bodyHint.slice(1);
+            if (!/[.!?]$/.test(bodyHint)) bodyHint += '.';
+            bodyHintRaw = bodyHintRaw ? (bodyHintRaw.charAt(0).toUpperCase() + bodyHintRaw.slice(1)) : bodyHint;
+            if (!/[.!?]$/.test(bodyHintRaw)) bodyHintRaw += '.';
+
+            const intent: VoiceIntent = {
+              type: 'email-compose',
+              toRaw: nameRaw,
+              subjectHint: subjectHint ?? 'Kurze Info',
+              bodyHint,
+              bodyHintRaw,
+              meta: {
+                source: 'whatsapp-style-preview-smart',
+                autoSend: false,
+              },
+            };
+            const extractedEmail = extractEmailAddress(original);
+            if (extractedEmail) intent.to = extractedEmail;
+            console.log('[intent-router][whatsapp-style-preview-smart] matched', { toName: nameRaw, subject: subjectHint, bodyPreview: bodyHint.slice(0, 50) });
+            return intent;
+          }
+        }
+      }
+    }
+  }
+
+  // ============================================================
+  // WHATSAPP-STYLE: "Thomas: Bin im Termin. Schick's raus." / "Thomas <body> jetzt senden."
+  // Triggert nur bei ":" nach Name ODER Send-Phrase am Ende. Sonst AI-Fallback (Safety).
+  // ============================================================
+  {
+    const whatsappMatch = detectWhatsAppStylePattern(original, text);
+    if (whatsappMatch) {
+      const { toRaw: toNameRaw, bodyHint, bodyHintRaw, subjectHint, autoSend } = whatsappMatch;
+      const intent: VoiceIntent = {
+        type: 'email-compose',
+        toRaw: toNameRaw,
+        subjectHint: subjectHint ?? 'Kurze Info',
+        bodyHint,
+        bodyHintRaw,
+        meta: {
+          source: 'whatsapp-style',
+          autoSend,
+        },
+      };
+      const extractedEmail = extractEmailAddress(original);
+      if (extractedEmail) intent.to = extractedEmail;
+      console.log('[intent-router][whatsapp-style] matched', { toName: toNameRaw, bodyPreview: bodyHint.slice(0, 50), autoSend, subject: subjectHint });
       return intent;
     }
   }

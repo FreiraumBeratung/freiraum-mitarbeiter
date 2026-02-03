@@ -113,4 +113,21 @@ describe('An-Name-Send-Out Pattern', () => {
       expect(intent.type).not.toBe('email-compose');
     });
   });
+
+  describe('Folgende Nachricht mit Betreff (A3.4)', () => {
+    it('"Sende folgende Nachricht an Thomas Betreff Pizza Hi Thomas, kannst du morgen Pizza mitbringen?" -> subjectHint=Pizza, body ohne Betreff', () => {
+      const input = 'Sende folgende Nachricht an Thomas Betreff Pizza Hi Thomas, kannst du morgen Pizza mitbringen?';
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.meta?.autoSend).toBe(true);
+        expect(intent.subjectHint).toBe('Pizza');
+        expect(intent.bodyHint).toBeDefined();
+        const b = (intent.bodyHint ?? '').toLowerCase();
+        expect(b).toContain('hi thomas');
+        expect(b).toMatch(/kannst du morgen.*pizza mitbringen/);
+        expect(b).not.toContain('betreff pizza');
+      }
+    });
+  });
 });

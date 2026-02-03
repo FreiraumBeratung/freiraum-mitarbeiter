@@ -251,6 +251,20 @@ describe('Draft-Entwurf Pattern: "entwurf an <name> ..."', () => {
     });
   });
 
+  describe('Body-Start: Empfänger endet vor "bin", "ich", "wir"', () => {
+    it('"Entwurf an Thomas bin im Termin." -> toRaw=Thomas, bodyHint enthält "bin im Termin"', () => {
+      const input = 'Entwurf an Thomas bin im Termin.';
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint).toBeDefined();
+        expect((intent.bodyHint ?? '').toLowerCase()).toMatch(/bin\s+im\s+termin/);
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+  });
+
   describe('Duplicate name + Betreff (Draft/Entwurf Parsing)', () => {
     it('TEST1: "Entwurf an Thomas Thomas Hier ist Dennis. Ich hoffe dir gehts gut." -> toRaw=thomas, bodyHint beginnt mit "thomas hier ist dennis"', () => {
       const input = "Entwurf an Thomas Thomas Hier ist Dennis. Ich hoffe dir gehts gut.";
