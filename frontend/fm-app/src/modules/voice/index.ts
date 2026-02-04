@@ -12,7 +12,7 @@ import { cleanEmailBodyFromAi } from "../../utils/email_text_utils";
 import { parseWizard4Intent } from "../../logic/wizard4/intent";
 import { generateWizard4Subject } from "../../logic/wizard4/subject";
 import { generateWizard4Body } from "../../logic/wizard4/body";
-import { buildWizard4EmailFromInput, ensureTerminalPunctuation, stripEndOfSentenceSendCommands, stripSendControlPhrasesFinal } from "../../logic/wizard4/email";
+import { buildWizard4EmailFromInput, ensureTerminalPunctuation, repairBodyAfterSendAdverbStrip, stripEndOfSentenceSendCommands, stripSendControlPhrasesFinal } from "../../logic/wizard4/email";
 import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 import { polishEmailBody } from "../../logic/wizard4/email_polish";
 import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
@@ -2374,7 +2374,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         }
         
         // Post-Polish: Führende Send-Adverbien entfernen (AI-Polish fügt sie ggf. wieder ein)
-        if ((intent as any)?.meta?.autoSend === true && finalBodyForUi?.trim()) {
+        const isSendNow = wizard4Draft?.sendMode === 'sendNow';
+        if (isSendNow && finalBodyForUi?.trim()) {
           const re = /^(sofort|jetzt|direkt)\b\s*[,:;.]?\s*/i;
           if (re.test(finalBodyForUi.trim())) {
             const before = finalBodyForUi;
@@ -2382,6 +2383,15 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             if (finalBodyForUi) finalBodyForUi = ensureTerminalPunctuation(finalBodyForUi);
             console.log('[wizard4][send-control-strip][send-adverb-leading][post-polish] before:', before.slice(0, 80));
             console.log('[wizard4][send-control-strip][send-adverb-leading][post-polish] after:', finalBodyForUi.slice(0, 80));
+
+            if (finalBodyForUi?.trim()) {
+              const beforeRepair = finalBodyForUi;
+              const repaired = repairBodyAfterSendAdverbStrip(finalBodyForUi);
+              if (repaired !== beforeRepair) {
+                finalBodyForUi = repaired;
+                console.log('[wizard4][send-control-strip][send-adverb-leading][repair] applied', { before: beforeRepair.slice(0, 80), after: finalBodyForUi.slice(0, 80) });
+              }
+            }
           }
         }
         

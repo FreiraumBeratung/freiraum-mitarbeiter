@@ -126,4 +126,33 @@ describe('An-Senden Pattern (passive Wortstellung)', () => {
       }
     });
   });
+
+  describe('Send-adverb strip (jetzt/sofort/direkt not in body when AutoSend)', () => {
+    it('"An Thomas senden jetzt, ich rufe später zurück." => body must NOT start with "jetzt", contains "ich rufe"', () => {
+      const input = "An Thomas senden jetzt, ich rufe später zurück.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      const c = intent.type === 'email-compose' ? intent : null;
+      expect(c).toBeTruthy();
+      if (!c) return;
+      expect(c.meta?.autoSend).toBe(true);
+      expect(c.meta?.source).toBe('an-senden');
+      const body = (c.bodyHint ?? '').toLowerCase();
+      expect(body).not.toMatch(/^jetzt\b/);
+      expect(body).toContain('ich rufe');
+      expect(body).toContain('spater');
+      expect(c.subjectHint ?? 'Kurze Info').toBeDefined();
+    });
+
+    it('"Sende das an Thomas, jetzt, ich rufe später zurück." => body must NOT start with "jetzt" (sende-das-an)', () => {
+      const input = "Sende das an Thomas, jetzt, ich rufe später zurück.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      const c = intent.type === 'email-compose' ? intent : null;
+      if (!c) return;
+      const body = (c.bodyHint ?? '').toLowerCase();
+      expect(body).not.toMatch(/^jetzt\b/);
+      expect(body).toContain('ich rufe');
+    });
+  });
 });

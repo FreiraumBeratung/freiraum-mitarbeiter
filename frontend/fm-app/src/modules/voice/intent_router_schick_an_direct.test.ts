@@ -81,6 +81,32 @@ describe('Schick-An-Direct Pattern: "schick das direkt an <name> <body>"', () =>
     });
   });
 
+  describe('Stop-Token: jetzt/bitte nie Teil des Empfängernamens', () => {
+    it('"Sende an Thomas jetzt bin im Termin." → toRaw nur "Thomas", Body enthält "bin im termin"', () => {
+      const input = "Sende an Thomas jetzt bin im Termin.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint).toBeDefined();
+        if (intent.bodyHint) {
+          expect(intent.bodyHint.toLowerCase()).toContain('bin im termin');
+        }
+        expect(intent.meta?.autoSend).toBe(true);
+      }
+    });
+
+    it('"Sende an Thomas bitte ruf mich zurück." → toRaw nur "Thomas"', () => {
+      const input = "Sende an Thomas bitte ruf mich zurück.";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint?.toLowerCase()).toContain('ruf');
+      }
+    });
+  });
+
   describe('Negation handling', () => {
     it('should block AutoSend for "Schick das direkt an Thomas bin im Termin aber nicht senden."', () => {
       const input = "Schick das direkt an Thomas bin im Termin aber nicht senden.";

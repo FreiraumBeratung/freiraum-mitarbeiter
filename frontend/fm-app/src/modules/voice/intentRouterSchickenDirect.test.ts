@@ -71,4 +71,17 @@ describe('Intent Router: "Schicken-Direct" Pattern', () => {
     // Just check it's not ai-chat
     expect(result.type).not.toBe('ai-chat');
   });
+
+  it('"Jetzt senden an Thomas, Ich bin unterwegs." → toRaw aus "an"-Segment (Thomas), nicht erstes Token (jetzt)', () => {
+    const input = 'Jetzt senden an Thomas, Ich bin unterwegs.';
+    const result = routeVoiceIntent(input);
+
+    expect(result.type).toBe('email-compose');
+    if (result.type === 'email-compose') {
+      expect(result.toRaw?.trim()).toBe('Thomas');
+      expect(result.meta?.autoSend).toBe(true);
+      expect(result.bodyHint).toBeDefined();
+      expect(result.bodyHint?.toLowerCase()).toContain('ich bin unterwegs');
+    }
+  });
 });

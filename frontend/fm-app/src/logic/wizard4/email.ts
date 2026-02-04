@@ -303,6 +303,31 @@ export function ensureTerminalPunctuation(text: string): string {
 }
 
 /**
+ * Repariert Body nach Entfernen führender Send-Adverbien (jetzt/sofort/direkt):
+ * "rufe ich später zurück." -> "Ich rufe später zurück." (sauberer Satzanfang).
+ * Nur anwenden wenn der Text nicht bereits mit Pronomen oder Großbuchstaben startet.
+ */
+export function repairBodyAfterSendAdverbStrip(text: string): string {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed) return trimmed;
+  const startsWithPronoun = /^(ich|wir|du|sie|er|es)\s+/i.test(trimmed);
+  const startsWithUpper = /^[A-ZÄÖÜ]/.test(trimmed);
+  if (startsWithUpper) return trimmed;
+  let repaired: string;
+  if (/^ich\s+/i.test(trimmed)) {
+    repaired = 'Ich ' + trimmed.slice(3).trimStart();
+  } else if (!startsWithPronoun) {
+    repaired = 'Ich ' + trimmed;
+    repaired = repaired.replace(/\s+ich\s+/i, ' ');
+    if (repaired.toLowerCase().startsWith('ich ich ')) repaired = 'Ich ' + repaired.slice(8).trimStart();
+  } else {
+    repaired = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  }
+  repaired = repaired.trim();
+  return repaired ? ensureTerminalPunctuation(repaired) : trimmed;
+}
+
+/**
  * Send-Command-Endphrasen (Deutsch): nur am ENDE des Textes entfernen, nie in der Mitte.
  * Reihenfolge: längere zuerst, damit "schick es raus" vor "schick raus" greift.
  */

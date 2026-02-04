@@ -83,6 +83,24 @@ const TO_STOPWORDS = new Set<string>([
   "die", "das", "der", "den", "dem",
 ]);
 
+/** Stop-Tokens: wenn "an <X>" vorkommt, darf X nicht eins davon sein (forced-toName Priorität). */
+const SEND_TO_STOP_TOKENS_FORCED = new Set([
+  'jetzt', 'sofort', 'bitte', 'mal', 'eben', 'kurz', 'direkt', 'gleich', 'heute',
+]);
+
+/**
+ * Extrahiert genau ein Token nach "an " (für höchste Priorität: "an <Name>" = Empfänger).
+ * Wird nur für forcedToName verwendet; bestehende extractToNameAfterAn-Logik bleibt unverändert.
+ */
+function extractForcedToNameAfterAn(raw: string): string | null {
+  const m = raw.match(/\ban\s+([^\s,]+)/i);
+  if (!m) return null;
+  let name = m[1].trim().replace(/[.,!?]+$/, '');
+  if (!name) return null;
+  if (SEND_TO_STOP_TOKENS_FORCED.has(name.toLowerCase())) return null;
+  return name;
+}
+
 function normalize(text: string) {
   let normalized = (text || "")
     .toLowerCase()
@@ -109,6 +127,32 @@ function normalize(text: string) {
 }
 
 const matchAny = (text: string, candidates: string[]) => candidates.some((c) => text.includes(c));
+
+/**
+ * Entfernt führende Send-Steuer-Adverbien (jetzt, sofort, direkt) am Body-Anfang, NUR wenn sie als
+ * Steuermarker erkennbar sind (gefolgt von , : ; .). So bleibt "Jetzt rufe ich zurück" unberührt.
+ * Nur bei AutoSend-Pfad anwenden (previewOnly nicht).
+ */
+function stripLeadingSendAdverbAfterRecipient(bodyRaw: string, bodyNorm: string): { bodyRaw: string; bodyNorm: string; stripped: boolean } {
+  const raw = (bodyRaw ?? '').trim();
+  const norm = (bodyNorm ?? '').trim();
+  if (!raw && !norm) return { bodyRaw: raw, bodyNorm: norm, stripped: false };
+  const re = /^\s*(jetzt|sofort|direkt)\s*[,:;.]\s*/i;
+  const matchRaw = raw.match(re);
+  const matchNorm = norm.match(re);
+  if (!matchRaw && !matchNorm) return { bodyRaw: raw, bodyNorm: norm, stripped: false };
+  const lenRaw = matchRaw ? matchRaw[0].length : 0;
+  const lenNorm = matchNorm ? matchNorm[0].length : 0;
+  let newRaw = lenRaw > 0 ? raw.slice(lenRaw).trim() : raw;
+  let newNorm = lenNorm > 0 ? norm.slice(lenNorm).trim() : norm;
+  if (lenRaw > 0) newNorm = normalize(newRaw);
+  else if (lenNorm > 0 && !newRaw) newRaw = raw;
+  if (!newRaw && !newNorm) return { bodyRaw: raw, bodyNorm: norm, stripped: false };
+  if (!newRaw) newRaw = raw;
+  if (!newNorm) newNorm = norm;
+  console.log('[intent-router][send-adverb-strip] removed leading adverb', { before: (raw || norm).slice(0, 60), after: (newRaw || newNorm).slice(0, 60) });
+  return { bodyRaw: newRaw, bodyNorm: newNorm, stripped: true };
+}
 
 /**
  * Extrahiert eine E-Mail-Adresse aus einem Text per Regex.
@@ -3712,23 +3756,16 @@ function detectSendeDasAnPattern(original: string, normalized: string): {
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match && match[2] && match[4]) {
-      // match[1] = verb, match[2] = firstName, match[3] = secondName (optional), match[4] = body
-      const firstNameToken = match[2].trim();
-      const secondNameToken = match[3]?.trim();
-      let toNameRaw: string;
-      
-      // Prüfe, ob zweites Token ein Body-Start-Wort ist (dann ist es Teil des Body, nicht des Namens)
-      const bodyStartWords = ['bin', 'ist', 'sind', 'habe', 'hat', 'haben', 'komme', 'kommt', 'kommst', 'ruf', 'rufe', 'ruft', 'ich', 'wir', 'er', 'sie', 'es', 'im', 'in', 'am', 'an', 'auf', 'zu', 'für', 'mit', 'von', 'mich', 'dich', 'sich', 'meld', 'melde', 'meldet'];
-      const isSecondTokenBodyStart = secondNameToken && bodyStartWords.includes(secondNameToken.toLowerCase());
-      
-      if (isSecondTokenBodyStart || !secondNameToken) {
-        // Zweites Token ist Body-Start oder nicht vorhanden -> Name ist nur erstes Token
-        toNameRaw = firstNameToken;
-      } else {
-        // Zweites Token ist Teil des Namens (z.B. "Thomas Müller")
-        toNameRaw = firstNameToken + ' ' + secondNameToken;
+      // Teil nach "an " (nur Name-Tokens, Body ist match[4]): Stop-Tokens nie als Teil des Namens
+      const namePartRaw = [match[2], match[3]].filter(Boolean).join(' ').trim();
+      const split = splitToNameAndRest(namePartRaw);
+      const toNameRaw = split.toNameRaw;
+      let bodyRaw = (split.restRaw ? split.restRaw + ' ' : '') + match[4].trim();
+      const restFirstToken = split.restRaw.split(/\s+/).filter(Boolean)[0]?.toLowerCase();
+      if (restFirstToken && SEND_TO_STOP_TOKENS.has(restFirstToken)) {
+        console.log('[intent-router][to-parse][stop-token] applied', { afterAnRaw: namePartRaw, toRaw: toNameRaw, restRaw: split.restRaw });
       }
-      
+
       const toNameLower = toNameRaw.toLowerCase();
 
       // Blockiere Pronomen
@@ -3740,12 +3777,6 @@ function detectSendeDasAnPattern(original: string, normalized: string): {
       const nameTokens = toNameRaw.split(/\s+/);
       if (nameTokens.length > 2) {
         continue;
-      }
-
-      // FIX: Wenn Body mit dem zweiten Token beginnt, muss es zum Body hinzugefügt werden
-      let bodyRaw = match[4].trim();
-      if (isSecondTokenBodyStart && secondNameToken) {
-        bodyRaw = secondNameToken + ' ' + bodyRaw;
       }
       
       // Wenn body leer ist, kein Match
@@ -3842,23 +3873,16 @@ function detectAnSendenPattern(original: string, normalized: string): {
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match && match[1] && match[3]) {
-      // match[1] = firstName, match[2] = secondName (optional), match[3] = body
-      const firstNameToken = match[1].trim();
-      const secondNameToken = match[2]?.trim();
-      let toNameRaw: string;
-      
-      // Prüfe, ob zweites Token ein Body-Start-Wort ist (dann ist es Teil des Body, nicht des Namens)
-      const bodyStartWords = ['bin', 'ist', 'sind', 'habe', 'hat', 'haben', 'komme', 'kommt', 'kommst', 'ruf', 'rufe', 'ruft', 'ich', 'wir', 'er', 'sie', 'es', 'im', 'in', 'am', 'an', 'auf', 'zu', 'für', 'mit', 'von', 'mich', 'dich', 'sich', 'meld', 'melde', 'meldet', 'senden', 'schicken'];
-      const isSecondTokenBodyStart = secondNameToken && bodyStartWords.includes(secondNameToken.toLowerCase());
-      
-      if (isSecondTokenBodyStart || !secondNameToken) {
-        // Zweites Token ist Body-Start oder nicht vorhanden -> Name ist nur erstes Token
-        toNameRaw = firstNameToken;
-      } else {
-        // Zweites Token ist Teil des Namens (z.B. "Thomas Müller")
-        toNameRaw = firstNameToken + ' ' + secondNameToken;
+      // Teil nach "an " (Name vor "senden"): Stop-Tokens nie als Teil des Namens
+      const namePartRaw = [match[1], match[2]].filter(Boolean).join(' ').trim();
+      const split = splitToNameAndRest(namePartRaw);
+      const toNameRaw = split.toNameRaw;
+      let bodyRaw = (split.restRaw ? split.restRaw + ' ' : '') + match[3].trim();
+      const restFirstToken = split.restRaw.split(/\s+/).filter(Boolean)[0]?.toLowerCase();
+      if (restFirstToken && SEND_TO_STOP_TOKENS.has(restFirstToken)) {
+        console.log('[intent-router][to-parse][stop-token] applied', { afterAnRaw: namePartRaw, toRaw: toNameRaw, restRaw: split.restRaw });
       }
-      
+
       const toNameLower = toNameRaw.toLowerCase();
 
       // Blockiere Pronomen
@@ -3871,8 +3895,6 @@ function detectAnSendenPattern(original: string, normalized: string): {
       if (nameTokens.length > 2) {
         continue;
       }
-
-      let bodyRaw = match[3].trim();
       
       // Wenn body leer ist, kein Match
       if (!bodyRaw || bodyRaw.length === 0) {
@@ -4118,47 +4140,47 @@ function detectSchickAnDirectPattern(original: string, normalized: string): {
     const match = text.match(pattern);
     // Groups: match[1] = verb, match[2] = first name token, match[3] = optional second name token, match[4] = body
     if (match && match[2] && match[4]) {
-      // Baue Name aus Tokens zusammen
       const firstNameToken = match[2].trim();
       const secondNameToken = match[3]?.trim();
-      
-      // Prüfe, ob zweites Token ein Verb/Präposition ist (dann ist es Teil des Body, nicht des Namens)
       const bodyStartWords = ['bin', 'ist', 'sind', 'habe', 'hat', 'haben', 'komme', 'kommt', 'kommst', 'ruf', 'rufe', 'ruft', 'ich', 'wir', 'er', 'sie', 'es', 'im', 'in', 'am', 'an', 'auf', 'zu', 'für', 'mit', 'von'];
-      const isSecondTokenBodyStart = secondNameToken && bodyStartWords.includes(secondNameToken.toLowerCase());
-      
+      const afterAnRaw = [match[2], match[3], match[4]].filter(Boolean).join(' ').trim();
+      const split = splitToNameAndRest(afterAnRaw);
+      const restStartsWithStopToken = split.restRaw && SEND_TO_STOP_TOKENS.has(split.restRaw.split(/\s+/).filter(Boolean)[0]?.toLowerCase());
+
       let toNameRaw: string;
       let bodyHintRaw: string;
-      
-      if (isSecondTokenBodyStart || !secondNameToken) {
-        // Zweites Token ist Body-Start oder nicht vorhanden -> Name ist nur erstes Token
-        toNameRaw = firstNameToken;
-        bodyHintRaw = (secondNameToken ? secondNameToken + ' ' : '') + match[4].trim();
+      if (restStartsWithStopToken) {
+        toNameRaw = split.toNameRaw;
+        bodyHintRaw = split.restRaw;
+        console.log('[intent-router][to-parse][stop-token] applied', { afterAnRaw, toRaw: toNameRaw, restRaw: bodyHintRaw });
       } else {
-        // Zweites Token ist Teil des Namens (z.B. "Thomas Müller")
-        toNameRaw = firstNameToken + ' ' + secondNameToken;
-        bodyHintRaw = match[4].trim();
+        const isSecondTokenBodyStart = secondNameToken && bodyStartWords.includes(secondNameToken.toLowerCase());
+        if (isSecondTokenBodyStart || !secondNameToken) {
+          toNameRaw = firstNameToken;
+          bodyHintRaw = (secondNameToken ? secondNameToken + ' ' : '') + match[4].trim();
+        } else {
+          toNameRaw = firstNameToken + ' ' + secondNameToken;
+          bodyHintRaw = match[4].trim();
+        }
       }
-      
+
       // FIX: Normalisiere wiederholte Empfängernamen (z.B. "Thomas Thomas" -> "Thomas")
-      // Importiere die Funktion dynamisch, um Zirkelabhängigkeiten zu vermeiden
-      // (Die Funktion wird später in index.ts definiert und exportiert)
       if (typeof toNameRaw === 'string' && toNameRaw.trim()) {
+        const nameBeforeDedup = toNameRaw;
         const tokens = toNameRaw.trim().split(/\s+/);
         if (tokens.length > 1) {
-          // Entferne direkt aufeinanderfolgende Duplikate (case-insensitive)
           const deduplicated: string[] = [];
           for (let i = 0; i < tokens.length; i++) {
             const current = tokens[i].toLowerCase();
             const previous = deduplicated.length > 0 ? deduplicated[deduplicated.length - 1].toLowerCase() : null;
             if (current !== previous) {
-              deduplicated.push(tokens[i]); // Original-Case beibehalten
+              deduplicated.push(tokens[i]);
             }
           }
           if (deduplicated.length < tokens.length) {
-            // Duplikate wurden entfernt
             toNameRaw = deduplicated.join(' ').trim();
             console.debug('[intent-router][schick-an-direct] normalized duplicate recipient name:', {
-              original: firstNameToken + (secondNameToken ? ' ' + secondNameToken : ''),
+              original: nameBeforeDedup,
               normalized: toNameRaw
             });
           }
@@ -4190,10 +4212,10 @@ function detectSchickAnDirectPattern(original: string, normalized: string): {
         continue;
       }
 
-      // Prüfe, ob AutoSend-Trigger im Command-Teil vorhanden ist
+      // Prüfe, ob AutoSend-Trigger im Command-Teil vorhanden ist (inkl. imperativ "sende/send")
       const commandPart = match[0].substring(0, match[0].length - bodyHintRaw.length).toLowerCase();
       const hasAutoSendTrigger = /\b(sofort|direkt|jetzt)\b/.test(commandPart) || 
-                                  /\b(schick|schicke)\b/.test(commandPart.toLowerCase());
+                                  /\b(schick|schicke|sende|send)\b/.test(commandPart);
 
       return {
         toRaw: toNameRaw.toLowerCase(), // Normalisiert für toRaw
@@ -4241,6 +4263,62 @@ function stripLeadingAnName(body: string, toNameRaw?: string | null): string {
   cleaned = cleaned.replace(pattern2, '').trim();
 
   return cleaned;
+}
+
+/** Stop-Tokens: dürfen nie Teil des Empfängernamens sein bei "sende/schick ... an <name> ..." */
+const SEND_TO_STOP_TOKENS = new Set([
+  'jetzt', 'sofort', 'bitte', 'mal', 'eben', 'kurz', 'direkt', 'gleich', 'heute',
+]);
+
+/**
+ * Teilt den Teil nach "an" in reinen Empfängernamen und Rest (Body-Start).
+ * Verhindert, dass Steuerwörter (jetzt, sofort, bitte, ...) in toRaw landen.
+ */
+function splitToNameAndRest(afterAnRaw: string): { toNameRaw: string; restRaw: string } {
+  const tokens = afterAnRaw.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return { toNameRaw: '', restRaw: '' };
+
+  const stopIdx = tokens.findIndex((t) => SEND_TO_STOP_TOKENS.has(t.toLowerCase()));
+  if (stopIdx <= 0) {
+    // stopIdx = 0 => nach "an" kommt direkt Stop-Token -> bisheriges Verhalten
+    return { toNameRaw: tokens[0] ?? '', restRaw: tokens.slice(1).join(' ') };
+  }
+  if (stopIdx > 0) {
+    return {
+      toNameRaw: tokens.slice(0, stopIdx).join(' '),
+      restRaw: tokens.slice(stopIdx).join(' '),
+    };
+  }
+  // kein Stop-Token (stopIdx === -1)
+  return { toNameRaw: tokens[0] ?? '', restRaw: tokens.slice(1).join(' ') };
+}
+
+/** Tokens, bei denen der Name nach "an" endet (für extractToNameAfterAn). */
+const AN_NAME_STOP_OR_BODY_START = new Set([
+  ...SEND_TO_STOP_TOKENS,
+  'ich', 'wir', 'hi', 'hallo', 'kannst', 'könnt', 'ruf', 'rufe', 'bitte', 'bin', 'binnen', 'unterwegs',
+]);
+
+/**
+ * Extrahiert den Empfängernamen aus "an <name>" im Text (für schicken-direct etc.).
+ * Stoppt bei Stop-Tokens und Body-Start-Tokens, max. 2 Tokens für den Namen.
+ * @returns Name oder null wenn kein "an <name>" gefunden
+ */
+function extractToNameAfterAn(raw: string): string | null {
+  const m = raw.match(/\ban\s+(.+)$/i);
+  if (!m) return null;
+  const after = m[1].trim();
+  if (!after) return null;
+  const tokens = after.split(/\s+/).filter(Boolean);
+
+  const stopIdx = tokens.findIndex((t) => {
+    const tl = t.toLowerCase().replace(/[.,!?]/g, '');
+    return AN_NAME_STOP_OR_BODY_START.has(tl);
+  });
+
+  const take = stopIdx > 0 ? tokens.slice(0, stopIdx) : tokens.slice(0, 1);
+  const name = take.slice(0, 2).join(' ').replace(/[.,!?]+$/, '').trim();
+  return name.length ? name : null;
 }
 
 /**
@@ -4701,8 +4779,13 @@ function parseFreeDictationA34(normalized: string, raw?: string): VoiceIntent | 
     return null;
   }
 
-  const toNameRaw = match.toNameRaw;
-  let bodyText = match.bodyText;
+  // Stop-Tokens nie als Teil des Empfängernamens (z.B. "thomas jetzt" → toRaw "thomas", Rest in Body)
+  const split = splitToNameAndRest(match.toNameRaw);
+  const toNameRaw = split.toNameRaw;
+  let bodyText = split.restRaw ? split.restRaw + ' ' + match.bodyText : match.bodyText;
+  if (split.restRaw && SEND_TO_STOP_TOKENS.has(split.restRaw.split(/\s+/).filter(Boolean)[0]?.toLowerCase())) {
+    console.log('[intent-router][to-parse][stop-token] applied', { afterAnRaw: match.toNameRaw, toRaw: toNameRaw, restRaw: split.restRaw });
+  }
 
   // Minimale Sicherheitschecks
   if (!toNameRaw || bodyText.length < 5) {
@@ -4901,6 +4984,17 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   const original = originalFixed;
   let text = normalize(originalFixed);
 
+  /** Höchste Priorität: wenn "an <Name>" im Text, dieser Name immer als Empfänger. */
+  const forcedToName = extractForcedToNameAfterAn(original);
+
+  const applyForcedToName = <T extends VoiceIntent>(i: T): T => {
+    if (i.type !== 'email-compose' || forcedToName == null) return i;
+    const updated = { ...i, toRaw: forcedToName };
+    if (updated.meta?.statusEmail) updated.meta = { ...updated.meta, statusEmail: { ...updated.meta.statusEmail, toNameRaw: forcedToName } };
+    if (updated.meta?.freeDictationMeta) updated.meta = { ...updated.meta, freeDictationMeta: { ...updated.meta.freeDictationMeta, toNameRaw: forcedToName } };
+    return updated as T;
+  };
+
   // "sende <name> ..." (ohne "an") wie "schick <name> ..." routen, damit schick-name-direct matcht
   const SENDE_NAME_ALIAS_STOPWORDS = ['mir', 'uns', 'euch', 'dir', 'bitte', 'mal', 'doch', 'jetzt', 'gleich', 'heute', 'morgen'];
   if (/^sende\s+/i.test(text) && !/^sende\s+an\s+/i.test(text)) {
@@ -4951,7 +5045,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       autoSend: lassWissenIntent.meta?.autoSend,
     });
     // Finaler Cancel-Phrase Override
-    return applyCancelPhraseOverride(lassWissenIntent, original, text);
+    return applyCancelPhraseOverride(applyForcedToName(lassWissenIntent), original, text);
   }
 
   // --------------------------------------------------
@@ -4991,7 +5085,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       });
 
       // Finaler Cancel-Phrase Override
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -5042,7 +5136,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       });
 
       // Finaler Cancel-Phrase Override
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -5089,7 +5183,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           console.log("[intent-router][send-now-adverb] E-Mail-Adresse extrahiert:", extractedEmail);
         }
         console.log("[intent-router][send-now-adverb] toName:", toName, "body:", (bodyHint || '').slice(0, 80));
-        return applyCancelPhraseOverride(intent, original, text);
+        return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
       }
     }
   }
@@ -5150,7 +5244,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
 
     // Finaler Cancel-Phrase Override
-    return applyCancelPhraseOverride(fdIntent, original, text);
+    return applyCancelPhraseOverride(applyForcedToName(fdIntent), original, text);
   }
 
   // Fallback: Bisherige parseFreeDictation aus free_dictation.ts
@@ -5179,7 +5273,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
 
     // Finaler Cancel-Phrase Override
-    return applyCancelPhraseOverride(emailIntent, original, text);
+    return applyCancelPhraseOverride(applyForcedToName(emailIntent), original, text);
   }
 
   // ============================================================
@@ -5267,7 +5361,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
     
     // Finaler Cancel-Phrase Override
-    return applyCancelPhraseOverride(intent, original, text);
+    return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
   }
 
   // Spezial-Route: ALLE Sätze mit "schreib ..."
@@ -5341,7 +5435,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
 
     // Finaler Cancel-Phrase Override
-    return applyCancelPhraseOverride(intent, original, text);
+    return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
   }
 
   // 1) Wizard3-OneShot: E-Mail mit Inhalt erkennen (VOR email-compose)
@@ -5375,7 +5469,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
     
     // Finaler Cancel-Phrase Override
-    return applyCancelPhraseOverride(intent, original, text);
+    return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
   }
 
   // navigation
@@ -5685,7 +5779,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           }
           
           // Finaler Cancel-Phrase Override
-          return applyCancelPhraseOverride(intent, original, text);
+          return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
         }
       }
     }
@@ -6157,7 +6251,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         console.log('[intent-router][lass-uns] intent bodyHint field:', intent.bodyHint);
         
         // Finaler Cancel-Phrase Override
-        return applyCancelPhraseOverride(intent, original, text);
+        return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
       }
     }
   }
@@ -6234,7 +6328,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         });
 
         // Finaler Cancel-Phrase Override
-        return applyCancelPhraseOverride(intent, original, text);
+        return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
       }
     }
     
@@ -6322,7 +6416,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         useCasualMail
       });
       
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -6340,9 +6434,16 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     // Pattern: (optional "bitte") <name> (schicken|senden) <rest>
     const schickenDirectMatch = text.match(/^(?:bitte\s+)?([a-z0-9äöüß]+)\s+(schicken|senden)\b/i);
     if (schickenDirectMatch && schickenDirectMatch[1] && schickenDirectMatch[2]) {
-      const toNameRaw = schickenDirectMatch[1].trim();
+      let toNameRaw = schickenDirectMatch[1].trim();
       const verbMatch = schickenDirectMatch[2];
-      
+
+      // Wenn "an <name>" im Text vorkommt, toNameRaw daraus (nicht erstes Token wie "jetzt")
+      const fromAn = extractToNameAfterAn(original);
+      if (fromAn) {
+        toNameRaw = fromAn;
+        console.log('[intent-router][intent-4.2][schicken-direct][to-after-an] applied', { toNameRaw, original });
+      }
+
       // Extract rest text (body) from original text
       // Find the pattern in original (case-insensitive) for better case preservation
       const originalPattern = new RegExp(`^(?:bitte\\s+)?${toNameRaw}\\s+(?:${verbMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b`, 'i');
@@ -6439,7 +6540,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       }
       
       // Finaler Cancel-Phrase Override
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -6481,6 +6582,14 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // AutoSend: true wenn keine Negation UND kein False-Positive; bei Betreff immer blocken
       const autoSend = !subjectParsed.subjectDetected && !hasNegation && !autoSendExcludedByFalsePositive;
 
+      if (autoSend) {
+        const stripped = stripLeadingSendAdverbAfterRecipient(bodyHintRaw, bodyHint);
+        if (stripped.stripped) {
+          bodyHint = stripped.bodyNorm;
+          bodyHintRaw = stripped.bodyRaw;
+        }
+      }
+
       const intent: VoiceIntent = {
         type: "email-compose",
         toRaw: toRaw,
@@ -6510,7 +6619,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       });
 
       // Finaler Cancel-Phrase Override
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -6543,12 +6652,22 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // AutoSend: true wenn Trigger vorhanden UND keine Negation UND kein False-Positive
       const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
 
+      let finalBodyHint = bodyHint;
+      let finalBodyHintRaw = bodyHintRaw;
+      if (autoSend) {
+        const stripped = stripLeadingSendAdverbAfterRecipient(bodyHintRaw, bodyHint);
+        if (stripped.stripped) {
+          finalBodyHint = stripped.bodyNorm;
+          finalBodyHintRaw = stripped.bodyRaw;
+        }
+      }
+
       const intent: VoiceIntent = {
         type: "email-compose",
         toRaw: toRaw,
         subjectHint: undefined,
-        bodyHint: bodyHint,
-        bodyHintRaw: bodyHintRaw,
+        bodyHint: finalBodyHint,
+        bodyHintRaw: finalBodyHintRaw,
         meta: {
           source: 'sende-das-an',
           autoSend: autoSend,
@@ -6564,7 +6683,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
       console.log('[intent-router][sende-das-an] matched', {
         toRaw,
-        bodyPreview: bodyHint.slice(0, 60),
+        bodyPreview: (finalBodyHint ?? bodyHint).slice(0, 60),
         autoSend: autoSend,
         hasAutoSendTrigger: hasAutoSendTrigger,
         hasNegation: hasNegation,
@@ -6627,6 +6746,14 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         console.log('[intent-router][schick-name-direct][multi-recipient-detected] forced previewOnly');
       }
 
+      if (autoSend) {
+        const stripped = stripLeadingSendAdverbAfterRecipient(bodyHintRaw, bodyHint);
+        if (stripped.stripped) {
+          bodyHint = stripped.bodyNorm;
+          bodyHintRaw = stripped.bodyRaw;
+        }
+      }
+
       const intent: VoiceIntent = {
         type: "email-compose",
         toRaw: toRaw,
@@ -6657,7 +6784,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       });
 
       // Finaler Cancel-Phrase Override
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -7047,7 +7174,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       });
 
       // Finaler Cancel-Phrase Override
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -7144,12 +7271,22 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // AutoSend: true wenn Trigger vorhanden UND keine Negation UND kein False-Positive
       const autoSend = hasAutoSendTrigger && !hasNegation && !autoSendExcludedByFalsePositive;
 
+      let finalBodyHint = bodyHint;
+      let finalBodyHintRaw = bodyHintRaw;
+      if (autoSend) {
+        const stripped = stripLeadingSendAdverbAfterRecipient(bodyHintRaw, bodyHint);
+        if (stripped.stripped) {
+          finalBodyHint = stripped.bodyNorm;
+          finalBodyHintRaw = stripped.bodyRaw;
+        }
+      }
+
       const intent: VoiceIntent = {
         type: "email-compose",
         toRaw: toRaw,
         subjectHint: undefined,
-        bodyHint: bodyHint,
-        bodyHintRaw: bodyHintRaw,
+        bodyHint: finalBodyHint,
+        bodyHintRaw: finalBodyHintRaw,
         meta: {
           source: 'sende-das-an',
           autoSend: autoSend,
@@ -7165,7 +7302,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
       console.log('[intent-router][sende-das-an] matched', {
         toRaw,
-        bodyPreview: bodyHint.slice(0, 60),
+        bodyPreview: (finalBodyHint ?? bodyHint).slice(0, 60),
         autoSend: autoSend,
         hasAutoSendTrigger: hasAutoSendTrigger,
         hasNegation: hasNegation,
@@ -7234,7 +7371,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       });
 
       // Finaler Cancel-Phrase Override
-      return applyCancelPhraseOverride(intent, original, text);
+      return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
     }
   }
 
@@ -7298,7 +7435,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           intent.to = extractedEmail;
           console.log("[intent-router][an-name-send-out] E-Mail-Adresse extrahiert:", extractedEmail);
         }
-        return applyCancelPhraseOverride(intent, original, text);
+        return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
       }
     }
   }
@@ -7358,7 +7495,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         });
 
         // Finaler Cancel-Phrase Override
-        return applyCancelPhraseOverride(intent, original, text);
+        return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
       }
     }
   }
