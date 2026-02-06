@@ -6,38 +6,35 @@ import { describe, it, expect } from 'vitest';
 import { resolveVoiceEmailSubject } from './subject_resolve';
 
 describe('resolveVoiceEmailSubject', () => {
-  describe('AutoSend + sendNow (should use "Kurze Info" instead of stale draftSubject)', () => {
-    it('should return "Kurze Info" when autoSend=true, sendMode="sendNow", subjectHint missing, draftSubject="Termin morgen"', () => {
+  describe('AutoSend + sendNow (draftSubject wins when set, e.g. from "Betreff X")', () => {
+    it('should return draftSubject when autoSend=true, sendMode="sendNow", subjectHint missing, draftSubject="Rückruf"', () => {
       const result = resolveVoiceEmailSubject({
         subjectHint: undefined,
-        draftSubject: 'Termin morgen',
+        draftSubject: 'Rückruf',
         sendMode: 'sendNow',
         autoSend: true,
       });
-      
-      expect(result).toBe('Kurze Info');
+      expect(result).toBe('Rückruf');
     });
 
-    it('should return "Kurze Info" when autoSend=true, sendMode="sendNow", subjectHint=null, draftSubject="Termin morgen"', () => {
+    it('should return draftSubject when autoSend=true, sendMode="sendNow", subjectHint=null, draftSubject="Termin"', () => {
       const result = resolveVoiceEmailSubject({
         subjectHint: null,
-        draftSubject: 'Termin morgen',
+        draftSubject: 'Termin',
         sendMode: 'sendNow',
         autoSend: true,
       });
-      
-      expect(result).toBe('Kurze Info');
+      expect(result).toBe('Termin');
     });
 
-    it('should return "Kurze Info" when autoSend=true, sendMode="sendNow", subjectHint="", draftSubject="Termin morgen"', () => {
+    it('should return draftSubject when autoSend=true, sendMode="sendNow", subjectHint="", draftSubject="Pizza"', () => {
       const result = resolveVoiceEmailSubject({
         subjectHint: '',
-        draftSubject: 'Termin morgen',
+        draftSubject: 'Pizza',
         sendMode: 'sendNow',
         autoSend: true,
       });
-      
-      expect(result).toBe('Kurze Info');
+      expect(result).toBe('Pizza');
     });
 
     it('should return "Kurze Info" when autoSend=true, sendMode="sendNow", subjectHint missing, draftSubject missing', () => {
@@ -47,7 +44,6 @@ describe('resolveVoiceEmailSubject', () => {
         sendMode: 'sendNow',
         autoSend: true,
       });
-      
       expect(result).toBe('Kurze Info');
     });
   });
@@ -111,6 +107,28 @@ describe('resolveVoiceEmailSubject', () => {
     });
   });
 
+  describe('sendNow + Betreff (draftSubject from stripSubjectCommand)', () => {
+    it('should return "Rückruf" when sendNow + draftSubject="Rückruf" (Betreff Rückruf im Body)', () => {
+      const result = resolveVoiceEmailSubject({
+        subjectHint: undefined,
+        draftSubject: 'Rückruf',
+        sendMode: 'sendNow',
+        autoSend: true,
+      });
+      expect(result).toBe('Rückruf');
+    });
+
+    it('should return "Termin" when sendNow + draftSubject="Termin" (Betreff Termin schick raus)', () => {
+      const result = resolveVoiceEmailSubject({
+        subjectHint: undefined,
+        draftSubject: 'Termin',
+        sendMode: 'sendNow',
+        autoSend: true,
+      });
+      expect(result).toBe('Termin');
+    });
+  });
+
   describe('Edge cases', () => {
     it('should return "Kurze Info" when all parameters are missing', () => {
       const result = resolveVoiceEmailSubject({});
@@ -149,9 +167,8 @@ describe('resolveVoiceEmailSubject', () => {
         sendMode: 'sendNow',
         autoSend: true,
       });
-      
-      // Empty/whitespace-only subjectHint should be treated as missing
-      expect(result).toBe('Kurze Info');
+      // Empty subjectHint => use draftSubject
+      expect(result).toBe('Termin morgen');
     });
 
     it('should handle empty string draftSubject as missing', () => {

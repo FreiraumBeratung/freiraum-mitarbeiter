@@ -16,9 +16,13 @@ export function tryParseDraftPrepare(normalized: string): null | { toName: strin
   }
 
   // Pattern: optional "bitte " + ("an " | "für " | "fur " | "fuer ") + <name> + " vorbereiten " + <rest>
-  // "bitte" kann fehlen, da es in normalized entfernt werden kann
+  // ODER: "nur vorbereiten für <name>" / "vorbereiten für <name>"
   // "für" wird in normalized zu "fur" oder "fuer" (Umlaut-Entfernung)
   const patterns = [
+    // "nur vorbereiten für <name> <rest>" / "nur vorbereiten für <name>. <rest>"
+    /^(?:nur\s+)?vorbereiten\s+(?:für|fur|fuer)\s+([a-zäöüß]+)\s*[.,]?\s*(.+)$/i,
+    // "vorbereiten für <name> <rest>" (ohne "nur")
+    /^vorbereiten\s+(?:für|fur|fuer)\s+([a-zäöüß]+)\s*[.,]?\s*(.+)$/i,
     // "bitte an <name> vorbereiten <rest>"
     /^(?:bitte\s+)?an\s+([a-zäöüß]+)\s+vorbereiten\s+(.+)$/i,
     // "bitte für <name> vorbereiten <rest>" (mit Umlaut)

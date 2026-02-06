@@ -26,4 +26,31 @@ describe("intent_router: nachricht an <name> (optional betreff)", () => {
     expect((intent.toRaw ?? "").toLowerCase()).toContain("thomas");
     expect(intent.bodyHint?.length).toBeGreaterThan(0);
   });
+
+  it("strips 'nur anzeigen' from body: Mail an Thomas nur anzeigen ich melde mich später.", () => {
+    const r = routeVoiceIntent("Mail an Thomas nur anzeigen ich melde mich später.");
+    const intent = r.type === "email-compose" ? r : null;
+    expect(intent).toBeTruthy();
+    if (!intent) return;
+    expect(intent.type).toBe("email-compose");
+    expect((intent.toRaw ?? "").toLowerCase()).toContain("thomas");
+    expect(intent.meta?.autoSend).toBe(false);
+    const body = (intent.bodyHint ?? "").toLowerCase();
+    expect(body).toMatch(/ich melde mich\s+sp[aäe]ter/);
+    expect(body).not.toContain("nur anzeigen");
+  });
+
+  it("strips 'bloß anzeigen' from body: Mail an Thomas bloß anzeigen. Ich bin im Termin.", () => {
+    const r = routeVoiceIntent("Mail an Thomas bloß anzeigen. Ich bin im Termin.");
+    const intent = r.type === "email-compose" ? r : null;
+    expect(intent).toBeTruthy();
+    if (!intent) return;
+    expect(intent.type).toBe("email-compose");
+    expect((intent.toRaw ?? "").toLowerCase()).toContain("thomas");
+    expect(intent.meta?.autoSend).toBe(false);
+    const body = (intent.bodyHint ?? "").toLowerCase();
+    expect(body).toMatch(/ich bin im termin/);
+    expect(body).not.toContain("bloß anzeigen");
+    expect(body).not.toContain("bloss anzeigen");
+  });
 });

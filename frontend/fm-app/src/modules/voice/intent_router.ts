@@ -3077,8 +3077,93 @@ const WHATSAPP_STYLE_COMMAND_FIRST = new Set<string>([
   'entwurf', 'nachricht', 'mail', 'email', 'schick', 'sende', 'schreib', 'schreibe', 'schicken', 'setz', 'setze', 'tippe', 'tipp', 'hau', 'mach', 'mache',
 ]);
 
+/** Namen nach "für"/"an" bei Preview/Prepare: diese Wörter dürfen nie als Empfänger genommen werden. */
+const PREP_NAME_STOP = new Set<string>(['nur', 'vorbereiten', 'vorbereite', 'bitte', 'mal', 'eben', 'kurz', 'vorschlag', 'entwurf']);
+
+/** Body-Start-Tokens: Name nach Präposition endet davor. */
+const PREP_BODY_START = new Set<string>(['ich', 'wir', 'hi', 'hallo', 'kannst', 'könnt', 'ruf', 'rufe', 'bitte', 'bin', 'meld', 'melde']);
+
+/**
+ * Extrahiert Empfängernamen aus "an <Name>" oder "für <Name>" (Preview/Prepare).
+ * Max. 2 Tokens, stoppt bei Body-Start-Token oder Satzzeichen. Nur für Preview-Pfad.
+ */
+function extractToNameAfterPreposition(raw: string, prep: 'an' | 'für'): string | null {
+  const preps = prep === 'für' ? /(\b(für|fur|fuer)\s+)/i : /(\ban\s+)/i;
+  const m = raw.match(preps);
+  if (!m) return null;
+  const after = raw.slice((m.index ?? 0) + m[1].length).trim();
+  const tokens = after.split(/\s+/).filter(Boolean);
+  const take: string[] = [];
+  for (let i = 0; i < Math.min(2, tokens.length); i++) {
+    const t = tokens[i].replace(/[.,!?]+$/, '').trim();
+    const tl = t.toLowerCase();
+    if (PREP_NAME_STOP.has(tl) || PREP_BODY_START.has(tl)) break;
+    if (/^[.,!?]+$/.test(t)) break;
+    take.push(t);
+  }
+  if (take.length === 0) return null;
+  const name = take.join(' ').replace(/[.,!?]+$/, '').trim();
+  return name.length ? name : null;
+}
+
+/**
+ * Entfernt führende Preview-Steuerphrasen am Anfang (nur Prefix, nicht mitten im Text).
+ * Strips: "bitte als entwurf", "als entwurf", "entwurf", "nur vorbereiten", "vorbereiten".
+ */
+/**
+ * Entfernt das Preview-Kommando "nur/bloß anzeigen/zeigen/vorzeigen/darstellen" aus dem Body
+ * (inkl. optionaler Satzzeichen direkt danach). Wird angewendet, wenn previewOnly erzwungen wurde.
+ * @param s - Body-Text (raw oder normalisiert)
+ * @returns Bereinigter Body (trim, Satzanfang groß, Satzzeichen am Ende). Wenn nach Strip < 2 Zeichen, Original.
+ */
+function stripPreviewCommandFromBody(s: string): string {
+  if (!s || typeof s !== 'string') return s || '';
+  const original = s.trim();
+  if (!original) return s;
+  const re = /(?:^|\b)(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b[,:.]?\s*/gi;
+  let out = original.replace(re, '').trim();
+  out = out.replace(/\s+/g, ' ');
+  if (out.length < 2) return original;
+  if (out.length > 0 && !/[.!?]$/.test(out)) out += '.';
+  if (out.length > 0) out = out.charAt(0).toUpperCase() + out.slice(1);
+  return out;
+}
+
+function stripPreviewControlPhrases(restRaw: string): string {
+  if (!restRaw || typeof restRaw !== 'string') return restRaw;
+  let s = restRaw.trim();
+  const prefixes = [
+    /^\s*bitte\s+als\s+entwurf\s*[,.\-!?]?\s*/i,
+    /^\s*als\s+entwurf\s*[,.\-!?]?\s*/i,
+    /^\s*entwurf\s*[,.\-!?]?\s*/i,
+    /^\s*nur\s+vorbereiten\s*[,.\-!?]?\s*/i,
+    /^\s*vorbereiten\s*[,.\-!?]?\s*/i,
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const re of prefixes) {
+      const before = s;
+      s = s.replace(re, '').trim().replace(/\s{2,}/g, ' ');
+      if (s !== before) changed = true;
+    }
+  }
+  if (s.length < 2) return restRaw;
+  return s;
+}
+
+/**
+ * Entfernt aus dem Text die führende "… für <name>." / "… an <name>." Phrase, liefert nur den Body.
+ */
+function stripPrepareIntroForBody(original: string, nameRaw: string): string {
+  const escaped = nameRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^[\\s\\S]*?\\b(für|fur|an)\\s+${escaped}\\s*[.,!?]?\\s*`, 'i');
+  const rest = original.replace(re, '').trim();
+  return rest || original;
+}
+
 /** Body-Start-Tokens: Subject endet davor (WhatsApp-Style Betreff-Parsing). */
-const WHATSAPP_BODY_START = ['hi', 'hallo', 'ich', 'wir', 'bitte', 'ruf', 'rufe', 'kannst', 'könnt', 'denk', 'erinner'];
+const WHATSAPP_BODY_START = ['hi', 'hallo', 'hey', 'moin', 'servus', 'grüß', 'gruess', 'ich', 'wir', 'bitte', 'ruf', 'rufe', 'kannst', 'könnt', 'denk', 'erinner'];
 
 /**
  * Extrahiert optional "betreff <X>" aus Rest-Text (WhatsApp-Style). Priorität RAW (Umlaute).
@@ -4433,13 +4518,13 @@ function checkFalsePositiveExclusion(normalized: string): boolean {
   // Negation/Preview patterns that should block AutoSend (höchste Priorität)
   const negationPreviewPatterns = [
     /\bnicht\s+(?:senden|schicken|abschicken|rausschicken|verschicken)\b/i,
-    /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-    /\b(?:nur|bloß)\s+entwurf\b/i,
-    /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+    /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+    /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+    /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
     /\b(?:vorlesen|vorlese|vorliest)\b/i,
     /\b(?:preview|vorschau|vorschauen)\b/i,
     /\b(?:zeige|zeig|zeigen)\s+mir\b/i,
-    /\b(?:zeige|zeig|zeigen)\s+(?:nur|bloß)\b/i,
+    /\b(?:zeige|zeig|zeigen)\s+(?:nur|bloß|bloss)\b/i,
   ];
 
   for (const pattern of negationPreviewPatterns) {
@@ -4932,9 +5017,11 @@ function applyCancelPhraseOverride(intent: VoiceIntent, raw: string, normalized:
   // Body von Cancel-Phrasen bereinigen
   if (intent.bodyHint) {
     intent.bodyHint = stripCancelPhraseFromBody(intent.bodyHint);
+    intent.bodyHint = stripPreviewCommandFromBody(intent.bodyHint);
   }
   if (intent.bodyHintRaw) {
     intent.bodyHintRaw = stripCancelPhraseFromBody(intent.bodyHintRaw);
+    intent.bodyHintRaw = stripPreviewCommandFromBody(intent.bodyHintRaw);
   }
 
   // Auch in freeDictationMeta falls vorhanden
@@ -6291,9 +6378,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         // Prüfe auf Negation/Preview (höchste Priorität)
         const negationPatterns = [
           /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-          /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-          /\b(?:nur|bloß)\s+entwurf\b/i,
-          /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+          /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+          /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+          /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
           /\b(?:vorlesen|vorlese|vorliest)\b/i,
           /\b(?:preview|vorschau|vorschauen)\b/i,
         ];
@@ -6362,7 +6449,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       const casualMail = parseCasualMailAnName(text, original);
       if (casualMail) {
         toRaw = casualMail.toName;
-        let bodyText = casualMail.body || '';
+        let bodyText = stripPreviewCommandFromBody(casualMail.body || '');
         if (bodyText) {
           bodyText = bodyText.charAt(0).toUpperCase() + bodyText.slice(1);
           if (!/[.!?]$/.test(bodyText)) bodyText += '.';
@@ -6377,9 +6464,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       const hasImperative = imperativePattern.test(text);
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];
@@ -6571,9 +6658,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];
@@ -6641,9 +6728,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];
@@ -6732,9 +6819,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];
@@ -6872,6 +6959,11 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           bodyAfter = remainder.trim();
         }
 
+        // Preview-only Phrasen am Body-Start entfernen (nur anzeigen, bloß/bloss anzeigen, etc.)
+        if (bodyAfter) {
+          bodyAfter = stripPreviewCommandFromBody(bodyAfter);
+        }
+
         const origPrefix = original.match(/^(?:nachricht|mail|email)\s+an\s+/i);
         const afterPrefix = origPrefix ? original.slice(origPrefix[0].length) : '';
         const firstWord = afterPrefix.split(/[\s,]+/).filter(Boolean)[0];
@@ -6932,11 +7024,35 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       }
     }
 
+    // Preview-Smart: NICHT matchen, wenn erstes Token ein Command-First ist (nur, vorbereiten, entwurf, ...)
+    // → damit draft-prepare etc. greifen können
+    const initialFirstToken = nameRaw.trim().toLowerCase();
+    const PREVIEW_SMART_SKIP_FIRST = new Set([
+      ...WHATSAPP_STYLE_COMMAND_FIRST,
+      'nur', 'vorbereiten', 'vorbereite', 'entwurf', 'vorschlag',
+    ]);
+    if (PREVIEW_SMART_SKIP_FIRST.has(initialFirstToken)) {
+      /* skip preview-smart, fall through */ nameRaw = '';
+    } else {
+      // Preview/Prepare: "für <Name>" / "an <Name>" haben Priorität (z. B. "Thomas, für Max. Ich komme.")
+      const nameFromAn = extractToNameAfterPreposition(original, 'an');
+      const nameFromFur = extractToNameAfterPreposition(original, 'für');
+      if (nameFromAn || nameFromFur) {
+        nameRaw = (nameFromAn || nameFromFur) ?? nameRaw;
+        restAfterName = stripPrepareIntroForBody(original, nameRaw);
+      }
+    }
+
     if (nameRaw && restAfterName) {
       const nameLower = nameRaw.toLowerCase();
       if (TO_STOPWORDS.has(nameLower) || WHATSAPP_STYLE_COMMAND_FIRST.has(nameLower)) { /* skip */ } else {
         const hasSendPhraseAtEnd = WHATSAPP_STYLE_SEND_PHRASES.some((re) => re.test(restAfterName) || re.test(normalize(restAfterName)));
         if (hasSendPhraseAtEnd) { /* Fall durch an whatsapp-style (sendNow) */ } else {
+          const beforeStrip = restAfterName;
+          restAfterName = stripPreviewControlPhrases(restAfterName);
+          if (restAfterName !== beforeStrip) {
+            console.log('[intent-router][whatsapp-style-preview-smart][control-strip] restBefore:', beforeStrip.slice(0, 60), '| restAfter:', restAfterName.slice(0, 60));
+          }
           const restNorm = normalize(restAfterName);
           let bodyRaw = restAfterName;
           let bodyNorm = restNorm;
@@ -7014,10 +7130,11 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     const draftPrepareMatch = tryParseDraftPrepare(text);
     if (draftPrepareMatch) {
       const { toName, bodyHint } = draftPrepareMatch;
+      const toNameCap = toName.charAt(0).toUpperCase() + toName.slice(1).toLowerCase();
 
       const intent: VoiceIntent = {
         type: "email-compose",
-        toRaw: toName,
+        toRaw: toNameCap,
         subjectHint: "Kurze Info",
         bodyHint: bodyHint,
         bodyHintRaw: bodyHint, // Für draft-prepare verwenden wir bodyHint auch als bodyHintRaw
@@ -7035,7 +7152,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       }
 
       console.log('[intent-router][draft-prepare] matched', {
-        toNameRaw: toName,
+        toNameRaw: toNameCap,
         bodyPreview: bodyHint.substring(0, 50),
         bodyHintRawPreview: bodyHint.substring(0, 50),
         autoSend: false,
@@ -7134,9 +7251,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];
@@ -7194,9 +7311,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];
@@ -7260,9 +7377,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];
@@ -7329,9 +7446,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       // Prüfe auf Negation/Preview (höchste Priorität)
       const negationPatterns = [
         /\bnicht\s+(?:senden|schicken|abschicken|rausschicken)\b/i,
-        /\b(?:nur|bloß)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
-        /\b(?:nur|bloß)\s+entwurf\b/i,
-        /\bentwurf\s+(?:nur|bloß|zeigen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/i,
+        /\b(?:nur|bloß|bloss)\s+entwurf\b/i,
+        /\bentwurf\s+(?:nur|bloß|bloss|zeigen)\b/i,
         /\b(?:vorlesen|vorlese|vorliest)\b/i,
         /\b(?:preview|vorschau|vorschauen)\b/i,
       ];

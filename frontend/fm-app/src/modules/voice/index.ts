@@ -17,6 +17,7 @@ import { buildStatusEmailBody } from "../../logic/wizard4/status_brain";
 import { polishEmailBody } from "../../logic/wizard4/email_polish";
 import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
 import { stripLeadingFillerWords } from "../../logic/wizard4/filler_words";
+import { stripSubjectCommand } from "../../logic/wizard4/subject_command_strip";
 import { resolveVoiceEmailSubject } from "./subject_resolve";
 import { rewriteLeadingDassClause } from "./dass_rewrite";
 
@@ -1099,7 +1100,7 @@ function applyEmailToComposeUI(params: {
   }
 
   if (subject && typeof window !== "undefined" && (window as any).__fm_set_mail_subject) {
-    console.log(`${logPrefix}: __fm_set_mail_subject`, subject);
+    console.log(`${logPrefix}: __fm_set_mail_subject setting subject=`, JSON.stringify(subject), '(from resolvedSubject/draft)');
     (window as any).__fm_set_mail_subject(subject);
   }
 
@@ -1372,45 +1373,29 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             }
             console.log("[wizard4][explicit-body][sanitize] before:", bodyHint.slice(0, 120));
             console.log("[wizard4][explicit-body][sanitize] after:", sanitizedBody.slice(0, 120));
-            
-            // Fallback: Wenn sanitizedBody leer (Cancel-Phrase hat alles entfernt), extrahiere aus sourceText
-            // NICHT bei missing_body: da bleibt Body leer, kein Generator/Template
-            if ((!sanitizedBody || sanitizedBody.trim().length === 0) && (intent as any).meta?.forcePreviewOnlyReason !== 'missing_body') {
-              const sourceText = (intent as any).meta?.sourceText ?? (intent as any).sourceText ?? rawText ?? "";
-              if (sourceText && typeof sourceText === "string") {
-                let fallbackBody = sourceText.trim();
-                const toNameForFallback = (intent as any).toRaw ?? (intent as any).toName ?? wizard4Draft?.toName;
-                if (toNameForFallback) {
-                  const escapedName = String(toNameForFallback).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                  fallbackBody = fallbackBody.replace(new RegExp(`^an\\s+${escapedName}\\b[:,]?\\s*`, "i"), "").trim();
-                  fallbackBody = fallbackBody.replace(new RegExp(`^für\\s+${escapedName}\\b[:,]?\\s*`, "i"), "").trim();
-                  fallbackBody = fallbackBody.replace(new RegExp(`^${escapedName}\\b[:,]?\\s*`, "i"), "").trim();
-                  fallbackBody = fallbackBody.replace(new RegExp(`^schick(?:'s)?\\s+(?:das\\s+)?(?:direkt\\s+)?an\\s+${escapedName}\\b[:,]?\\s*`, "i"), "").trim();
-                  fallbackBody = fallbackBody.replace(new RegExp(`^sende\\s+(?:das\\s+)?(?:direkt\\s+)?an\\s+${escapedName}\\b[:,]?\\s*`, "i"), "").trim();
-                }
-                fallbackBody = fallbackBody.replace(/\s*(?:sofort\s+senden|direkt\s+senden|jetzt\s+senden|sofort\s+raus|schick\s+raus|schicks\s+raus|rausschicken|abschicken)[\s,.:;!?-]*$/i, "").trim();
-                fallbackBody = fallbackBody.replace(/\s*(?:doch nicht|ach nein|lieber doch nicht|besser doch nicht|ne doch nicht)[\s,.:;!?-]*$/i, "").trim();
-                fallbackBody = fallbackBody.trim();
-                if (fallbackBody && fallbackBody.length > 0) {
-                  sanitizedBody = fallbackBody;
-                }
+
+            // WICHTIG: stripSubjectCommand ausschließlich mit sanitized bodyHint, NIEMALS mit sourceText
+            console.log('[wizard4][explicit-body][sanitize] stripSubjectCommand input from sanitized bodyHint (not sourceText)');
+            const { text: bodyWithoutSubject, explicitSubject } = stripSubjectCommand(sanitizedBody);
+            if (explicitSubject && bodyWithoutSubject !== sanitizedBody) {
+              sanitizedBody = bodyWithoutSubject.trim();
+              if (!wizard4Draft.subject || !String(wizard4Draft.subject).trim()) {
+                wizard4Draft.subject = explicitSubject;
+                console.log('[wizard4][subject-command-strip] explicitSubject=', explicitSubject, 'draft.subject=', wizard4Draft.subject);
               }
             }
-            
-            // Setze bodyHint = sanitizedBody und draft.body = sanitizedBody
-            if (sanitizedBody && sanitizedBody.trim().length > 0) {
-              bodyHint = sanitizedBody;
-              (intent as any).bodyHint = sanitizedBody;
-              wizard4Draft.body = sanitizedBody;
-            } else {
-              // Wenn immer noch leer: lass draft.body leer (aber previewOnly bleibt)
-              wizard4Draft.body = "";
-            }
-            console.log("[wizard4][explicit-body][sanitize] appliedBodyHint:", bodyHint.slice(0, 120));
-            console.log('[wizard4][send-control-strip] applied', { before: bodyHint.slice(0, 80), after: sanitizedBody.slice(0, 80) });
+
+            // KEIN sourceText-Fallback: appliedBodyHint darf NIEMALS aus sourceText/originalText kommen.
+            // Wenn sanitizedBody leer bleibt, bleibt der Body leer (kein Zurückholen des Originalsatzes).
+
+            // appliedBodyHint = sanitizedBody (aus stripSubjectCommand + sanitize, NIEMALS sourceText)
+            const appliedBodyHint = sanitizedBody?.trim() ?? '';
+            bodyHint = appliedBodyHint;
+            (intent as any).bodyHint = appliedBodyHint;
+            wizard4Draft.body = appliedBodyHint;
+            console.log("[wizard4][explicit-body][sanitize] appliedBodyHint:", appliedBodyHint.slice(0, 120));
             console.log('[wizard4][explicit-body] Overwrote draft.body with explicit bodyHint', {
-              oldBodyPreview: (wizard4Draft.body || '').substring(0, 50),
-              newBodyPreview: sanitizedBody.substring(0, 80)
+              newBodyPreview: appliedBodyHint.substring(0, 80)
             });
           }
           
@@ -2397,6 +2382,23 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         
         // Sicherheitsnetz: Send-Steuerphrasen entfernen, bevor Body ins UI geht
         finalBodyForUi = stripSendControlPhrasesFinal(finalBodyForUi);
+        if (wizard4Draft?.sendMode === 'previewOnly' && finalBodyForUi?.trim()) {
+          const beforePreviewStrip = finalBodyForUi;
+          finalBodyForUi = finalBodyForUi
+            .replace(/\b(?:nur|bloß|bloss)\s+(?:zeigen|vorzeigen|anzeigen|darstellen)\b/gi, '')
+            .replace(/\bals\s+entwurf\b/gi, '')
+            .replace(/\bnur\s+vorbereiten\b/gi, '')
+            .replace(/\s*,\s*\./g, '.')
+            .replace(/\s*,\s*,+/g, ', ')
+            .replace(/\s+,/g, ',')
+            .replace(/,\s+/g, ', ')
+            .replace(/,\s*$/g, '')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+          if (finalBodyForUi !== beforePreviewStrip) {
+            console.log('[wizard4][preview-body-strip] removed preview commands', { before: beforePreviewStrip.slice(0, 60), after: finalBodyForUi.slice(0, 60) });
+          }
+        }
         // FIX: Stelle sicher, dass finalBodyForUi wirklich verwendet wird
         // Aktualisiere auch body und wizard4Draft.body, damit AutoSend den polierten Body verwendet
         body = finalBodyForUi;

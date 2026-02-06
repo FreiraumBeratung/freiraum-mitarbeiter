@@ -70,4 +70,41 @@ describe("intent_router: whatsapp-style (Name: body / Name body Send-Phrase)", (
     expect(body).toContain("hi thomas");
     expect(body).toContain("ruf mich zuruck");
   });
+
+  it("G) Thomas Betreff Pizza Hey Thomas, kannst du morgen Pizza mitbringen? Schick raus. -> subject Pizza, body mit Hey Thomas", () => {
+    const r = routeVoiceIntent("Thomas Betreff Pizza Hey Thomas, kannst du morgen Pizza mitbringen? Schick raus.");
+    const intent = r.type === "email-compose" ? r : null;
+    expect(intent).toBeTruthy();
+    if (!intent) return;
+    expect(intent.type).toBe("email-compose");
+    expect(intent.subjectHint).toBe("Pizza");
+    const body = intent.bodyHint ?? intent.bodyHintRaw ?? "";
+    expect(body).toMatch(/hey\s+thomas/i);
+    expect(intent.subjectHint).not.toContain("Hey Thomas");
+  });
+
+  it("H) Thomas Betreff Pizza Moin Thomas, kannst du morgen Pizza mitbringen? Schick raus. -> subject Pizza, body mit Moin Thomas", () => {
+    const r = routeVoiceIntent("Thomas Betreff Pizza Moin Thomas, kannst du morgen Pizza mitbringen? Schick raus.");
+    const intent = r.type === "email-compose" ? r : null;
+    expect(intent).toBeTruthy();
+    if (!intent) return;
+    expect(intent.type).toBe("email-compose");
+    expect(intent.subjectHint).toBe("Pizza");
+    const body = intent.bodyHint ?? intent.bodyHintRaw ?? "";
+    expect(body).toMatch(/moin\s+thomas/i);
+    expect(intent.subjectHint).not.toContain("Moin Thomas");
+  });
+
+  it("I) Thomas Betreff Pizza Grüß dich Thomas, kannst du morgen Pizza mitbringen? Schick raus. -> subject Pizza, body mit Grüß dich", () => {
+    const r = routeVoiceIntent("Thomas Betreff Pizza Grüß dich Thomas, kannst du morgen Pizza mitbringen? Schick raus.");
+    const intent = r.type === "email-compose" ? r : null;
+    expect(intent).toBeTruthy();
+    if (!intent) return;
+    expect(intent.type).toBe("email-compose");
+    expect(intent.subjectHint).toBe("Pizza");
+    const body = (intent.bodyHint ?? intent.bodyHintRaw ?? "").toLowerCase();
+    expect(body).toContain("dich");
+    expect(intent.subjectHint).not.toContain("Grüß");
+    expect(intent.subjectHint).not.toContain("dich");
+  });
 });
