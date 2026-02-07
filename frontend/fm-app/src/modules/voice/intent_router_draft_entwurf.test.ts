@@ -305,6 +305,46 @@ describe('Draft-Entwurf Pattern: "entwurf an <name> ..."', () => {
     });
   });
 
+  describe('Entwurf für / Vorlage für / Erstelle Nachricht (Schritt E)', () => {
+    it('"Entwurf für Thomas Betreff Rückruf ruf mich bitte kurz zurück" -> email-compose, previewOnly, Subject Rückruf, Body korrekt', () => {
+      const input = "Entwurf für Thomas Betreff Rückruf ruf mich bitte kurz zurück";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toContain('thomas');
+        expect(intent.meta?.autoSend).toBe(false);
+        expect(intent.meta?.source).toBe('draft-entwurf');
+        expect(['Rückruf', 'Ruckruf', 'rueckruf']).toContain(intent.subjectHint ?? '');
+        expect(intent.bodyHint?.toLowerCase()).toContain('ruf mich');
+        expect(intent.bodyHint?.toLowerCase()).not.toContain('betreff');
+      }
+    });
+
+    it('"Vorlage für Thomas Betreff Angebot kannst du mich zurückrufen" -> previewOnly, Subject Angebot', () => {
+      const input = "Vorlage für Thomas Betreff Angebot kannst du mich zurückrufen";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toContain('thomas');
+        expect(intent.meta?.autoSend).toBe(false);
+        expect(intent.meta?.source).toBe('draft-entwurf');
+        expect(intent.subjectHint?.toLowerCase()).toContain('angebot');
+        expect(intent.bodyHint?.toLowerCase()).toContain('kannst du mich');
+      }
+    });
+
+    it('"Entwurf für Thomas Betreff Rückruf Hi Thomas, kannst du mich zurückrufen?" -> kein AI-Fallback', () => {
+      const input = "Entwurf für Thomas Betreff Rückruf Hi Thomas, kannst du mich zurückrufen?";
+      const intent = routeVoiceIntent(input);
+      expect(intent.type).not.toBe('ai-chat');
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toContain('thomas');
+        expect(intent.meta?.source).toBe('draft-entwurf');
+      }
+    });
+  });
+
   describe('Edge cases', () => {
     it('should handle "draft an" variant (nice-to-have)', () => {
       const input = "draft an thomas ich rufe gleich zuruck";

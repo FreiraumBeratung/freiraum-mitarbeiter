@@ -26,6 +26,7 @@ declare global {
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
     __fm_last_hint?: { kind: string; message: string; ts: number } | null;
+    __fm_subject_manually_edited?: boolean;
   }
 }
 

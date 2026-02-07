@@ -18,8 +18,15 @@ import { polishEmailBody } from "../../logic/wizard4/email_polish";
 import { normalizeEmailBodyAfterPolish } from "../../logic/wizard4/normalizeEmailBodyAfterPolish";
 import { stripLeadingFillerWords } from "../../logic/wizard4/filler_words";
 import { stripSubjectCommand } from "../../logic/wizard4/subject_command_strip";
-import { resolveVoiceEmailSubject } from "./subject_resolve";
+import { stripLeadingSubjectEcho } from "../../logic/wizard4/strip_leading_subject_echo";
+import { isFollowUpSendCurrentDraft, isUiDraftAvailable } from "../../logic/wizard4/followup_send_draft";
 import { rewriteLeadingDassClause } from "./dass_rewrite";
+import {
+  subjectSet,
+  subjectAppend,
+  subjectReplacePart,
+  subjectClear,
+} from "./subject_edit";
 
 declare global {
   interface Window {
@@ -31,6 +38,7 @@ declare global {
     __fm_get_mail_to?: () => string | null;
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
+    __fm_subject_manually_edited?: boolean;
   }
 }
 
@@ -107,6 +115,30 @@ function stripSendControlPhrases(s: string): string {
   // Cancel-Phrasen am Ende
   result = result.replace(/\s*(?:doch\s+nicht|ach\s+nein|lieber\s+doch\s+nicht|besser\s+doch\s+nicht|ne\s+doch\s+nicht)[\s,.:;!?-]*$/i, "").trim();
   return result;
+}
+
+/** Entfernt führende Satzzeichen und Leerzeichen vom Append-Text. */
+function normalizeAppend(s: string): string {
+  if (!s || typeof s !== "string") return "";
+  return s.trim().replace(/^[.,:;\s-]+/, "").trim();
+}
+
+/** Fügt appendText nahtlos an current Body an (keine Extra-Leerzeilen). */
+function mergeBodies(current: string, add: string): string {
+  const currentTrimRight = (current ?? "").replace(/[ \t]+$/g, "");
+  const addTrimLeft = (add ?? "").replace(/^\s+/, "").trim();
+  if (!currentTrimRight) return addTrimLeft;
+  let base: string;
+  if (currentTrimRight.endsWith("\n\n")) {
+    base = currentTrimRight.replace(/\n\n+$/, "\n") + addTrimLeft;
+  } else if (currentTrimRight.endsWith("\n")) {
+    base = currentTrimRight + addTrimLeft;
+  } else if (/[.!?]$/.test(currentTrimRight)) {
+    base = currentTrimRight + "\n" + addTrimLeft;
+  } else {
+    base = currentTrimRight + " " + addTrimLeft;
+  }
+  return base.replace(/\n{3,}/g, "\n\n").replace(/ \n/g, "\n");
 }
 
 /**
@@ -1261,6 +1293,27 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       let didAutoSend = false;
       
       // ============================================================
+      // FOLLOW-UP SEND: "Schick die Nachricht aus" etc. → aktuellen Draft im UI abschicken
+      // ============================================================
+      const rawTextForFollowUp = (intent as any)?.meta?.source === "email-send-degrade" && (intent as any).sourceText != null
+        ? (intent as any).sourceText
+        : (lastTranscript || intent.bodyHint || intent.toRaw || "");
+      if (isFollowUpSendCurrentDraft(rawTextForFollowUp)) {
+        if (typeof w.__fm_send_mail_now === 'function') {
+          try {
+            w.__fm_send_mail_now();
+            setLastAction({ kind: "email-compose", description: "E-Mail gesendet (Follow-up)." });
+            console.log("[wizard4][followup-send] sending current draft from UI (no overwrite)");
+          } catch (err) {
+            console.error("[wizard4][followup-send] error calling __fm_send_mail_now:", err);
+          }
+        } else {
+          console.log("[wizard4][followup-send] no UI draft available - ignored");
+        }
+        return;
+      }
+      
+      // ============================================================
       // PHASE 1: Basis-Draft aus Intent erstellen (OHNE finalen Body-Style)
       // ============================================================
       // AUFGABE B: Guard-Condition für Status-Brain - verhindert explicit-body Überschreibung VOR buildWizard4EmailFromInput
@@ -1379,17 +1432,18 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             const { text: bodyWithoutSubject, explicitSubject } = stripSubjectCommand(sanitizedBody);
             if (explicitSubject && bodyWithoutSubject !== sanitizedBody) {
               sanitizedBody = bodyWithoutSubject.trim();
-              if (!wizard4Draft.subject || !String(wizard4Draft.subject).trim()) {
-                wizard4Draft.subject = explicitSubject;
-                console.log('[wizard4][subject-command-strip] explicitSubject=', explicitSubject, 'draft.subject=', wizard4Draft.subject);
-              }
+              wizard4Draft.subject = explicitSubject;
+              (wizard4Draft as any).hasExplicitSubject = true;
+              console.log('[wizard4][subject-command-strip] explicitSubject=', explicitSubject, 'draft.subject=', wizard4Draft.subject);
             }
 
             // KEIN sourceText-Fallback: appliedBodyHint darf NIEMALS aus sourceText/originalText kommen.
             // Wenn sanitizedBody leer bleibt, bleibt der Body leer (kein Zurückholen des Originalsatzes).
 
             // appliedBodyHint = sanitizedBody (aus stripSubjectCommand + sanitize, NIEMALS sourceText)
-            const appliedBodyHint = sanitizedBody?.trim() ?? '';
+            let appliedBodyHint = sanitizedBody?.trim() ?? '';
+            const currentSubjectForStrip = wizard4Draft?.subject ?? (intent as any).subjectHint ?? (intent as any).subject;
+            appliedBodyHint = stripLeadingSubjectEcho(appliedBodyHint, currentSubjectForStrip);
             bodyHint = appliedBodyHint;
             (intent as any).bodyHint = appliedBodyHint;
             wizard4Draft.body = appliedBodyHint;
@@ -2003,28 +2057,29 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         }
       }
       
-      // Betreff bestimmen (Wizard4 hat Vorrang - IMMER draft.subject verwenden wenn vorhanden)
-      // Bei Status-Mails und Free-Diktat: immer neutrale "Kurze Info" setzen
+      // Betreff bestimmen: draft.subject / intent.subject behalten; Default "Kurze Info" nur wenn wirklich keiner gesetzt
       const emailIntentForSubject: any = intent;
-      const statusMetaForSubject = emailIntentForSubject?.meta?.statusEmail;
       const freeDictationMetaForSubject = emailIntentForSubject?.meta?.freeDictationMeta;
-      
-      // FIX: Verwende resolveVoiceEmailSubject, um bei AutoSend+sendNow nicht stale draftSubject zu verwenden
-      const resolvedSubject = resolveVoiceEmailSubject({
-        subjectHint: intent.subjectHint ?? undefined,
-        draftSubject: wizard4Draft?.subject ?? undefined,
-        sendMode: wizard4Draft?.sendMode ?? undefined,
-        autoSend: Boolean(intent.meta?.autoSend),
-      });
-      
-      let subject = resolvedSubject;
-      // Intent-Subject hat Vorrang; Default "Kurze Info" nur wenn subject leer
-      const intentSubjectForFinal = (intent as any)?.subject ?? intent.subjectHint;
-      if (intentSubjectForFinal && typeof intentSubjectForFinal === 'string' && intentSubjectForFinal.trim()) {
-        subject = intentSubjectForFinal.trim();
-      }
-      if ((statusMetaForSubject?.isStatus || freeDictationMetaForSubject) && !subject?.trim()) {
+      const hasExplicitSubject = !!(wizard4Draft as any)?.hasExplicitSubject && wizard4Draft?.subject?.trim();
+      const draftSubjectTrimmed = wizard4Draft?.subject?.trim();
+      const intentSubjectTrimmed = (emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint) && typeof (emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint) === 'string'
+        ? String((emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint)).trim()
+        : '';
+      let subject: string;
+
+      if ((w as any).__fm_subject_manually_edited && typeof (w as any).__fm_get_mail_subject === 'function') {
+        const uiSubject = ((w as any).__fm_get_mail_subject() ?? '').toString().trim();
+        subject = uiSubject || 'Kurze Info';
+        console.log('[wizard4][subject] keeping manual-edit, skip override:', subject);
+      } else if (hasExplicitSubject || draftSubjectTrimmed) {
+        subject = (wizard4Draft!.subject ?? '').trim();
+        console.log('[wizard4][subject] keeping explicitSubject/draft, skip override:', subject);
+      } else if (intentSubjectTrimmed) {
+        subject = intentSubjectTrimmed;
+        console.log('[wizard4][subject] using intent subject:', subject);
+      } else {
         subject = "Kurze Info";
+        console.log("[wizard4][subject] no subject provided -> forcing default 'Kurze Info'");
       }
       
       // FIX: Final-Body-Zuweisung - bodyForUi MUSS hier definiert werden, damit es immer verfügbar ist
@@ -2082,7 +2137,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         }
         
         if (explicitBodyHint) {
-          bodyForUi = explicitBodyHint;
+          bodyForUi = stripLeadingSubjectEcho(explicitBodyHint, subject);
           console.log('[wizard4][explicit-body] Using explicit bodyHint as final body', {
             bodyPreview: bodyForUi.substring(0, 100)
           });
@@ -2614,6 +2669,23 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       return;
     }
 
+    // APPEND-GUARD: einfacher Merge ohne AI (kein subject/to, kein polish)
+    const isAppendGuard = intent.meta?.source === 'append-guard';
+    if (isAppendGuard) {
+      const getBody = w.__fm_get_mail_body;
+      const setBody = w.__fm_set_mail_body;
+      const current = (getBody?.() ?? '').toString();
+      const add = normalizeAppend(appendText);
+      const merged = mergeBodies(current, add);
+      const lenBefore = current.length;
+      const lenAfter = merged.length;
+      setBody?.(merged);
+      console.log("[fm-voice][email-append] applied", { lenBefore, lenAfter });
+      triggerEmotion("success");
+      PartnerBotBus.say("Text hinzugefügt.");
+      return;
+    }
+
     const currentBody = w.__fm_get_mail_body();
     const bodyBefore = typeof currentBody === 'string' ? currentBody : '';
     const bodyBeforeLen = bodyBefore.length;
@@ -2660,128 +2732,25 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
   if (intent.type === "email-send") {
     console.log("[fm-voice] applyVoiceIntent(email-send) – verarbeite email-send Intent");
     (async () => {
-      // 1) Hole original Transcript
-      const sourceText = (intent as any).sourceText ?? (intent as any).meta?.sourceText ?? (intent as any).text ?? (intent as any).rawText ?? lastTranscript ?? "";
-      const normalizedSend = sourceText.toLowerCase().replace(/\s+/g, " ").trim();
-
-      // „Schick die Mail los“ / „Sende die Mail“ / „Jetzt senden“ / „Jetzt raus damit“ => aktuellen Draft senden (nur wenn Composer offen)
-      const SEND_CURRENT_DRAFT_PATTERNS = [
-        "schick die mail los", "sende die mail", "jetzt senden", "jetzt raus damit",
-        "schick die mail", "sende die email", "schick die mail ab", "mail los", "email los",
-        "mail jetzt senden", "email jetzt senden", "schick die email los", "sende die mail bitte",
-        "schick die mail direkt los", "sende die mail direkt",
-      ];
-      const matchesSendCurrentDraft = SEND_CURRENT_DRAFT_PATTERNS.some((p) => normalizedSend.includes(p));
-
-      if (typeof window !== "undefined" && matchesSendCurrentDraft) {
-        const w = window as any;
-        const hasSend = typeof w.__fm_send_mail_now === "function";
-        const hasTo = typeof w.__fm_get_mail_to === "function";
-        const hasBody = typeof w.__fm_get_mail_body === "function";
-        const composerActive = hasSend && hasTo && hasBody;
-
-        if (composerActive) {
-          const currentTo = (hasTo ? w.__fm_get_mail_to() : null) ?? "";
-          const currentBody = (hasBody ? w.__fm_get_mail_body() : null) ?? "";
-          const toPresent = !!String(currentTo).trim();
-          const bodyLen = typeof currentBody === "string" ? currentBody.length : 0;
-          console.log("[email-send-current] composerActive=true toPresent=" + toPresent + " bodyLen=" + bodyLen);
-
-          if (toPresent && currentBody && String(currentBody).trim().length > 0) {
-            try {
-              w.__fm_send_mail_now();
-              console.log("[email-send-current] sent");
-            } catch (err) {
-              console.error("[email-send-current] send error", err);
-            }
-            return;
-          }
-          if (!toPresent) {
-            const msg = "Empfänger fehlt – sag: 'An Thomas ...' oder setz den Empfänger.";
-            w.__fm_last_hint = { kind: "missing_to", message: msg, ts: Date.now() };
-            if (typeof window.dispatchEvent === "function") {
-              window.dispatchEvent(new CustomEvent("fm-hint-update"));
-            }
-            PartnerBotBus.say(msg);
-            console.log("[email-send-current] blocked: missing_to");
-            return;
-          }
-          const msgBody = "Text fehlt – sag den Nachrichtentext oder nutze 'Ergänze: ...'";
-          w.__fm_last_hint = { kind: "missing_body", message: msgBody, ts: Date.now() };
-          if (typeof window.dispatchEvent === "function") {
-            window.dispatchEvent(new CustomEvent("fm-hint-update"));
-          }
-          PartnerBotBus.say(msgBody);
-          console.log("[email-send-current] blocked: missing_body");
-          return;
-        }
-      }
-
-      // 2) Ermittle toName (degrade-path)
-      const toName = (intent as any).toName ?? (intent as any).meta?.toName ?? extractToNameFromText(sourceText);
-      const cleanedBody = cleanBodyFromEmailSend(sourceText, toName);
-
-      // 4) Prüfe ob Composer offen und Felder vorhanden sind
-      let shouldDegrade = false;
-      if (typeof window !== "undefined") {
-        const w = window as any;
+      const w = typeof window !== "undefined" ? (window as any) : null;
+      if (isUiDraftAvailable() && w) {
         try {
-          const currentTo = typeof w.__fm_get_mail_to === "function" ? w.__fm_get_mail_to() : null;
-          const currentBody = typeof w.__fm_get_mail_body === "function" ? w.__fm_get_mail_body() : null;
-          if (!currentTo || currentTo.trim().length === 0 || !currentBody || currentBody.trim().length === 0) {
-            shouldDegrade = true;
-            console.log("[fm-voice][email-send] degrade: Felder fehlen", { hasTo: !!currentTo, hasBody: !!currentBody });
-          }
-        } catch (_) {
-          shouldDegrade = true;
+          w.__fm_send_mail_now();
+          setLastAction({ kind: "email-compose", description: "E-Mail gesendet." });
+          console.log("[wizard4][email-send] sending current UI draft (no overwrite)");
+        } catch (err) {
+          console.error("[wizard4][email-send] send error:", err);
         }
-      }
-
-      const fn = await waitForSendNowFn(2000, 150);
-      if (!fn) {
-        shouldDegrade = true;
-        console.log("[fm-voice][email-send] degrade: send-now nicht verfügbar");
-      }
-
-      // 6) Degrade zu email-compose (wenn kein send-current-draft getroffen)
-      if (true) {
-        const composeIntent: any = {
-          type: "email-compose",
-          toRaw: toName ?? null,
-          bodyHint: cleanedBody,
-          meta: {
-            forcePreviewOnly: true,
-            bodyHint: cleanedBody,
-            toName: toName ?? null,
-            sourceText: sourceText,
-            degradedFrom: "email-send",
-            autoSend: false,
-            source: "email-send-degrade",
-          },
-        };
-        console.log("[fm-voice][email-send] degrade->compose toName:", toName, "body:", cleanedBody.slice(0, 80));
-        applyVoiceIntent(composeIntent as VoiceIntent, navigate);
         return;
       }
-
-      if (fn && typeof fn === "function") {
-        try {
-          const maybePromise = fn();
-          if (maybePromise && typeof (maybePromise as any).then === "function") {
-            (maybePromise as Promise<unknown>)
-              .then(() => {
-                console.log("[fm-voice] applyVoiceIntent(email-send) – __fm_send_mail_now erfolgreich abgeschlossen");
-              })
-              .catch((err) => {
-                console.error("[fm-voice] applyVoiceIntent(email-send) – Fehler beim E-Mail-Versand", err);
-              });
-          } else {
-            console.log("[fm-voice] applyVoiceIntent(email-send) – __fm_send_mail_now synchron ausgeführt");
-          }
-        } catch (err) {
-          console.error("[fm-voice] applyVoiceIntent(email-send) – Ausnahme beim Aufruf von __fm_send_mail_now", err);
+      if (w) {
+        w.__fm_last_hint = { kind: "no_draft_open", message: "Kein Entwurf geöffnet – erstelle zuerst eine E-Mail.", ts: Date.now() };
+        if (typeof window.dispatchEvent === "function") {
+          window.dispatchEvent(new CustomEvent("fm-hint-update"));
         }
       }
+      console.log("[wizard4][email-send] no UI draft available - ignored");
+      return;
     })();
     return;
   }
@@ -2798,6 +2767,53 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         "Ich sehe gerade keine E-Mail, für die ich eine Vorschau anzeigen kann.",
       );
     }
+    return;
+  }
+
+  // -----------------------
+  // Subject-Edit: Betreff setzen/anhaengen/loeschen/ersetzen (nur __fm_set_mail_subject, kein to/body)
+  // -----------------------
+  if (
+    intent.type === "email-subject-set" ||
+    intent.type === "email-subject-append" ||
+    intent.type === "email-subject-clear" ||
+    intent.type === "email-subject-replace" ||
+    intent.type === "email-subject-replace-part"
+  ) {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    if (!w?.__fm_set_mail_subject) {
+      if (w) { w.__fm_last_hint = { kind: "no_draft_open", message: "Kein Entwurf geöffnet – erstelle zuerst eine E-Mail.", ts: Date.now() }; }
+      if (typeof window?.dispatchEvent === "function") window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      PartnerBotBus.say("Kein Entwurf geöffnet. Erstelle zuerst eine E-Mail.");
+      return;
+    }
+    const current = (w?.__fm_get_mail_subject?.() ?? "").toString().trim();
+    const rawCmd = (intent.payload as { rawCommand?: string })?.rawCommand ?? "";
+    let newSubject: string;
+    if (intent.type === "email-subject-set") {
+      newSubject = subjectSet(intent.payload?.subject ?? "");
+    } else if (intent.type === "email-subject-append") {
+      newSubject = subjectAppend(current, intent.payload?.append ?? "", rawCmd);
+    } else if (intent.type === "email-subject-clear") {
+      newSubject = subjectClear();
+    } else if (intent.type === "email-subject-replace") {
+      newSubject = subjectSet(intent.payload?.subject ?? "");
+    } else if (intent.type === "email-subject-replace-part") {
+      newSubject = subjectReplacePart(
+        current,
+        intent.payload?.from ?? "",
+        intent.payload?.to ?? "",
+        rawCmd
+      );
+    } else {
+      newSubject = subjectClear();
+    }
+    w.__fm_set_mail_subject(newSubject);
+    w.__fm_subject_manually_edited = true;
+    triggerEmotion("success");
+    if (intent.type === "email-subject-clear") PartnerBotBus.say("Betreff gelöscht.");
+    else if (intent.type === "email-subject-append") PartnerBotBus.say("Betreff ergänzt.");
+    else PartnerBotBus.say("Betreff aktualisiert.");
     return;
   }
 

@@ -17,6 +17,7 @@ import { tryParseDraftFolgende } from "../../logic/wizard4/draft_folgende_parser
 import { tryParseWritePreview } from "../../logic/wizard4/write_preview_parser";
 import { tryParseCancelledSendToPreview } from "../../logic/wizard4/cancel_preview_parser";
 import { hasCancelPhrase, stripCancelPhraseFromBody } from "../../logic/wizard4/cancel_phrase";
+import { parseSubjectEditIntent } from "../../logic/subject_edit";
 
 export type Wizard3OneShotPayload = {
   rawText: string; // komplette Original-Sprachnachricht
@@ -25,7 +26,7 @@ export type Wizard3OneShotPayload = {
 export type VoiceIntent =
   | { type: "navigate"; target: "control-center" | "lead-radar" | "leads" | "mail-compose" | "voice-diagnostics" }
   | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; bodyHintRaw?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean }; statusBrain?: { category: StatusCategory; usedTemplate: boolean }; freeDictationMeta?: FreeDictationMeta; source?: string; autoSend?: boolean; forcePreviewOnly?: boolean; forcePreviewOnlyReason?: string; uiHint?: string; cancelled?: boolean; disableSendPhraseDetection?: boolean } }
-  | { type: "email-append"; meta?: { autoSend?: boolean }; payload: { appendText: string } }
+  | { type: "email-append"; meta?: { autoSend?: boolean; source?: string }; payload: { appendText: string } }
   | { type: "wizard3-one-shot"; payload: Wizard3OneShotPayload }
   | { type: "wizard2-edit-anrede"; newAnrede: string }
   | { type: "wizard2-edit-subject"; newSubject: string }
@@ -33,6 +34,11 @@ export type VoiceIntent =
   | { type: "wizard2-edit-anrede-and-rewrite"; newAnrede: string; instruction: string }
   | { type: "email-send" }
   | { type: "email-preview" }
+  | { type: "email-subject-set"; payload: { subject: string; rawCommand?: string } }
+  | { type: "email-subject-append"; payload: { append: string; rawCommand?: string } }
+  | { type: "email-subject-clear"; payload: { rawCommand?: string } }
+  | { type: "email-subject-replace"; payload: { subject: string; rawCommand?: string } }
+  | { type: "email-subject-replace-part"; payload: { from: string; to: string; rawCommand?: string } }
   | { type: "leads-filter"; range: "today" | "yesterday" | "week" }
   | { type: "last-action" }
   | { type: "ai-chat"; query: string }
@@ -60,7 +66,8 @@ const MAIL_NOUNS = [
 ];
 
 /**
- * Soft-Words: Füllwörter, die ignoriert werden sollen
+ * Soft-Words: Füllwörter, die ignoriert werden sollen (für Matching).
+ * Bei Email-Intents: Body wird aus Original extrahiert, damit mal, eben, kurz, bitte, noch erhalten bleiben.
  */
 const SOFT_WORDS = [
   "mal", "eben", "kurz", "bitte", "mir", "uns", "doch"
@@ -123,6 +130,28 @@ function normalize(text: string) {
   // Mehrfachspaces nach Soft-Word-Entfernung wieder normalisieren
   normalized = normalized.replace(/\s+/g, ' ').trim();
   
+  return normalized;
+}
+
+/** Normalisiert für Email-Body: wie normalize(), aber mal, eben, kurz, bitte, noch NICHT entfernen. */
+function normalizeForEmailBody(text: string): string {
+  let normalized = (text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  for (const softWord of SOFT_WORDS) {
+    if (['mal', 'eben', 'kurz', 'bitte', 'noch'].includes(softWord)) continue;
+    const re = new RegExp(`\\b${softWord}\\b`, 'gi');
+    normalized = normalized.replace(re, '');
+  }
+  normalized = normalized.replace(/\s+/g, ' ').trim();
   return normalized;
 }
 
@@ -797,16 +826,16 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
   }
 
   // TASK 3: Special handling for "folgende nachricht an <name>" patterns
-  // Extract name directly after "an" to prevent garbage strings
   const folgendeNachrichtAnMatch = text.match(/\bfolgende\s+nachricht\s+an\s+([a-z0-9äöüß]+)\b/i);
   if (folgendeNachrichtAnMatch && folgendeNachrichtAnMatch[1]) {
     const name = folgendeNachrichtAnMatch[1].trim();
-    // Extract body: everything after the matched pattern
-    const bodyStart = folgendeNachrichtAnMatch[0].length;
-    const rawBodyText = text.slice(bodyStart).trim();
-    // Clean body text from command phrases
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`folgende\\s+nachricht\\s+an\\s+${escapedName}\\b\\s*`, 'i');
+    const origMatch = origText.match(pattern);
+    const rawBodyText = origMatch && origMatch.index !== undefined
+      ? origText.slice(origMatch.index + origMatch[0].length).trim()
+      : text.slice(folgendeNachrichtAnMatch[0].length).trim();
     const bodyText = cleanEmailBodyFromCommand(rawBodyText, name);
-    
     console.log('[intent-router][intent4.2][fixed-name] Extracted name from "folgende nachricht an":', name);
     return {
       toNameRaw: name,
@@ -818,11 +847,13 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
   const folgendeEmailAnMatch = text.match(/\bfolgende\s+(?:email|mail|e-mail)\s+an\s+([a-z0-9äöüß]+)\b/i);
   if (folgendeEmailAnMatch && folgendeEmailAnMatch[1]) {
     const name = folgendeEmailAnMatch[1].trim();
-    const bodyStart = folgendeEmailAnMatch[0].length;
-    const rawBodyText = text.slice(bodyStart).trim();
-    // Clean body text from command phrases
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`folgende\\s+(?:email|mail|e-mail)\\s+an\\s+${escapedName}\\b\\s*`, 'i');
+    const origMatch = origText.match(pattern);
+    const rawBodyText = origMatch && origMatch.index !== undefined
+      ? origText.slice(origMatch.index + origMatch[0].length).trim()
+      : text.slice(folgendeEmailAnMatch[0].length).trim();
     const bodyText = cleanEmailBodyFromCommand(rawBodyText, name);
-    
     console.log('[intent-router][intent4.2][fixed-name] Extracted name from "folgende email/mail an":', name);
     return {
       toNameRaw: name,
@@ -834,8 +865,12 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
   const anFuerStartMatch = text.match(/^\s*(?:an|für)\s+([a-zäöüß][a-zäöüß\-]*)\b/i);
   if (anFuerStartMatch && anFuerStartMatch[1]) {
     const name = anFuerStartMatch[1].trim();
-    const bodyStart = anFuerStartMatch.index! + anFuerStartMatch[0].length;
-    const rawBodyText = text.slice(bodyStart).trim();
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^\\s*(?:an|für)\\s+${escapedName}\\b\\s*`, 'i');
+    const origMatch = origText.match(pattern);
+    const rawBodyText = origMatch && origMatch.index !== undefined
+      ? origText.slice(origMatch.index + origMatch[0].length).trim()
+      : text.slice(anFuerStartMatch.index! + anFuerStartMatch[0].length).trim();
     const bodyText = cleanEmailBodyFromCommand(rawBodyText, name);
     console.log('[intent-router][intent4.2][fixed-name] Extracted name from "an/für <name>":', name);
     return {
@@ -848,12 +883,14 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
   const anNameMatch = text.match(/\ban\s+([a-z0-9äöüß]+)\b/i);
   if (anNameMatch && anNameMatch[1]) {
     const name = anNameMatch[1].trim();
-    // Extract body: everything after "an <name>"
-    const bodyStart = anNameMatch.index! + anNameMatch[0].length;
-    const rawBodyText = text.slice(bodyStart).trim();
-    // Clean body text from command phrases
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const namePattern = new RegExp(`\\ban\\s+${escapedName}\\b\\s*`, 'i');
+    const origMatch = origText.match(namePattern);
+    const rawBodyText = origMatch && origMatch.index !== undefined
+      ? origText.slice(origMatch.index + origMatch[0].length).trim()
+      : text.slice(anNameMatch.index! + anNameMatch[0].length).trim();
     const bodyText = cleanEmailBodyFromCommand(rawBodyText, name);
-    
+    console.log('[intent-router][body-clean] preserved politeness words for email-intent');
     console.log('[intent-router][intent4.2][fixed-name] Extracted name from "an <name>":', name);
     return {
       toNameRaw: name,
@@ -1177,6 +1214,21 @@ function detectLassWissenCommand(normalized: string, original: string): VoiceInt
 function detectStatusBrainCommand(normalized: string, original: string): VoiceIntent | null {
   const text = normalized.trim();
   const origText = original.trim();
+
+  // ============================================================
+  // EXCLUSION: Status-Brain DARF NICHT greifen bei Email-Intent-Patterns
+  // ============================================================
+  const hasEmailIntentPattern =
+    /\b(?:schreibe|schreib|mail|sende|schick|entwurf|kreiere)\s+an\b/i.test(text) ||
+    /\b(?:schreibe|schreib|mail|sende|schick|entwurf|kreiere)\s+an\b/i.test(origText) ||
+    /\b(?:entwurf|vorlage)\s+(?:an|für|fur|fuer)\s+/i.test(text) ||
+    /\b(?:entwurf|vorlage)\s+(?:an|für|fur|fuer)\s+/i.test(origText) ||
+    /\b(?:erstelle|kreiere)\s+(?:eine\s+)?nachricht\s+(?:für|fur|fuer)\s+/i.test(text) ||
+    /\b(?:erstelle|kreiere)\s+(?:eine\s+)?nachricht\s+(?:für|fur|fuer)\s+/i.test(origText);
+  if (hasEmailIntentPattern) {
+    console.log('[status-brain] skipped because email-intent detected');
+    return null;
+  }
 
   // ============================================================
   // EXCLUSION: Status-Brain DARF NICHT greifen bei "schreib ... nicht senden"
@@ -2939,8 +2991,9 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
       console.log('[intent-router][schick-name-direct][cancel-body-strip] after:', bodyHintRaw.slice(0, 60));
     }
 
-    // Body normalisieren für bodyHint (lowercase, Unicode clean)
-    let bodyHint = normalize(bodyHintRaw);
+    // Body normalisieren für bodyHint (Höflichkeitswörter mal, eben, kurz, bitte, noch erhalten)
+    let bodyHint = normalizeForEmailBody(bodyHintRaw);
+    console.log('[intent-router][body-clean] preserved politeness words for email-intent');
 
     // Wenn body nach Bereinigung leer ist, kein Match
     if (!bodyHint || bodyHint.length === 0) {
@@ -2965,6 +3018,11 @@ const DRAFT_RECIPIENT_STOP_TOKENS = new Set([
   'sag', 'dass', 'ich', 'wir', 'du', 'er', 'sie', 'es', 'betreff', 'hier', 'kurze', 'kurzer', 'bitte', 'danke', 'hoffe',
   'bin', 'habe', 'hab', 'kann', 'brauche', 'moechte', 'mochte', 'will', 'komme', 'brauch', 'moecht',
 ]);
+/** Nach "Betreff X": Subject endet, Body startet bei diesen Wörtern (ruf mich, kannst du, ...). */
+const DRAFT_SUBJECT_END_TOKENS = new Set([
+  'ruf', 'rufe', 'schreib', 'schreibe', 'sende', 'schick', 'schicke', 'kannst', 'kannste',
+  'bitte', 'melde', 'gib', 'sag', 'erinnere', 'wir', 'ich',
+]);
 
 /** Nur auf Betreff anwenden: ASR liefert z.B. "ruckruf", titlecase wird "Ruckruf" – korrigieren zu "Rückruf". */
 function fixGermanSubjectUmlauts(input: string): string {
@@ -2988,16 +3046,17 @@ function isRecipientStopToken(tokens: string[], i: number): boolean {
   return false;
 }
 
+/** Prefix für Draft/Vorlage/Erstelle (normalisiert: fuer; Original: für). */
+const DRAFT_ENTWURF_PREFIX_RE = /^(?:(entwurf|draft|vorlage)\s+(an|fuer|fur|für)\s+|(erstelle|kreiere)\s+(eine\s+)?nachricht\s+(fuer|fur|für)\s+)/i;
+
 /**
  * [intent-router][draft-entwurf] Helper
- * Teilt normalisierten Text nach "entwurf an" in Empfänger, optional Betreff und Body.
+ * Teilt normalisierten Text nach "entwurf an|für", "vorlage an|für", "erstelle nachricht für" etc. in Empfänger, optional Betreff und Body.
  * Output: { toRaw, subject?, bodyHint }
  */
 function splitDraftRecipientSubjectBody(text: string): { toRaw: string; subject?: string; bodyHint: string } | null {
   const t = (text || '').trim().replace(/\s+/g, ' ').trim();
-  const prefixPattern = /^(entwurf|draft)\s+an\s+/i;
-  if (!prefixPattern.test(t)) return null;
-  const prefixMatch = t.match(prefixPattern);
+  const prefixMatch = t.match(DRAFT_ENTWURF_PREFIX_RE);
   if (!prefixMatch) return null;
   const afterPrefix = t.slice(prefixMatch[0].length).trim();
   if (!afterPrefix) return null;
@@ -3015,7 +3074,8 @@ function splitDraftRecipientSubjectBody(text: string): { toRaw: string; subject?
     if (betreffIdx >= 0 && betreffIdx + 1 < restTokens.length) {
       const subjectTokens: string[] = [];
       for (let k = betreffIdx + 1; k < restTokens.length; k++) {
-        if (DRAFT_GREETING_TOKENS.has(restTokens[k].toLowerCase())) break;
+        const tk = restTokens[k].toLowerCase();
+        if (DRAFT_GREETING_TOKENS.has(tk) || DRAFT_SUBJECT_END_TOKENS.has(tk)) break;
         subjectTokens.push(restTokens[k]);
       }
       subject = subjectTokens.join(' ').trim() || undefined;
@@ -3041,14 +3101,15 @@ function splitDraftRecipientSubjectBody(text: string): { toRaw: string; subject?
   const toRaw = tokens.slice(0, recipientEnd).join(' ').trim();
   let restAfterRecipient = tokens.slice(recipientEnd).join(' ').trim();
 
-  // B) Betreff: "betreff X" -> subject = X, bodyHint = Rest nach X bis Greeting/Body
+  // B) Betreff: "betreff X" -> subject = X, bodyHint = Rest nach X bis Greeting/Body-Start
   let subject: string | undefined;
   const restTokens = restAfterRecipient.split(/\s+/).filter(Boolean);
   const betreffIdx = restTokens.findIndex((x) => x.toLowerCase() === 'betreff');
   if (betreffIdx >= 0) {
     const subjectTokens: string[] = [];
     for (let k = betreffIdx + 1; k < restTokens.length; k++) {
-      if (DRAFT_GREETING_TOKENS.has(restTokens[k].toLowerCase())) break;
+      const tk = restTokens[k].toLowerCase();
+      if (DRAFT_GREETING_TOKENS.has(tk) || DRAFT_SUBJECT_END_TOKENS.has(tk)) break;
       subjectTokens.push(restTokens[k]);
     }
     subject = subjectTokens.join(' ').trim() || undefined;
@@ -3334,7 +3395,7 @@ function detectDraftEntwurfPattern(original: string, normalized: string): {
   if (nameEndInOriginal >= 0) {
     bodyCandidate = original.slice(nameEndInOriginal).trim();
   } else {
-    const prefixMatchOriginal = original.match(/^(entwurf|draft)\s+an\s+/i);
+    const prefixMatchOriginal = original.match(DRAFT_ENTWURF_PREFIX_RE);
     if (prefixMatchOriginal) {
       const afterPrefixOriginal = original.slice(prefixMatchOriginal[0].length).trim();
       const nameEndMatch = findNameEndPositionInOriginal(afterPrefixOriginal, nameTokens);
@@ -3396,8 +3457,7 @@ function detectDraftEntwurfPattern(original: string, normalized: string): {
 function extractNameFromOriginal(original: string, nameTokens: string[]): string {
   if (!original || nameTokens.length === 0) return '';
   
-  // Finde "entwurf an " oder "draft an " im Original
-  const prefixMatch = original.match(/^(entwurf|draft)\s+an\s+/i);
+  const prefixMatch = original.match(DRAFT_ENTWURF_PREFIX_RE);
   if (!prefixMatch) return '';
   
   const afterPrefix = original.slice(prefixMatch[0].length).trim();
@@ -3443,7 +3503,7 @@ function extractNameFromOriginal(original: string, nameTokens: string[]): string
 function findNameEndInOriginal(original: string, nameTokens: string[]): number {
   if (!original || nameTokens.length === 0) return -1;
   
-  const prefixMatch = original.match(/^(entwurf|draft)\s+an\s+/i);
+  const prefixMatch = original.match(DRAFT_ENTWURF_PREFIX_RE);
   if (!prefixMatch) return -1;
   
   const afterPrefix = original.slice(prefixMatch[0].length);
@@ -5041,6 +5101,27 @@ function applyCancelPhraseOverride(intent: VoiceIntent, raw: string, normalized:
   return intent;
 }
 
+function subjectEditToVoiceIntent(
+  se: import("../../logic/subject_edit").SubjectEditIntent,
+  rawCommand: string
+): VoiceIntent | null {
+  const raw = rawCommand ?? "";
+  switch (se.type) {
+    case "email-subject-set":
+      return { type: "email-subject-set", payload: { subject: se.value, rawCommand: raw } };
+    case "email-subject-append":
+      return { type: "email-subject-append", payload: { append: se.value, rawCommand: raw } };
+    case "email-subject-clear":
+      return { type: "email-subject-clear", payload: { rawCommand: raw } };
+    case "email-subject-replace":
+      return { type: "email-subject-replace", payload: { subject: se.value, rawCommand: raw } };
+    case "email-subject-replace-part":
+      return { type: "email-subject-replace-part", payload: { from: se.from, to: se.to, rawCommand: raw } };
+    default:
+      return null;
+  }
+}
+
 /**
  * Routet Voice-Intents basierend auf dem gesprochenen Text.
  * 
@@ -5099,6 +5180,56 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
   if (!text) {
     return { type: "unknown" };
+  }
+
+  // ============================================================
+  // SUBJECT-EDIT: Betreff setzen/anhaengen/loeschen/ersetzen (hoechste Prioritaet)
+  // Vor whatsapp-style-preview-smart; niemals email-compose auslösen.
+  // ============================================================
+  const subjectEdit = parseSubjectEditIntent(original);
+  if (subjectEdit) {
+    const converted = subjectEditToVoiceIntent(subjectEdit, original);
+    if (converted) {
+      console.log("[intent-router][subject-edit] matched", subjectEdit.type);
+      return converted;
+    }
+  }
+
+  // ============================================================
+  // SEND-COMMAND-GUARD: Reiner Send-Befehl bei offenem Composer → email-send (kein AI)
+  // Muss FRÜH laufen (VOR whatsapp-style-preview-smart und allen Compose-Fallbacks).
+  // Verhindert z.B. "Lass die Nachricht zukommen." als compose (to=lass, body=Die Nachricht zukommen).
+  // ============================================================
+  const hasComposer = typeof (globalThis as any).window !== 'undefined' && typeof ((globalThis as any).window as any).__fm_send_mail_now === 'function';
+  const t = text.trim().replace(/[.,:;!?]+$/g, '').trim();
+  const isSendCommand =
+    /^(?:abschicken|absenden|versenden|senden|sofort senden|jetzt senden|sende jetzt|raus damit|ab dafür|schick ab|schick raus|sende raus|send raus|gib raus|gib es raus)$/i.test(t)
+    || /^(?:lass|schick|sende|send)\s+(?:die\s+)?(?:nachricht|mail|e-?\s*mail)\s+(?:bitte\s+)?(?:raus|ab|los|jetzt|sofort|zukommen|versenden|abschicken)$/i.test(t)
+    || /^(?:lass\s+(?:die\s+)?(?:nachricht|mail|e-?\s*mail)\s+zukommen)$/i.test(t);
+  if (hasComposer && isSendCommand) {
+    console.log('[intent-router][send-command-guard] matched -> email-send (composer open)', { t });
+    return { type: 'email-send' };
+  }
+
+  // ============================================================
+  // APPEND-GUARD: "Füge folgendes hinzu ...", "Hängen dran ...", "Ergänze ..." etc. bei offenem Composer → email-append
+  // Muss VOR whatsapp-style-preview-smart stehen, damit nicht to=Hängen, body=dran.
+  // ============================================================
+  const hasAppendComposer =
+    typeof (globalThis as any).window !== 'undefined'
+    && typeof ((globalThis as any).window as any).__fm_get_mail_body === 'function'
+    && typeof ((globalThis as any).window as any).__fm_set_mail_body === 'function';
+  const APPEND_INTRO_RE = /^(?:(?:fuege|fuge)\s+(?:noch\s+)?(?:folgendes\s+)?hinzu|erganze(?:\s+noch)?(?:\s+bitte)?|erweitere(?:\s+(?:das|die\s+mail|die\s+nachricht))?(?:\s+noch)?|(?:hang(?:e|en)?|haeng(?:e|en)?)\s+(?:das\s+)?dran|pack(?:\s+noch)?(?:\s+bitte)?\s+dazu|setz(?:\s+noch)?(?:\s+bitte)?\s+dahinter|(?:fuege|fuge)\s+am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+hinzu|am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+dazu)\b/i;
+  const isAppendCommand = hasAppendComposer && APPEND_INTRO_RE.test(text);
+  if (isAppendCommand) {
+    const appendIntroOrigRe = /^(?:(?:füge|fuege|fuge)\s+(?:noch\s+)?(?:folgendes\s+)?hinzu|(?:ergänze|erganze)(?:\s+noch)?(?:\s+bitte)?|(?:erweitere)(?:\s+(?:das|die\s+mail|die\s+nachricht))?(?:\s+noch)?(?:\s+bitte)?|(?:hängen|haengen|hangen|hänge|haenge|hange|häng|haeng|hang)\s+(?:das\s+)?dran|pack(?:\s+noch)?(?:\s+bitte)?\s+dazu|setz(?:\s+noch)?(?:\s+bitte)?\s+dahinter|(?:füge|fuege|fuge)\s+am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+hinzu|am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+dazu)/i;
+    const introMatch = original.match(appendIntroOrigRe);
+    const rest = introMatch ? original.slice(introMatch[0].length) : original;
+    let appendText = rest.replace(/^[.,:;\s-]+/, '').replace(/^(?:dran|dazu|dahinter)\b\s*/gi, '').trim();
+    if (appendText.length > 0) {
+      console.log('[intent-router][append-guard] matched -> email-append', { appendPreview: appendText.slice(0, 40) });
+      return { type: 'email-append', payload: { appendText }, meta: { source: 'append-guard' } };
+    }
   }
 
   // ============================================================
@@ -6906,6 +7037,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         console.log("[intent-router][draft-entwurf] E-Mail-Adresse extrahiert:", extractedEmail);
       }
 
+      console.log("[intent-router] email-intent matched via 'entwurf/vorlage/erstelle'");
       console.log('[intent-router][draft-entwurf] matched', {
         toNameRaw: toRaw,
         bodyPreview: bodyHint.substring(0, 50),
