@@ -18,6 +18,7 @@ import { tryParseWritePreview } from "../../logic/wizard4/write_preview_parser";
 import { tryParseCancelledSendToPreview } from "../../logic/wizard4/cancel_preview_parser";
 import { hasCancelPhrase, stripCancelPhraseFromBody } from "../../logic/wizard4/cancel_phrase";
 import { parseSubjectEditIntent } from "../../logic/subject_edit";
+import { getLastAction } from "./voice_action_store";
 
 export type Wizard3OneShotPayload = {
   rawText: string; // komplette Original-Sprachnachricht
@@ -25,7 +26,7 @@ export type Wizard3OneShotPayload = {
 
 export type VoiceIntent =
   | { type: "navigate"; target: "control-center" | "lead-radar" | "leads" | "mail-compose" | "voice-diagnostics" }
-  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; bodyHint?: string; bodyHintRaw?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean }; statusBrain?: { category: StatusCategory; usedTemplate: boolean }; freeDictationMeta?: FreeDictationMeta; source?: string; autoSend?: boolean; forcePreviewOnly?: boolean; forcePreviewOnlyReason?: string; uiHint?: string; cancelled?: boolean; disableSendPhraseDetection?: boolean } }
+  | { type: "email-compose"; toRaw?: string; to?: string; subjectHint?: string; explicitSubject?: string; bodyHint?: string; bodyHintRaw?: string; meta?: { statusEmail?: { isStatus: boolean; rawText: string; toNameRaw: string | null; statusText: string | null; autoSend?: boolean }; statusBrain?: { category: StatusCategory; usedTemplate: boolean }; freeDictationMeta?: FreeDictationMeta; source?: string; autoSend?: boolean; forcePreviewOnly?: boolean; forcePreviewOnlyReason?: string; uiHint?: string; cancelled?: boolean; disableSendPhraseDetection?: boolean } }
   | { type: "email-append"; meta?: { autoSend?: boolean; source?: string }; payload: { appendText: string } }
   | { type: "wizard3-one-shot"; payload: Wizard3OneShotPayload }
   | { type: "wizard2-edit-anrede"; newAnrede: string }
@@ -39,6 +40,14 @@ export type VoiceIntent =
   | { type: "email-subject-clear"; payload: { rawCommand?: string } }
   | { type: "email-subject-replace"; payload: { subject: string; rawCommand?: string } }
   | { type: "email-subject-replace-part"; payload: { from: string; to: string; rawCommand?: string } }
+  | { type: "email-body-replace-all"; payload: { bodyRaw?: string; text?: string } }
+  | { type: "email-body-delete-last-sentence"; payload: { n?: number } }
+  | { type: "sentence-delete-last-n"; payload: { n: number } }
+  | { type: "sentence-delete-nth"; payload: { n: number } }
+  | { type: "sentence-replace-first"; payload: { text: string } }
+  | { type: "sentence-replace-last"; payload: { text: string } }
+  | { type: "sentence-replace-n"; payload: { n: number; text: string } }
+  | { type: "email-body-replace-first-sentence"; payload: { n?: number; replacement: string } }
   | { type: "leads-filter"; range: "today" | "yesterday" | "week" }
   | { type: "last-action" }
   | { type: "ai-chat"; query: string }
@@ -129,6 +138,10 @@ function normalize(text: string) {
   
   // Mehrfachspaces nach Soft-Word-Entfernung wieder normalisieren
   normalized = normalized.replace(/\s+/g, ' ').trim();
+  // FM PATCH: ASR-Toleranz "er setzte"/"er setze" -> "ersetze"
+  normalized = normalized.replace(/\ber\s*set(?:ze|zte)\b/gi, 'ersetze');
+  // FM PATCH: ASR-Toleranz "ersetze seit 2 ..." -> "ersetze satz 2 ..."
+  normalized = normalized.replace(/^(ersetze)\s+seit(\s+\d{1,2}\b)/i, "$1 satz$2");
   
   return normalized;
 }
@@ -4088,6 +4101,37 @@ function detectAnSendenPattern(original: string, normalized: string): {
 
 /** Tokens, ab denen der Body beginnt (Subject endet davor). */
 const BODY_START_TOKENS = ['ich', 'wir', 'bitte', 'hi', 'hallo', 'ruf', 'rufe', 'kannst', 'könnt', 'denk', 'erinner'];
+const BODY_START_WORDS_FROM_SOURCE = new Set(["hi", "hallo", "hey", "moin", "servus", "guten", "hier", "ich"]);
+
+function extractExplicitSubjectFromSource(sourceText: string): string | undefined {
+  const src = (sourceText ?? "").toString();
+  if (!src.trim()) return undefined;
+  const keywordMatch = /\bbetreff\b/i.exec(src);
+  if (!keywordMatch || keywordMatch.index == null) return undefined;
+
+  let rest = src.slice(keywordMatch.index + keywordMatch[0].length).trim();
+  rest = rest.replace(/^[:\-–—\s]+/, "").trim();
+  if (!rest) return undefined;
+
+  const tokens = rest.split(/\s+/).filter(Boolean);
+  const subjectTokens: string[] = [];
+
+  for (const rawToken of tokens) {
+    const token = rawToken.replace(/^[`"'„“‚‘]+|[`"'„“‚‘]+$/g, "").trim();
+    if (!token) continue;
+    const lower = token.toLowerCase();
+    if (subjectTokens.length > 0 && BODY_START_WORDS_FROM_SOURCE.has(lower)) break;
+
+    const endsSentence = /[.!?]+$/.test(token);
+    const cleanedToken = token.replace(/[.!?]+$/g, "").trim();
+    if (cleanedToken) subjectTokens.push(cleanedToken);
+    if (endsSentence) break;
+    if (subjectTokens.length >= 8) break;
+  }
+
+  const subject = subjectTokens.join(" ").replace(/[,:;\-–—]+$/g, "").trim();
+  return subject || undefined;
+}
 
 /**
  * Extrahiert Betreff aus bodyHint/bodyHintRaw, wenn "betreff"/"titel"/"subject" vorkommt.
@@ -5196,6 +5240,217 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   }
 
   // ============================================================
+  // EMAIL BODY - REPLACE ALL
+  // ============================================================
+  const replaceAllMatch = text.match(
+    /^(?:(?:ersetze|ersetz|er\s*setze|er\s*setzte)\s+(?:die\s+(?:aktuelle\s+)?mail|die\s+e(?:-|\s)?mail|den\s+kompletten\s+text|alles)(?:\s+(?:durch|mit))?|(?:loesch|losch|lösch|loesche|losche|lösche)\s+die\s+(?:aktuelle\s+)?mail\s+und\s+(?:schreibe|schreib)\s+stattdessen|(?:schreibe|schreib)\s+stattdessen(?:\s+anstelle(?:\s+dessen)?)?|(?:schreibe|schreib)\s+anstelle(?:\s+dessen)?|neue\s+nachricht\s+stattdessen|mach\s+eine\s+neue\s+version)\b[\s:.,\-–—]*(.*)$/i
+  );
+  if (replaceAllMatch) {
+    const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+    const composerOpen = !!(w && (typeof w.__fm_set_mail_body === "function" || typeof w.__fm_get_mail_body === "function"));
+    const lastAction = getLastAction();
+    const hasDraftContext = !!(lastAction && lastAction.kind === "email-compose");
+    if (!composerOpen && !hasDraftContext) {
+      console.log("[intent-router][email-body-replace-all] skipped by guard", {
+        originalText: original,
+        composerOpen,
+        hasDraftContext,
+      });
+    } else {
+    const fullText = original ?? "";
+    let body = fullText;
+    const splitMatch = fullText.match(/(?:durch|mit)\s+(.*)$/i);
+    if (splitMatch && splitMatch[1]) {
+      body = splitMatch[1].trim();
+    } else {
+      body = fullText
+        .replace(/(?:ersetze|ersetz|er\s*setze|er\s*setzte)\s+(?:die\s+e(?:-|\s)?mail|den\s+kompletten\s+text|alles)/i, "")
+        .replace(/(?:loesch|losch|lösch|loesche|losche|lösche)\s+die\s+(?:aktuelle\s+)?mail\s+und\s+(?:schreibe|schreib)\s+stattdessen/i, "")
+        .replace(/(?:schreibe|schreib)\s+stattdessen(?:\s+anstelle(?:\s+dessen)?)?/i, "")
+        .replace(/(?:schreibe|schreib)\s+anstelle(?:\s+dessen)?/i, "")
+        .replace(/^(?:durch|mit)\b[\s:.,-]*/i, "")
+        .replace(/schreibe\s+stattdessen/i, "")
+        .replace(/neue\s+nachricht\s+stattdessen/i, "")
+        .replace(/neue\s+nachricht/i, "")
+        .replace(/mach\s+eine\s+neue\s+version/i, "")
+        .trim();
+    }
+
+    if (!splitMatch) {
+      const dotIdx = fullText.indexOf(".");
+      if (dotIdx >= 0 && dotIdx < fullText.length - 1) {
+        const afterDot = fullText.slice(dotIdx + 1).trim();
+        if (afterDot.length > 0) body = afterDot;
+      }
+    }
+    body = body
+      .replace(/^(?:durch\s+)?(?:folgende(?:n)?\s+nachricht|folgende|folgendes)\b/i, "")
+      .replace(/^[,.:;\s\-–—]+/, "")
+      .replace(/\s+/g, " ")
+      .trim();
+      if (body.length === 0) {
+        console.log("[intent-router][email-body-replace-all] skipped empty replacement", {
+          originalText: original,
+          composerOpen,
+          hasDraftContext,
+        });
+      } else {
+        console.log("[intent-router][email-body-replace-all] matched", {
+          originalText: original,
+          extractedReplacement: body,
+          guardReason: composerOpen ? "composerOpen" : "hasDraftContext",
+        });
+        return {
+          type: "email-body-replace-all",
+          payload: { bodyRaw: body, text: body },
+        };
+      }
+    }
+  }
+
+  // ============================================================
+  // SENTENCE-EDIT (nur bei offenem Composer)
+  // ============================================================
+  {
+    const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+    const hasSentenceComposer =
+      !!w &&
+      typeof w.__fm_get_mail_body === "function" &&
+      typeof w.__fm_set_mail_body === "function";
+
+    const parseSmallGermanNumber = (raw: string): number => {
+      const v = (raw ?? "").toLowerCase().trim();
+      if (v === "1" || v === "eins" || v === "ein" || v === "eine" || v === "einen") return 1;
+      if (v === "2" || v === "zwei") return 2;
+      if (v === "3" || v === "drei") return 3;
+      if (v === "4" || v === "vier") return 4;
+      if (v === "5" || v === "fuenf" || v === "funf" || v === "fünf") return 5;
+      const num = Number.parseInt(v, 10);
+      if (Number.isFinite(num)) return Math.max(1, Math.min(5, num));
+      return 1;
+    };
+
+    const parseSentenceOrdinalOrNumber = (raw: string): number => {
+      const v = (raw ?? "").toLowerCase().trim().replace(/\.$/, "");
+      const map: Record<string, number> = {
+        "1": 1, "eins": 1, "ein": 1, "eine": 1, "einen": 1, "erste": 1, "ersten": 1,
+        "2": 2, "zwei": 2, "zweite": 2, "zweiten": 2,
+        "3": 3, "drei": 3, "dritte": 3, "dritten": 3,
+        "4": 4, "vier": 4, "vierte": 4, "vierten": 4,
+        "5": 5, "fünf": 5, "funf": 5, "fuenf": 5, "fünfte": 5, "fuenfte": 5, "funfte": 5, "fünften": 5, "fuenften": 5, "funften": 5,
+        "6": 6, "sechs": 6, "sechste": 6, "sechsten": 6,
+        "7": 7, "sieben": 7, "siebte": 7, "siebten": 7,
+        "8": 8, "acht": 8, "achte": 8, "achten": 8,
+        "9": 9, "neun": 9, "neunte": 9, "neunten": 9,
+        "10": 10, "zehn": 10, "zehnte": 10, "zehnten": 10,
+        "11": 11, "elf": 11, "elfte": 11, "elften": 11,
+        "12": 12, "zwölf": 12, "zwolf": 12, "zwoelf": 12, "zwölfte": 12, "zwoelfte": 12, "zwölften": 12, "zwoelften": 12,
+        "13": 13, "dreizehn": 13, "dreizehnte": 13, "dreizehnten": 13,
+        "14": 14, "vierzehn": 14, "vierzehnte": 14, "vierzehnten": 14,
+        "15": 15, "fünfzehn": 15, "funfzehn": 15, "fuenfzehn": 15, "fünfzehnte": 15, "fuenfzehnte": 15, "fünfzehnten": 15, "fuenfzehnten": 15,
+        "16": 16, "sechzehn": 16, "sechzehnte": 16, "sechzehnten": 16,
+        "17": 17, "siebzehn": 17, "siebzehnte": 17, "siebzehnten": 17,
+        "18": 18, "achtzehn": 18, "achtzehnte": 18, "achtzehnten": 18,
+        "19": 19, "neunzehn": 19, "neunzehnte": 19, "neunzehnten": 19,
+        "20": 20, "zwanzig": 20, "zwanzigste": 20, "zwanzigsten": 20,
+      };
+      if (map[v] != null) return map[v];
+      const n = Number.parseInt(v, 10);
+      if (!Number.isFinite(n)) return -1;
+      return Math.max(1, Math.min(20, n));
+    };
+
+    const lastAction = getLastAction();
+    const hasDraftContext = !!(lastAction && lastAction.kind === "email-compose");
+    const hasSentenceEditContext = hasSentenceComposer || hasDraftContext;
+
+    const hasSentenceEditPhrase = /(?:letzten\s+\w*\s*satz|letzten\s+\w*\s*satze|ersten\s+\w*\s*satz|ersten\s+\w*\s*satze|zweiten\s+\w*\s*satz|dritten\s+\w*\s*satz|vierten\s+\w*\s*satz|fuenften\s+\w*\s*satz|sechsten\s+\w*\s*satz|siebten\s+\w*\s*satz|achten\s+\w*\s*satz|neunten\s+\w*\s*satz|zehnten\s+\w*\s*satz)/i.test(text)
+      || /(?:schreib(?:e)?\s+stattdessen|anstelle(?:\s+dessen)?|satz\s+\d+|\d+\.?\s*satz|ersten|letzten)/i.test(text);
+    if (hasSentenceEditPhrase && !hasSentenceEditContext) {
+      console.log("[intent-router][sentence-edit] skipped (composer not open)");
+      return { type: "unknown" };
+    }
+
+    const deleteLastN = text.match(/^(?:loesch(?:e)?|losch(?:e)?|entfern(?:e)?|mach|nimm(?:\s+weg)?)\s+(?:bitte\s+)?(?:mal\s+)?(?:noch\s+)?(?:die\s+)?letzten\s+(\d+|eins|ein|eine|einen|zwei|drei|vier|fuenf|funf)\s+(?:saetze|satze|satz)(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i);
+    if (deleteLastN && hasSentenceEditContext) {
+      const n = parseSmallGermanNumber(deleteLastN[1]);
+      console.log("[intent-router][sentence-edit-delete-last-n] matched", { n });
+      return { type: "sentence-delete-last-n", payload: { n } };
+    }
+
+    const deleteLastOne = text.match(/^(?:loesch(?:e)?|losch(?:e)?|entferne|mach)\s+(?:den\s+)?letzten\s+satz(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i);
+    if (deleteLastOne && hasSentenceEditContext) {
+      return { type: "email-body-delete-last-sentence", payload: { n: 1 } };
+    }
+
+    const deleteNth =
+      original.match(/^(?:loesch(?:e)?|losch(?:e)?|lösch(?:e)?|entfern(?:e)?|streich(?:e)?)\s+(?:den\s+)?(?:satz\s+(\d{1,2})|(\d{1,2})\.?\s+satz|([a-zäöüß]+)\s+satz)(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i) ||
+      original.match(/^(?:loesch(?:e)?|losch(?:e)?|lösch(?:e)?|entfern(?:e)?|streich(?:e)?)\s+satz\s+(\d{1,2})(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i);
+    if (deleteNth && hasSentenceEditContext) {
+      const rawN = (deleteNth[1] ?? deleteNth[2] ?? deleteNth[3] ?? deleteNth[4] ?? "").trim();
+      const n = parseSentenceOrdinalOrNumber(rawN);
+      if (n >= 1) {
+        console.log(`[sentence] routed edit delete-nth from intent_router n=${n}`);
+        return { type: "sentence-delete-nth", payload: { n } };
+      }
+    }
+
+    const replaceFirstOne =
+      original.match(/^(?:ersetze|ersetz|er\s*setze|er\s*setzte|tausche)\s+den\s+ersten\s+satz\s+(?:durch|gegen|mit)\s*[:\-–—]?\s*(.+)$/i) ||
+      original.match(/^mach\s+aus\s+dem\s+ersten\s+satz\s*[:\-–—]?\s*(.+)$/i);
+    if (replaceFirstOne && hasSentenceEditContext) {
+      const replacement = (replaceFirstOne[1] ?? "").trim();
+      return { type: "email-body-replace-first-sentence", payload: { n: 1, replacement } };
+    }
+
+    const replaceFirstN =
+      original.match(/^(?:ersetze|ersetz|er\s*setze|er\s*setzte|tausche)\s+die\s+ersten\s+(zwei|drei|vier|fünf|funf|[2-5])\s+s(?:ä|a)tze\s+(?:durch|gegen|mit)\s*[:\-–—]?\s*(.+)$/i);
+    if (replaceFirstN && hasSentenceEditContext) {
+      const n = parseSmallGermanNumber(replaceFirstN[1]);
+      const replacement = (replaceFirstN[2] ?? "").trim();
+      return { type: "email-body-replace-first-sentence", payload: { n, replacement } };
+    }
+
+    const replaceFirst = original.match(/^(?:ersetze|ersetz|er\s*setze|er\s*setzte|setze)\s+(?:den\s+)?(?:ersten|1\.?)\s+satz\s+(?:durch|auf|mit)\s*[:\-–—]?\s*(.+)$/i);
+    if (replaceFirst && hasSentenceEditContext) {
+      const replacement = (replaceFirst[1] ?? "").trim();
+      if (replacement.length > 0) {
+        console.log("[sentence] routed edit replace-* from intent_router");
+        return { type: "sentence-replace-first", payload: { text: replacement } };
+      }
+    }
+
+    const replaceLast = original.match(/^(?:ersetze|ersetz|er\s*setze|er\s*setzte|setze)\s+(?:den\s+)?letzten\s+satz\s+(?:durch|auf|mit)\s*[:\-–—]?\s*(.+)$/i);
+    if (replaceLast && hasSentenceEditContext) {
+      const replacement = (replaceLast[1] ?? "").trim();
+      if (replacement.length > 0) {
+        console.log("[sentence] routed edit replace-* from intent_router");
+        return { type: "sentence-replace-last", payload: { text: replacement } };
+      }
+    }
+
+    const replaceN =
+      original.match(/^(?:ersetze|ersetz|er\s*setze|er\s*setzte|setze)\s+(?:den\s+)?(?:(satz|seit)\s+(\d{1,2})|(\d{1,2})\.?\s+(satz|seit)|(?:den\s+)?([a-zäöüß]+)\s+(satz|seit))\s+(?:durch|auf|mit)\s*[:\-–—]?\s*(.+)$/i);
+    if (replaceN && hasSentenceEditContext) {
+      const rawN = (replaceN[2] ?? replaceN[3] ?? replaceN[5] ?? "").trim();
+      const n = parseSentenceOrdinalOrNumber(rawN);
+      const replacement = (replaceN[7] ?? "").trim();
+      const aliasTokenA = (replaceN[1] ?? "").toLowerCase();
+      const aliasTokenB = (replaceN[4] ?? "").toLowerCase();
+      const aliasTokenC = (replaceN[6] ?? "").toLowerCase();
+      const sinceAliasDetected =
+        aliasTokenA === "seit" || aliasTokenB === "seit" || aliasTokenC === "seit";
+      if (sinceAliasDetected) {
+        console.log(`[sentence] asr-alias detected: since->satz n=${n}`);
+      }
+      if (replacement.length > 0 && n >= 1) {
+        console.log("[sentence] routed edit replace-* from intent_router");
+        return { type: "sentence-replace-n", payload: { n, text: replacement } };
+      }
+    }
+  }
+
+  // ============================================================
   // SEND-COMMAND-GUARD: Reiner Send-Befehl bei offenem Composer → email-send (kein AI)
   // Muss FRÜH laufen (VOR whatsapp-style-preview-smart und allen Compose-Fallbacks).
   // Verhindert z.B. "Lass die Nachricht zukommen." als compose (to=lass, body=Die Nachricht zukommen).
@@ -5442,6 +5697,16 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         normalizedLength: fdIntent.bodyHint.length
       });
     }
+    if (fdIntent.type === "email-compose") {
+      const explicitSubjectFromSource = extractExplicitSubjectFromSource(original);
+      if (explicitSubjectFromSource) {
+        fdIntent.explicitSubject = explicitSubjectFromSource;
+        if (!fdIntent.subjectHint || !fdIntent.subjectHint.trim()) {
+          fdIntent.subjectHint = explicitSubjectFromSource;
+        }
+        console.log(`[intent-router][subject-from-source] explicitSubject="${explicitSubjectFromSource}"`);
+      }
+    }
     
     console.log(
       "[intent-router][free-dictation][A3.4] Freitext-Diktat erkannt:",
@@ -5488,6 +5753,14 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     if (extractedEmail) {
       emailIntent.to = extractedEmail;
       console.log("[intent-router][free-dictation][A3.4] E-Mail-Adresse extrahiert:", extractedEmail);
+    }
+    const explicitSubjectFromSource = extractExplicitSubjectFromSource(original);
+    if (explicitSubjectFromSource && emailIntent.type === "email-compose") {
+      emailIntent.explicitSubject = explicitSubjectFromSource;
+      if (!emailIntent.subjectHint || !emailIntent.subjectHint.trim()) {
+        emailIntent.subjectHint = explicitSubjectFromSource;
+      }
+      console.log(`[intent-router][subject-from-source] explicitSubject="${explicitSubjectFromSource}"`);
     }
 
     // Finaler Cancel-Phrase Override

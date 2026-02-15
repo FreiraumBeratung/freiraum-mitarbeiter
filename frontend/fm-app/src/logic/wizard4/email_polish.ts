@@ -210,11 +210,7 @@ Gib NUR den korrigierten E-Mail-Body zurück, ohne Erklärungen, ohne Labels, oh
 
     if (err.name === 'AbortError') {
       const isSendNow = mode === 'sendNow';
-      if (isSendNow) {
-        console.warn('[email-polish] fallback -> sending without polish (sendNow=true, timeout nach', timeoutMs, 'ms)', { mode, bodyLength: originalBody.length });
-      } else {
-        console.warn('[email-polish] Request abgebrochen (Timeout nach', timeoutMs, 'ms)', { mode, bodyLength: originalBody.length });
-      }
+      console.warn("[email-polish] skipped due to timeout – fallback to original body");
       return {
         ok: false,
         body: originalBody,

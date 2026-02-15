@@ -8,7 +8,7 @@
 const BODY_START_WORDS = new Set([
   'ruf', 'rufe', 'schreib', 'schreibe', 'sende', 'schick', 'schicke',
   'kannst', 'kannste', 'bitte', 'melde', 'gib', 'sag', 'erinnere',
-  'wir', 'ich'  // Satzstart ("wir müssen", "ich komme")
+  'wir', 'ich', 'hi', 'hallo', 'hey', 'moin', 'servus', 'guten', 'hier'  // Satzstart ("wir müssen", "ich komme")
 ]);
 
 function isBodyStartWord(w: string): boolean {
@@ -54,10 +54,13 @@ export function stripSubjectCommand(input: string): { text: string; explicitSubj
   const words = subjectCandidate.split(/\s+/).filter(Boolean);
 
   if (words.length > 1) {
-    // Form ohne Komma: subject = 1 oder 2 Wörter; wenn 2. Wort Body-Start-Wort, nur 1 Wort
+    // Form ohne Komma: subject = 1 oder 2 Wörter; bei Body-Startwort früh stoppen
     let subjectWordCount = 2;
-    if (words.length >= 2 && isBodyStartWord(words[1])) {
-      subjectWordCount = 1;
+    for (let i = 1; i < words.length; i += 1) {
+      if (isBodyStartWord(words[i])) {
+        subjectWordCount = Math.min(subjectWordCount, i);
+        break;
+      }
     }
     subjectWordCount = Math.min(subjectWordCount, words.length);
     subject = words.slice(0, subjectWordCount).join(' ');

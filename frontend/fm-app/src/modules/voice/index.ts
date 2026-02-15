@@ -27,6 +27,10 @@ import {
   subjectReplacePart,
   subjectClear,
 } from "./subject_edit";
+import {
+  deleteLastNSentences,
+  replaceFirstNSentences,
+} from "../../utils/sentence_utils";
 
 declare global {
   interface Window {
@@ -39,6 +43,10 @@ declare global {
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
     __fm_subject_manually_edited?: boolean;
+    __fm_pending_body_replace?: string | null;
+    __fm_subject_locked?: boolean;
+    __fm_subject_locked_value?: string | null;
+    __fm_wizard4_last_draft?: any;
   }
 }
 
@@ -75,6 +83,22 @@ async function waitForSendNowFn(
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   return null;
+}
+
+async function waitForMailBodySetter(
+  timeoutMs = 1500,
+  intervalMs = 30
+): Promise<{ setter: null | ((text: string) => void); waitedMs: number }> {
+  if (typeof window === "undefined") return { setter: null, waitedMs: 0 };
+  const w = window as any;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (typeof w.__fm_set_mail_body === "function") {
+      return { setter: w.__fm_set_mail_body as (text: string) => void, waitedMs: Date.now() - startedAt };
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return { setter: null, waitedMs: Date.now() - startedAt };
 }
 
 /**
@@ -121,6 +145,44 @@ function stripSendControlPhrases(s: string): string {
 function normalizeAppend(s: string): string {
   if (!s || typeof s !== "string") return "";
   return s.trim().replace(/^[.,:;\s-]+/, "").trim();
+}
+
+// FM PATCH: Nur bei leerem Body den ersten alphabetischen Buchstaben im Append groß setzen.
+function normalizeAppendWhenBodyEmpty(currentBody: string, appendText: string): string {
+  const cur = (currentBody ?? "").toString();
+  const add = (appendText ?? "").toString();
+  if (cur.trim().length !== 0) return add;
+  const trimmedLeading = add.replace(/^\s+/, "");
+  const firstLetterMatch = /[A-Za-zÄÖÜäöüß]/.exec(trimmedLeading);
+  if (!firstLetterMatch || firstLetterMatch.index < 0) return trimmedLeading;
+  const i = firstLetterMatch.index;
+  return trimmedLeading.slice(0, i) + trimmedLeading.charAt(i).toUpperCase() + trimmedLeading.slice(i + 1);
+}
+
+// FM PATCH: Expliziten Betreff von trailing Empfängernamen bereinigen ("Rückruf Thomas" -> "Rückruf").
+function cleanupSubjectTrailingRecipient(subject: string, toName?: string): string {
+  const subjRaw = (subject ?? "").toString().trim();
+  const toRaw = (toName ?? "").toString().trim();
+  if (!subjRaw || !toRaw) return subjRaw;
+
+  const stripTailPunct = (s: string) => s.replace(/[\s.,:;\-]+$/g, "").trim();
+  const subj = stripTailPunct(subjRaw);
+  const name = stripTailPunct(toRaw);
+  if (!subj || !name) return subjRaw;
+
+  const subjLower = subj.toLowerCase();
+  const nameLower = name.toLowerCase();
+  if (!subjLower.endsWith(nameLower)) return subjRaw;
+
+  const cutAt = subj.length - name.length;
+  if (cutAt < 0) return subjRaw;
+  if (cutAt > 0) {
+    const prev = subj.charAt(cutAt - 1);
+    if (prev !== " " && prev !== "\t") return subjRaw;
+  }
+
+  const cleaned = stripTailPunct(subj.slice(0, cutAt));
+  return cleaned || subjRaw;
 }
 
 /** Fügt appendText nahtlos an current Body an (keine Extra-Leerzeilen). */
@@ -1132,8 +1194,14 @@ function applyEmailToComposeUI(params: {
   }
 
   if (subject && typeof window !== "undefined" && (window as any).__fm_set_mail_subject) {
-    console.log(`${logPrefix}: __fm_set_mail_subject setting subject=`, JSON.stringify(subject), '(from resolvedSubject/draft)');
-    (window as any).__fm_set_mail_subject(subject);
+    const currentSubject = ((window as any).__fm_get_mail_subject?.() ?? "").toString().trim();
+    const nextSubject = String(subject).trim();
+    if (currentSubject !== nextSubject) {
+      console.log(`${logPrefix}: __fm_set_mail_subject setting subject=`, JSON.stringify(nextSubject), '(from resolvedSubject/draft)');
+      (window as any).__fm_set_mail_subject(nextSubject);
+    } else {
+      console.log(`${logPrefix}: __fm_set_mail_subject skipped (unchanged)`);
+    }
   }
 
   // Body setzen (auch wenn leer - wichtig für previewOnly)
@@ -1354,10 +1422,27 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           });
 
           // Subject aus Intent übernehmen (höhere Priorität)
-          const intentSubject = (intent as any)?.subject ?? intent.subjectHint;
-          if (intentSubject && typeof intentSubject === 'string' && intentSubject.trim() && wizard4Draft) {
-            wizard4Draft.subject = intentSubject.trim();
-            console.log('[wizard4][subject-from-intent] subject übernommen:', wizard4Draft.subject);
+          const intentExplicitSubject = ((intent as any)?.explicitSubject ?? "").toString().trim();
+          const recipientForIntentSubjectCleanup =
+            ((intent as any).toRaw ?? (intent as any).toName ?? wizard4Draft?.toName ?? "").toString();
+          if (intentExplicitSubject && wizard4Draft) {
+            const cleanedIntentExplicitSubject = cleanupSubjectTrailingRecipient(
+              intentExplicitSubject,
+              recipientForIntentSubjectCleanup
+            );
+            wizard4Draft.subject = cleanedIntentExplicitSubject;
+            (wizard4Draft as any).hasExplicitSubject = true;
+            (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
+            w.__fm_subject_locked = true;
+            w.__fm_subject_locked_value = cleanedIntentExplicitSubject;
+            console.log(`[wizard4][subject-lock] locked subject="${cleanedIntentExplicitSubject}"`);
+            console.log('[wizard4][subject-from-intent-source] subject übernommen:', wizard4Draft.subject);
+          } else {
+            const intentSubject = (intent as any)?.subject ?? intent.subjectHint;
+            if (intentSubject && typeof intentSubject === 'string' && intentSubject.trim() && wizard4Draft) {
+              wizard4Draft.subject = intentSubject.trim();
+              console.log('[wizard4][subject-from-intent] subject übernommen:', wizard4Draft.subject);
+            }
           }
           
           // EXPLICIT BODY WINS: Wenn ein expliziter bodyHint vorhanden ist, überschreibe den generierten Body sofort
@@ -1432,8 +1517,22 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             const { text: bodyWithoutSubject, explicitSubject } = stripSubjectCommand(sanitizedBody);
             if (explicitSubject && bodyWithoutSubject !== sanitizedBody) {
               sanitizedBody = bodyWithoutSubject.trim();
-              wizard4Draft.subject = explicitSubject;
+              const recipientForSubjectCleanup =
+                ((intent as any).toRaw ?? (intent as any).toName ?? wizard4Draft?.toName ?? "").toString();
+              const subjectBeforeCleanup = explicitSubject;
+              const cleanedExplicitSubject = cleanupSubjectTrailingRecipient(subjectBeforeCleanup, recipientForSubjectCleanup);
+              if (cleanedExplicitSubject !== subjectBeforeCleanup) {
+                console.log("[subject-cleanup] removed trailing recipient from subject", {
+                  before: subjectBeforeCleanup,
+                  after: cleanedExplicitSubject,
+                });
+              }
+              wizard4Draft.subject = cleanedExplicitSubject;
               (wizard4Draft as any).hasExplicitSubject = true;
+              (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
+              w.__fm_subject_locked = true;
+              w.__fm_subject_locked_value = cleanedExplicitSubject;
+              console.log(`[wizard4][subject-lock] locked subject="${cleanedExplicitSubject}"`);
               console.log('[wizard4][subject-command-strip] explicitSubject=', explicitSubject, 'draft.subject=', wizard4Draft.subject);
             }
 
@@ -2061,16 +2160,34 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const emailIntentForSubject: any = intent;
       const freeDictationMetaForSubject = emailIntentForSubject?.meta?.freeDictationMeta;
       const hasExplicitSubject = !!(wizard4Draft as any)?.hasExplicitSubject && wizard4Draft?.subject?.trim();
+      const intentExplicitSubjectTrimmed = (emailIntentForSubject?.explicitSubject && typeof emailIntentForSubject?.explicitSubject === 'string')
+        ? String(emailIntentForSubject?.explicitSubject).trim()
+        : '';
       const draftSubjectTrimmed = wizard4Draft?.subject?.trim();
       const intentSubjectTrimmed = (emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint) && typeof (emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint) === 'string'
         ? String((emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint)).trim()
         : '';
+      const isSubjectLocked = !!w.__fm_subject_locked || !!(wizard4Draft as any)?.meta?.subjectLocked;
+      const lockedSubjectValue = ((w.__fm_subject_locked_value ?? '') as string).toString().trim();
+      const currentUiSubject = ((w.__fm_get_mail_subject?.() ?? '') as string).toString().trim();
       let subject: string;
 
       if ((w as any).__fm_subject_manually_edited && typeof (w as any).__fm_get_mail_subject === 'function') {
         const uiSubject = ((w as any).__fm_get_mail_subject() ?? '').toString().trim();
         subject = uiSubject || 'Kurze Info';
         console.log('[wizard4][subject] keeping manual-edit, skip override:', subject);
+      } else if (intentExplicitSubjectTrimmed) {
+        subject = intentExplicitSubjectTrimmed;
+        w.__fm_subject_locked = true;
+        w.__fm_subject_locked_value = intentExplicitSubjectTrimmed;
+        (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
+        console.log(`[wizard4][subject-lock] locked subject="${intentExplicitSubjectTrimmed}"`);
+        console.log('[wizard4][subject] using explicitSubject from source:', subject);
+      } else if (isSubjectLocked) {
+        subject = currentUiSubject || lockedSubjectValue || draftSubjectTrimmed || 'Kurze Info';
+        (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
+        console.log('[wizard4][subject-lock] keep existing subject because locked');
+        console.log('[wizard4][subject-lock] skip heuristic override because locked');
       } else if (hasExplicitSubject || draftSubjectTrimmed) {
         subject = (wizard4Draft!.subject ?? '').trim();
         console.log('[wizard4][subject] keeping explicitSubject/draft, skip override:', subject);
@@ -2645,7 +2762,398 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     return;
   }
 
+  if (intent.type === "email-body-replace-all") {
+    console.log("[sentence] edit intent -> subject untouched");
+    const payload = intent.payload as { text?: string; bodyRaw?: string };
+    const requestedRaw = (payload?.text ?? payload?.bodyRaw ?? "").toString();
+    const cleaned = requestedRaw.replace(/^\.+/, "").trim();
+
+    if (!cleaned) {
+      const w = typeof window !== "undefined" ? (window as any) : null;
+      if (w) {
+        w.__fm_last_hint = { kind: "missing_body", message: "Kein Text erkannt. Sag den neuen Mailtext bitte nochmal.", ts: Date.now() };
+      }
+      if (typeof window?.dispatchEvent === "function") window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      PartnerBotBus.say("Kein Text erkannt. Sag den neuen Mailtext bitte nochmal.");
+      return;
+    }
+
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const hadSetterBefore = !!w?.__fm_set_mail_body && typeof w.__fm_set_mail_body === "function";
+    (async () => {
+      let totalWaitMs = 0;
+      let waitResult = await waitForMailBodySetter(1500, 30);
+      totalWaitMs += waitResult.waitedMs;
+      let setter = waitResult.setter;
+
+      if (!setter) {
+        console.log("[body-replace] composer setter missing, opening compose fallback");
+        try {
+          navigate("/mail/compose");
+        } catch {}
+        waitResult = await waitForMailBodySetter(1500, 30);
+        totalWaitMs += waitResult.waitedMs;
+        setter = waitResult.setter;
+      }
+
+      console.log(`[body-replace] composerFnsAvailable=${!!setter}, waitedMs=${totalWaitMs}, hadSetterBefore=${hadSetterBefore}`);
+
+      if (setter) {
+        const beforeBody = (window as any).__fm_get_mail_body?.() ?? "";
+        (window as any).__fm_set_mail_body?.(cleaned);
+        await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+        const afterBody = (window as any).__fm_get_mail_body?.() ?? "";
+        console.log("[body-replace] requested=", cleaned);
+        console.log("[body-replace] before=", beforeBody);
+        console.log("[body-replace] after=", afterBody);
+        if ((String(afterBody).trim()) === cleaned.trim()) {
+          console.log("[body-replace] applied ok");
+        } else {
+          console.warn("[body-replace] mismatch detected");
+        }
+      } else if (w) {
+        w.__fm_pending_body_replace = cleaned;
+        console.warn("[body-replace] setter unavailable after wait, stored pending body replace");
+      }
+
+      triggerEmotion("success");
+      PartnerBotBus.say("Text ersetzt.");
+    })().catch((err) => {
+      console.error("[body-replace] apply failed", err);
+      if (w) w.__fm_pending_body_replace = cleaned;
+      triggerEmotion("error");
+      PartnerBotBus.say("Fehler beim Ersetzen des Textes.");
+    });
+    return;
+  }
+
+  if (intent.type === "email-body-delete-last-sentence") {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const nRaw = (intent.payload as { n?: number })?.n;
+    const n = Math.max(1, Math.min(5, Number.isFinite(nRaw as number) ? Math.floor(nRaw as number) : 1));
+    const before = (w?.__fm_get_mail_body?.() ?? "").toString();
+    if (!before.trim()) {
+      console.warn("[sentence] delete-last no-op (empty body)");
+      return;
+    }
+    const { after } = deleteLastNSentences(before, n);
+    w?.__fm_set_mail_body?.(after);
+    (async () => {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      const afterUi = (w?.__fm_get_mail_body?.() ?? "").toString();
+      console.log("[sentence] delete-last", {
+        n,
+        beforePreview: before.slice(0, 120),
+        afterPreview: afterUi.slice(0, 120),
+      });
+    })();
+    return;
+  }
+
+  if (intent.type === "sentence-delete-last-n") {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const nRaw = (intent.payload as { n?: number })?.n;
+    const n = Math.max(1, Math.min(5, Number.isFinite(nRaw as number) ? Math.floor(nRaw as number) : 1));
+    const before = (w?.__fm_get_mail_body?.() ?? "").toString();
+
+    const protectAbbreviations = (text: string): string =>
+      text.replace(/\bz\.\s*b\./gi, (m) => m.replace(/\./g, "__DOT__"));
+    const restoreAbbreviations = (text: string): string =>
+      text.replace(/__DOT__/g, ".");
+
+    const splitSentences = (text: string): string[] => {
+      const src = (text ?? "").replace(/\r\n/g, "\n").trim();
+      if (!src) return [];
+      const protectedText = protectAbbreviations(src);
+      const parts = protectedText
+        .split(/(?<=[.!?]+)\s+|\n+/g)
+        .map((s) => restoreAbbreviations(s).trim())
+        .filter(Boolean);
+      return parts;
+    };
+
+    const sentences = splitSentences(before);
+    const sentenceCount = sentences.length;
+    let targetAfter = "";
+
+    if (sentenceCount === 0) {
+      targetAfter = "";
+    } else if (n >= sentenceCount) {
+      targetAfter = "";
+    } else {
+      targetAfter = sentences.slice(0, sentenceCount - n).join(" ").replace(/\s+/g, " ").trim();
+    }
+
+    console.info(
+      `[sentence] delete-last-n n=${n} sentences=${sentenceCount} beforeLen=${before.length} afterLen=${targetAfter.length} before="${before.slice(0, 80)}" after="${targetAfter.slice(0, 80)}"`
+    );
+
+    if (typeof w?.__fm_set_mail_body === "function") {
+      w.__fm_set_mail_body(targetAfter);
+    } else {
+      console.warn("[sentence] delete-last-n setter missing");
+      return;
+    }
+    (async () => {
+      // FM PATCH: Readback stabilisieren (kurzes Wait + 1 Retry)
+      const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+      let waitedMs = 0;
+      await sleep(80);
+      waitedMs += 80;
+
+      const hasGetter = typeof w?.__fm_get_mail_body === "function";
+      let readback = hasGetter ? (w.__fm_get_mail_body?.() ?? "").toString() : targetAfter;
+      if (hasGetter && readback.trim() !== targetAfter.trim()) {
+        await sleep(120);
+        waitedMs += 120;
+        readback = (w.__fm_get_mail_body?.() ?? "").toString();
+      }
+
+      const ok = readback.trim() === targetAfter.trim();
+      console.info(
+        `[sentence] delete-last-n verify ok=${ok} waitedMs=${waitedMs} n=${n} sentences=${sentenceCount} beforeLen=${before.length} computedAfterLen=${targetAfter.length} readbackLen=${readback.length} readback="${readback.slice(0, 80)}"`
+      );
+    })();
+    return;
+  }
+
+  if (intent.type === "sentence-delete-nth") {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const nRaw = (intent.payload as { n?: number })?.n;
+    const n = Math.max(1, Math.min(20, Number.isFinite(nRaw as number) ? Math.floor(nRaw as number) : 1));
+    const before = (w?.__fm_get_mail_body?.() ?? "").toString();
+
+    const protectAbbreviations = (text: string): string =>
+      text.replace(/\bz\.\s*b\./gi, (m) => m.replace(/\./g, "__DOT__"));
+    const restoreAbbreviations = (text: string): string =>
+      text.replace(/__DOT__/g, ".");
+    const splitSentences = (text: string): string[] => {
+      const src = (text ?? "").replace(/\r\n/g, "\n").trim();
+      if (!src) return [];
+      const protectedText = protectAbbreviations(src);
+      return protectedText
+        .split(/(?<=[.!?]+)\s+|\n+/g)
+        .map((s) => restoreAbbreviations(s).trim())
+        .filter(Boolean);
+    };
+    const normalizeSentenceForJoin = (raw: string): string => {
+      let s = (raw ?? "").toString().trim();
+      s = s.replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "").trim();
+      if (!s) return "";
+      s = s.replace(/\s+/g, " ");
+      if (!/[.!?]$/.test(s)) s = `${s}.`;
+      return s;
+    };
+
+    const sentences = splitSentences(before);
+    const idx = n - 1;
+    if (idx < 0 || idx >= sentences.length) {
+      console.warn(`[sentence] delete-nth invalid index n=${n} len=${sentences.length}`);
+      return;
+    }
+
+    const after = sentences
+      .filter((_, i) => i !== idx)
+      .map(normalizeSentenceForJoin)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    console.info(
+      `[sentence] delete-nth n=${n} idx=${idx} sentencesBefore=${sentences.length} sentencesAfter=${Math.max(0, sentences.length - 1)} beforeLen=${before.length} afterLen=${after.length}`
+    );
+
+    if (typeof w?.__fm_set_mail_body === "function") {
+      w.__fm_set_mail_body(after);
+    } else {
+      console.warn("[sentence] delete-nth setter missing");
+      return;
+    }
+    (async () => {
+      const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+      let waitedMs = 0;
+      await sleep(80);
+      waitedMs += 80;
+      const hasGetter = typeof w?.__fm_get_mail_body === "function";
+      let readback = hasGetter ? (w.__fm_get_mail_body?.() ?? "").toString() : after;
+      if (hasGetter && readback.trim() !== after.trim()) {
+        await sleep(120);
+        waitedMs += 120;
+        readback = (w.__fm_get_mail_body?.() ?? "").toString();
+      }
+      const ok = readback.trim() === after.trim();
+      console.info(`[sentence] delete-nth verify ok=${ok} waitedMs=${waitedMs} readbackLen=${readback.length} computedAfterLen=${after.length}`);
+    })();
+    return;
+  }
+
+  // FM PATCH: Step 2 sentence-replace (first/last/n)
+  const applySentenceReplace = async (
+    mode: "first" | "last" | "n",
+    payload: { text?: string; n?: number }
+  ) => {
+    console.log("[sentence] edit intent -> subject untouched");
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    if (!w || typeof w.__fm_get_mail_body !== "function" || typeof w.__fm_set_mail_body !== "function") {
+      console.warn("[sentence] replace no-op (composer fns missing)");
+      return;
+    }
+
+    const before = (w.__fm_get_mail_body?.() ?? "").toString();
+    const sanitizeReplacementText = (raw: string): string =>
+      (raw ?? "")
+        .toString()
+        .trim()
+        .replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "")
+        .trim();
+    const replacement = sanitizeReplacementText((payload?.text ?? "").toString());
+    const n = Math.max(1, Math.min(20, Number.isFinite(payload?.n as number) ? Math.floor(payload!.n as number) : 1));
+    if (!replacement) {
+      console.warn("[sentence] replace no-op (empty replacement)");
+      return;
+    }
+
+    const protectAbbreviations = (text: string): string =>
+      text.replace(/\bz\.\s*b\./gi, (m) => m.replace(/\./g, "__DOT__"));
+    const restoreAbbreviations = (text: string): string =>
+      text.replace(/__DOT__/g, ".");
+    const splitSentences = (text: string): string[] => {
+      const src = (text ?? "").replace(/\r\n/g, "\n").trim();
+      if (!src) return [];
+      const protectedText = protectAbbreviations(src);
+      return protectedText
+        .split(/(?<=[.!?]+)\s+|\n+/g)
+        .map((s) => restoreAbbreviations(s).trim())
+        .filter(Boolean);
+    };
+
+    const normalizeSentenceForJoin = (raw: string): string => {
+      let s = (raw ?? "").toString().trim();
+      s = s.replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "").trim();
+      if (!s) return "";
+      s = s.replace(/\s+/g, " ");
+      if (!/[.!?]$/.test(s)) s = `${s}.`;
+      return s;
+    };
+
+    const sentences = splitSentences(before);
+    if (sentences.length === 0) {
+      console.warn("[sentence] replace no-op (empty body)");
+      return;
+    }
+
+    let targetIndex = 0;
+    if (mode === "first") targetIndex = 0;
+    else if (mode === "last") targetIndex = sentences.length - 1;
+    else targetIndex = n - 1;
+
+    if (targetIndex < 0 || targetIndex >= sentences.length) {
+      console.warn("[sentence] replace invalid index", { index: targetIndex, sentenceCount: sentences.length, mode, n });
+      return;
+    }
+
+    const out = [...sentences];
+    out[targetIndex] = replacement;
+    const computedAfter = out
+      .map(normalizeSentenceForJoin)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    console.log(`[sentence] replace mode=${mode} n=${n} sentences=${sentences.length} beforeLen=${before.length} afterLen=${computedAfter.length} targetIndex=${targetIndex} before="${before.slice(0, 80)}" after="${computedAfter.slice(0, 80)}"`);
+
+    w.__fm_set_mail_body?.(computedAfter);
+
+    const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+    let waitedMs = 0;
+    await sleep(80);
+    waitedMs += 80;
+    let readback = (w.__fm_get_mail_body?.() ?? "").toString();
+    if (readback.trim() !== computedAfter.trim()) {
+      await sleep(120);
+      waitedMs += 120;
+      readback = (w.__fm_get_mail_body?.() ?? "").toString();
+    }
+    const ok = readback.trim() === computedAfter.trim();
+    console.log(`[sentence] replace verify ok=${ok} waitedMs=${waitedMs} readbackLen=${readback.length} computedAfterLen=${computedAfter.length}`);
+  };
+
+  if (intent.type === "sentence-replace-first") {
+    (async () => {
+      await applySentenceReplace("first", { text: (intent.payload as { text?: string })?.text });
+    })();
+    return;
+  }
+
+  if (intent.type === "sentence-replace-last") {
+    (async () => {
+      await applySentenceReplace("last", { text: (intent.payload as { text?: string })?.text });
+    })();
+    return;
+  }
+
+  if (intent.type === "sentence-replace-n") {
+    (async () => {
+      await applySentenceReplace("n", {
+        text: (intent.payload as { text?: string; n?: number })?.text,
+        n: (intent.payload as { text?: string; n?: number })?.n,
+      });
+    })();
+    return;
+  }
+
+  if (intent.type === "email-body-replace-first-sentence") {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const p = intent.payload as { n?: number; replacement?: string };
+    const nRaw = p?.n;
+    const n = Math.max(1, Math.min(5, Number.isFinite(nRaw as number) ? Math.floor(nRaw as number) : 1));
+    const sanitizeReplacementText = (raw: string): string =>
+      (raw ?? "")
+        .toString()
+        .trim()
+        .replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "")
+        .trim();
+    const replacement = sanitizeReplacementText((p?.replacement ?? "").toString());
+    if (!replacement) {
+      console.warn("[sentence] replace-first no-op (empty replacement)");
+      return;
+    }
+
+    const before = (w?.__fm_get_mail_body?.() ?? "").toString();
+    if (!before.trim()) {
+      console.warn("[sentence] replace-first empty_before -> set replacement as body");
+      w?.__fm_set_mail_body?.(replacement);
+      (async () => {
+        await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+        const afterUi = (w?.__fm_get_mail_body?.() ?? "").toString();
+        console.log("[sentence] replace-first", {
+          n,
+          replacementPreview: replacement.slice(0, 120),
+          beforePreview: before.slice(0, 120),
+          afterPreview: afterUi.slice(0, 120),
+        });
+      })();
+      return;
+    }
+
+    const { after } = replaceFirstNSentences(before, n, replacement);
+    w?.__fm_set_mail_body?.(after);
+    (async () => {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      const afterUi = (w?.__fm_get_mail_body?.() ?? "").toString();
+      console.log("[sentence] replace-first", {
+        n,
+        replacementPreview: replacement.slice(0, 120),
+        beforePreview: before.slice(0, 120),
+        afterPreview: afterUi.slice(0, 120),
+      });
+    })();
+    return;
+  }
+
   if (intent.type === "email-append") {
+    console.log("[sentence] edit intent -> subject untouched");
     console.log("[fm-voice] applyVoiceIntent(email-append) executed");
     const w = window as any;
 
@@ -2655,7 +3163,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       return;
     }
 
-    const appendText = (intent.payload?.appendText ?? '').trim();
+    let appendText = (intent.payload?.appendText ?? '').trim();
 
     // Kein Zusatztext → Hint "Zusatz erkannt – sag den Text, den ich anhängen soll.", Body unverändert.
     if (appendText.length === 0) {
@@ -2675,7 +3183,9 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const getBody = w.__fm_get_mail_body;
       const setBody = w.__fm_set_mail_body;
       const current = (getBody?.() ?? '').toString();
-      const add = normalizeAppend(appendText);
+      // FM PATCH: Bei leerem Body Append-Anfang groß schreiben.
+      const appendForApply = normalizeAppendWhenBodyEmpty(current, appendText);
+      const add = normalizeAppend(appendForApply);
       const merged = mergeBodies(current, add);
       const lenBefore = current.length;
       const lenAfter = merged.length;
@@ -2687,6 +3197,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     }
 
     const currentBody = w.__fm_get_mail_body();
+    // FM PATCH: Bei leerem Body Append-Anfang groß schreiben.
+    appendText = normalizeAppendWhenBodyEmpty((typeof currentBody === 'string' ? currentBody : ''), appendText);
     const bodyBefore = typeof currentBody === 'string' ? currentBody : '';
     const bodyBeforeLen = bodyBefore.length;
     console.log('[email-append] before body length=' + bodyBeforeLen);
@@ -2809,6 +3321,15 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       newSubject = subjectClear();
     }
     w.__fm_set_mail_subject(newSubject);
+    w.__fm_subject_locked = true;
+    w.__fm_subject_locked_value = newSubject;
+    if (w.__fm_wizard4_last_draft && typeof w.__fm_wizard4_last_draft === "object") {
+      w.__fm_wizard4_last_draft.meta = {
+        ...(w.__fm_wizard4_last_draft.meta ?? {}),
+        subjectLocked: true,
+      };
+    }
+    console.log(`[wizard4][subject-lock] locked subject="${newSubject}"`);
     w.__fm_subject_manually_edited = true;
     triggerEmotion("success");
     if (intent.type === "email-subject-clear") PartnerBotBus.say("Betreff gelöscht.");

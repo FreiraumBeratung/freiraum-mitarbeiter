@@ -27,6 +27,7 @@ declare global {
     __fm_send_mail_now?: () => void;
     __fm_last_hint?: { kind: string; message: string; ts: number } | null;
     __fm_subject_manually_edited?: boolean;
+    __fm_pending_body_replace?: string | null;
   }
 }
 
@@ -123,6 +124,14 @@ export default function MailCompose() {
       // KI-Text in den Body schreiben
       setBody(text);
     };
+
+    const pending = (window as any).__fm_pending_body_replace;
+    if (typeof pending === "string" && pending.trim().length > 0) {
+      try {
+        (window as any).__fm_set_mail_body(pending);
+      } catch {}
+      (window as any).__fm_pending_body_replace = null;
+    }
 
     // Globalen Setter für E-Mail-Empfänger bereitstellen
     w.__fm_set_mail_to = (addr: string) => {
