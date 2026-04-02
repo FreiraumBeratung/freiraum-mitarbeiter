@@ -55,4 +55,18 @@
 - Bei Guard-Block:
   - `[intent-router][email-body-replace-all] skipped by guard`
 
+## Sentence Insert (Index)
+
+- `Füge nach Satz 2 ein Danke dir.`  
+  Erwartung: Einfügen nach Satz 2.
+
+- `Füge vor Satz 3 ein Kurze Info.`  
+  Erwartung: Einfügen vor Satz 3.
+
+- `Füge nach dem dritten Satz ein Danke dir.`  
+  Erwartung: Wortzahl-Mapping (dritten -> 3) funktioniert.
+
+- `Füge vor dem ersten Satz ein Hi Thomas.`  
+  Erwartung: Einfügen am Anfang (vor Satz 1).
+
 

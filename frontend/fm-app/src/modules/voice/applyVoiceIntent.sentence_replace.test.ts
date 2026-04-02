@@ -61,5 +61,17 @@ describe("applyVoiceIntent sentence-replace", () => {
     await new Promise((r) => setTimeout(r, 260));
     expect(body).toBe("Hey Thomas. Ich bin gerade im Termin. Ich melde mich später.");
   });
+
+  it("Synonym: Mach aus Satz 2 Ich rufe dich morgen an", async () => {
+    processVoiceCommand("Mach aus Satz 2 Ich rufe dich morgen an", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Ich rufe dich morgen an. Ich melde mich später.");
+  });
+
+  it("Synonym: Mach aus Satz 2 folgendes Ich rufe dich morgen an", async () => {
+    processVoiceCommand("Mach aus Satz 2 folgendes Ich rufe dich morgen an", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Ich rufe dich morgen an. Ich melde mich später.");
+  });
 });
 

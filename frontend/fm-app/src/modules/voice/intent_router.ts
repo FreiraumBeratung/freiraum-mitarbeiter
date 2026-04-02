@@ -44,6 +44,7 @@ export type VoiceIntent =
   | { type: "email-body-delete-last-sentence"; payload: { n?: number } }
   | { type: "sentence-delete-last-n"; payload: { n: number } }
   | { type: "sentence-delete-nth"; payload: { n: number } }
+  | { type: "sentence-insert-nth"; payload: { position: "after" | "before"; n: number; text: string } }
   | { type: "sentence-replace-first"; payload: { text: string } }
   | { type: "sentence-replace-last"; payload: { text: string } }
   | { type: "sentence-replace-n"; payload: { n: number; text: string } }
@@ -5365,7 +5366,11 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     const hasSentenceEditContext = hasSentenceComposer || hasDraftContext;
 
     const hasSentenceEditPhrase = /(?:letzten\s+\w*\s*satz|letzten\s+\w*\s*satze|ersten\s+\w*\s*satz|ersten\s+\w*\s*satze|zweiten\s+\w*\s*satz|dritten\s+\w*\s*satz|vierten\s+\w*\s*satz|fuenften\s+\w*\s*satz|sechsten\s+\w*\s*satz|siebten\s+\w*\s*satz|achten\s+\w*\s*satz|neunten\s+\w*\s*satz|zehnten\s+\w*\s*satz)/i.test(text)
-      || /(?:schreib(?:e)?\s+stattdessen|anstelle(?:\s+dessen)?|satz\s+\d+|\d+\.?\s*satz|ersten|letzten)/i.test(text);
+      || /(?:schreib(?:e)?\s+stattdessen|anstelle(?:\s+dessen)?|satz\s+\d+|\d+\.?\s*satz|ersten|letzten)/i.test(text)
+      || /(?:(?:fuege|fuge|setze|setz)\s+(?:vor|nach)\s+(?:dem\s+)?(?:satz|\d+|ersten|zweiten|dritten|vierten|fuenften|sechsten|siebten|achten|neunten|zehnten))/i.test(text)
+      || /(?:(?:erganze|pack|setz|fug|fueg|fuge)\s+(?:noch\s+)?(?:vor|nach)\s+satz\s+\d+)/i.test(text)
+      || /(?:(?:erganze|pack|setz|fug|fueg|fuge)\s+(?:noch\s+)?vorsatz\s+\d+)/i.test(text)
+      || /(?:(?:erganze|pack|setz|fug|fueg|fuge)\s+(?:noch\s+)?vor\s+dem\s+(?:ersten|zweiten|dritten|vierten|fuenften|sechsten|siebten|achten|neunten|zehnten)\s+satz)/i.test(text);
     if (hasSentenceEditPhrase && !hasSentenceEditContext) {
       console.log("[intent-router][sentence-edit] skipped (composer not open)");
       return { type: "unknown" };
@@ -5393,6 +5398,140 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         console.log(`[sentence] routed edit delete-nth from intent_router n=${n}`);
         return { type: "sentence-delete-nth", payload: { n } };
       }
+    }
+
+    const insertNthA =
+      original.match(/^(?:fuege|füge|fuge|setze|setz)\s+(vor|nach)\s+(?:dem\s+)?(?:satz\s+(\d{1,2})|(\d{1,2})\.?\s+satz|([a-zäöüß]+)\s+satz)\s+ein\s*[:\-–—]?\s*(.+?)\s*(?:ein)?[.!?]*$/i);
+    const insertNthB =
+      original.match(/^(?:fuege|füge|fuge|setze|setz)\s+(vor|nach)\s+(?:dem\s+)?(?:satz\s+(\d{1,2})|(\d{1,2})\.?\s+satz|([a-zäöüß]+)\s+satz)\s+(?:noch\s+)?(.+?)\s*ein[.!?]*$/i);
+    const insertVorsatz =
+      original.match(/^(?:fuege|füge|fuge|setze|setz)\s+vorsatz\s+(\d{1,2})\s+ein\s*[:\-–—]?\s*(.+?)\s*(?:ein)?[.!?]*$/i) ||
+      original.match(/^(?:fuege|füge|fuge|setze|setz)\s+vorsatz\s+(\d{1,2})\s+(?:noch\s+)?(.+?)\s*ein[.!?]*$/i);
+    const insertNth = insertNthA ?? insertNthB;
+    if (insertVorsatz && hasSentenceEditContext) {
+      const n = parseSentenceOrdinalOrNumber((insertVorsatz[1] ?? "").trim());
+      const insertTextRaw = (insertVorsatz[2] ?? "").trim();
+      if (n >= 1 && insertTextRaw.length > 0) {
+        console.log(`[sentence] asr-alias detected: vorsatz->vor satz n=${n}`);
+        console.log(`[sentence] routed edit insert-nth from intent_router position=before n=${n}`);
+        return { type: "sentence-insert-nth", payload: { position: "before", n, text: insertTextRaw } };
+      }
+    }
+    if (insertNth && hasSentenceEditContext) {
+      const position = ((insertNth[1] ?? "").toLowerCase() === "vor" ? "before" : "after") as "after" | "before";
+      const rawN = (insertNth[2] ?? insertNth[3] ?? insertNth[4] ?? "").trim();
+      const n = parseSentenceOrdinalOrNumber(rawN);
+      const insertTextRaw = (insertNth[5] ?? "").trim();
+      if (n >= 1 && insertTextRaw.length > 0) {
+        console.log(`[sentence] routed edit insert-nth from intent_router position=${position} n=${n}`);
+        return { type: "sentence-insert-nth", payload: { position, n, text: insertTextRaw } };
+      }
+    }
+
+    // Synonyme für Insert AFTER (additiv, gleiche Intent-Route)
+    const insertBeforeSynonym = (() => {
+      let m =
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*(.+)$/i) ||
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*(.+)$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*hinzu[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*hinzu[.!?]*$/i) ||
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*(.+)$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*(.+?)\s*rein[.!?]*$/i);
+      if (!m) return null;
+      const n = parseSentenceOrdinalOrNumber((m[1] ?? "").trim());
+      let textRaw = (m[2] ?? "").trim();
+      textRaw = textRaw
+        .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+        .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+        .trim();
+      if (n < 1 || textRaw.length === 0) return null;
+      return { n, textRaw, full: m[0], ordinal: /vor\s+dem\s+[a-zäöüß]+\s+satz/i.test(m[0]) };
+    })();
+    const insertBeforeSynonymNoText = (() => {
+      const m =
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*$/i) ||
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?vor\s+satz\s+(\d{1,2})[\.,:]?\s*(?:hinzu)?[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?vorsatz\s+(\d{1,2})[\.,:]?\s*(?:hinzu)?[.!?]*$/i) ||
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*(?:rein)?[.!?]*$/i);
+      if (!m) return null;
+      const n = parseSentenceOrdinalOrNumber((m[1] ?? "").trim());
+      return n >= 1 ? n : null;
+    })();
+    if (insertBeforeSynonymNoText && hasSentenceEditContext) {
+      console.log("[sentence] synonym-insert-before no-op (empty text)");
+      return { type: "unknown" };
+    }
+    if (insertBeforeSynonym && hasSentenceEditContext) {
+      const fullLower = insertBeforeSynonym.full.toLowerCase();
+      if (/\bvorsatz\b/i.test(insertBeforeSynonym.full)) {
+        console.log(`[sentence] asr-alias detected: vorsatz->vor satz n=${insertBeforeSynonym.n}`);
+      }
+      if (insertBeforeSynonym.ordinal) {
+        console.log(`[sentence] synonym-insert-before detected: ordinal n=${insertBeforeSynonym.n}`);
+      } else if (fullLower.startsWith("ergänze") || fullLower.startsWith("erganze")) {
+        console.log(`[sentence] synonym-insert-before detected: "ergänze" n=${insertBeforeSynonym.n}`);
+      } else if (fullLower.startsWith("pack")) {
+        console.log(`[sentence] synonym-insert-before detected: "pack rein" n=${insertBeforeSynonym.n}`);
+      } else if (fullLower.startsWith("setz") || fullLower.startsWith("setze")) {
+        console.log(`[sentence] synonym-insert-before detected: "setz rein" n=${insertBeforeSynonym.n}`);
+      } else {
+        console.log(`[sentence] synonym-insert-before detected: "füg hinzu" n=${insertBeforeSynonym.n}`);
+      }
+      return { type: "sentence-insert-nth", payload: { position: "before", n: insertBeforeSynonym.n, text: insertBeforeSynonym.textRaw } };
+    }
+
+    const insertAfterSynonym = (() => {
+      let m =
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*(.+)$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*(.+?)\s*hinzu[.!?]*$/i);
+      if (!m) return null;
+      const n = parseSentenceOrdinalOrNumber((m[1] ?? "").trim());
+      let textRaw = (m[2] ?? "").trim();
+      textRaw = textRaw
+        .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+        .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+        .trim();
+      if (n < 1 || textRaw.length === 0) return null;
+      return { n, textRaw, full: m[0] };
+    })();
+    const insertAfterSynonymNoText = (() => {
+      const m =
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?nach\s+satz\s+(\d{1,2})[\.,:]?\s*(?:hinzu)?[.!?]*$/i);
+      if (!m) return null;
+      const n = parseSentenceOrdinalOrNumber((m[1] ?? "").trim());
+      return n >= 1 ? n : null;
+    })();
+    if (insertAfterSynonymNoText && hasSentenceEditContext) {
+      console.log("[sentence] synonym-insert-after no-op (empty text)");
+      return { type: "unknown" };
+    }
+    if (insertAfterSynonym && hasSentenceEditContext) {
+      const fullLower = insertAfterSynonym.full.toLowerCase();
+      if (fullLower.startsWith("ergänze") || fullLower.startsWith("erganze")) {
+        console.log(`[sentence] synonym-insert-after detected: "ergänze" n=${insertAfterSynonym.n}`);
+      } else if (fullLower.startsWith("pack")) {
+        console.log(`[sentence] synonym-insert-after detected: "pack rein" n=${insertAfterSynonym.n}`);
+      } else if (fullLower.startsWith("setz") || fullLower.startsWith("setze")) {
+        console.log(`[sentence] synonym-insert-after detected: "setz rein" n=${insertAfterSynonym.n}`);
+      } else {
+        console.log(`[sentence] synonym-insert-after detected: "füg hinzu" n=${insertAfterSynonym.n}`);
+      }
+      return { type: "sentence-insert-nth", payload: { position: "after", n: insertAfterSynonym.n, text: insertAfterSynonym.textRaw } };
     }
 
     const replaceFirstOne =
@@ -5448,6 +5587,99 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         return { type: "sentence-replace-n", payload: { n, text: replacement } };
       }
     }
+
+    // Synonyme für Replace Satz N (additiv, gleiche Intent-Route)
+    const replaceSynonym = (() => {
+      const machAus = original.match(/^mach\s+aus\s+satz\s+(\d{1,2})[\.,:]?\s*(?:folgendes\s*)?(.*)$/i);
+      if (machAus) {
+        const n = parseSentenceOrdinalOrNumber((machAus[1] ?? "").trim());
+        let textRaw = (machAus[2] ?? "").trim();
+        textRaw = textRaw
+          .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+          .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+          .trim();
+        if (n < 1) return null;
+        return { n, textRaw, full: machAus[0], source: "mach-aus" as const };
+      }
+      const aendere = original.match(/^(?:ändere|aendere)\s+satz\s+(\d{1,2})[\.,:]?\s*zu[\.,:]?\s*(.*)$/i);
+      if (aendere) {
+        const n = parseSentenceOrdinalOrNumber((aendere[1] ?? "").trim());
+        let textRaw = (aendere[2] ?? "").trim();
+        textRaw = textRaw
+          .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+          .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+          .trim();
+        if (n < 1) return null;
+        return { n, textRaw, full: aendere[0], source: "aendere" as const };
+      }
+      const formuliere = original.match(/^formuliere\s+satz\s+(\d{1,2})[\.,:]?\s*(?:um)?[\.,:]?\s*(.*)$/i);
+      if (formuliere) {
+        const n = parseSentenceOrdinalOrNumber((formuliere[1] ?? "").trim());
+        let textRaw = (formuliere[2] ?? "").trim();
+        textRaw = textRaw
+          .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+          .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+          .trim();
+        if (n < 1) return null;
+        return { n, textRaw, full: formuliere[0], source: "formuliere" as const };
+      }
+      const schreibe = original.match(/^schreibe\s+satz\s+(\d{1,2})[\.,:]?\s*(?:um)?[\.,:]?\s*(.*)$/i);
+      if (schreibe) {
+        const n = parseSentenceOrdinalOrNumber((schreibe[1] ?? "").trim());
+        let textRaw = (schreibe[2] ?? "").trim();
+        textRaw = textRaw
+          .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+          .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+          .trim();
+        if (n < 1) return null;
+        return { n, textRaw, full: schreibe[0], source: "schreibe" as const };
+      }
+      const ersetze = original.match(/^ersetze\s+satz\s+(\d{1,2})[\.,:]?\s*(?:durch)?[\.,:]?\s*(.*)$/i);
+      if (ersetze) {
+        const n = parseSentenceOrdinalOrNumber((ersetze[1] ?? "").trim());
+        let textRaw = (ersetze[2] ?? "").trim();
+        textRaw = textRaw
+          .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+          .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+          .trim();
+        if (n < 1) return null;
+        return { n, textRaw, full: ersetze[0], source: "ersetze" as const };
+      }
+      let m =
+        original.match(/^(?:ändere|aendere)\s+satz\s+(\d{1,2})\s+zu\s+(.+)$/i) ||
+        original.match(/^(?:ändere|aendere)\s+satz\s+(\d{1,2})\s+in\s+(.+)$/i) ||
+        original.match(/^schreib\s+satz\s+(\d{1,2})\s+um\s+in\s+(.+)$/i);
+      if (!m) return null;
+      const n = parseSentenceOrdinalOrNumber((m[1] ?? "").trim());
+      let textRaw = (m[2] ?? "").trim();
+      textRaw = textRaw
+        .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+        .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+        .trim();
+      if (n < 1 || textRaw.length === 0) return null;
+      return { n, textRaw, full: m[0], source: "other" as const };
+    })();
+    if (replaceSynonym && hasSentenceEditContext) {
+      if (replaceSynonym.textRaw.length === 0) {
+        console.log("[sentence] synonym-replace no-op");
+        return { type: "unknown" };
+      }
+      const fullLower = replaceSynonym.full.toLowerCase();
+      if (fullLower.startsWith("mach aus")) {
+        console.log(`[sentence] synonym-replace detected: "mach aus" n=${replaceSynonym.n}`);
+      } else if (fullLower.startsWith("ändere") || fullLower.startsWith("aendere")) {
+        console.log(`[sentence] synonym-replace detected: "ändere" n=${replaceSynonym.n}`);
+      } else if (fullLower.startsWith("formuliere")) {
+        console.log(`[sentence] synonym-replace detected: "formuliere" n=${replaceSynonym.n}`);
+      } else if (fullLower.startsWith("schreibe")) {
+        console.log(`[sentence] synonym-replace detected: "schreibe" n=${replaceSynonym.n}`);
+      } else if (fullLower.startsWith("ersetze")) {
+        console.log(`[sentence] synonym-replace detected: "ersetze" n=${replaceSynonym.n}`);
+      } else {
+        console.log(`[sentence] synonym-replace detected: "schreib um" n=${replaceSynonym.n}`);
+      }
+      return { type: "sentence-replace-n", payload: { n: replaceSynonym.n, text: replaceSynonym.textRaw } };
+    }
   }
 
   // ============================================================
@@ -5477,6 +5709,79 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   const APPEND_INTRO_RE = /^(?:(?:fuege|fuge)\s+(?:noch\s+)?(?:folgendes\s+)?hinzu|erganze(?:\s+noch)?(?:\s+bitte)?|erweitere(?:\s+(?:das|die\s+mail|die\s+nachricht))?(?:\s+noch)?|(?:hang(?:e|en)?|haeng(?:e|en)?)\s+(?:das\s+)?dran|pack(?:\s+noch)?(?:\s+bitte)?\s+dazu|setz(?:\s+noch)?(?:\s+bitte)?\s+dahinter|(?:fuege|fuge)\s+am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+hinzu|am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+dazu)\b/i;
   const isAppendCommand = hasAppendComposer && APPEND_INTRO_RE.test(text);
   if (isAppendCommand) {
+    const sentenceInsertPrefix = /^(?:erganze|pack|setz|fug|fueg|fuge)\s+(?:noch\s+)?(?:vor|nach)\s+satz\s+\d+\b/i;
+    const sentenceInsertVorsatzPrefix = /^(?:erganze|pack|setz|fug|fueg|fuge)\s+(?:noch\s+)?vorsatz\s+\d+\b/i;
+    const sentenceInsertOrdinalBeforePrefix = /^(?:erganze|pack)\s+(?:noch\s+)?vor\s+dem\s+(?:ersten|zweiten|dritten|vierten|fuenften|sechsten|siebten|achten|neunten|zehnten)\s+satz\b/i;
+    if (sentenceInsertPrefix.test(text) || sentenceInsertVorsatzPrefix.test(text) || sentenceInsertOrdinalBeforePrefix.test(text)) {
+      console.log("[intent-router][append-guard] skipped because sentence-insert-before pattern detected");
+      // Routing-Fallback: falls der Satz-Edit-Block nicht gegriffen hat, hier deterministisch BEFORE-Intent bauen.
+      const parseSentenceOrdinalOrNumberForAppendGuard = (raw: string): number => {
+        const v = (raw ?? "").toLowerCase().trim().replace(/\.$/, "");
+        const map: Record<string, number> = {
+          "1": 1, "eins": 1, "ein": 1, "eine": 1, "einen": 1, "erste": 1, "ersten": 1,
+          "2": 2, "zwei": 2, "zweite": 2, "zweiten": 2,
+          "3": 3, "drei": 3, "dritte": 3, "dritten": 3,
+          "4": 4, "vier": 4, "vierte": 4, "vierten": 4,
+          "5": 5, "fünf": 5, "funf": 5, "fuenf": 5, "fünfte": 5, "fuenfte": 5, "funfte": 5, "fünften": 5, "fuenften": 5, "funften": 5,
+          "6": 6, "sechs": 6, "sechste": 6, "sechsten": 6,
+          "7": 7, "sieben": 7, "siebte": 7, "siebten": 7,
+          "8": 8, "acht": 8, "achte": 8, "achten": 8,
+          "9": 9, "neun": 9, "neunte": 9, "neunten": 9,
+          "10": 10, "zehn": 10, "zehnte": 10, "zehnten": 10,
+        };
+        if (map[v] != null) return map[v];
+        const n = Number.parseInt(v, 10);
+        if (!Number.isFinite(n)) return -1;
+        return Math.max(1, Math.min(20, n));
+      };
+
+      const beforeNoTextMatch =
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*(?:rein)?[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*(?:hinzu)?[.!?]*$/i) ||
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*(?:rein)?[.!?]*$/i);
+      if (beforeNoTextMatch) {
+        const nNoText = parseSentenceOrdinalOrNumberForAppendGuard((beforeNoTextMatch[1] ?? "").trim());
+        if (nNoText >= 1) {
+          console.log("[sentence] synonym-insert-before no-op (empty text)");
+          return { type: "unknown" };
+        }
+      }
+
+      const beforeSynonymMatch =
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*(.+)$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:setz|setze)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*(.+?)\s*rein[.!?]*$/i) ||
+        original.match(/^(?:füg|fueg|fug|füge|fuege|fuge)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*(.+?)\s*hinzu[.!?]*$/i) ||
+        original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*(.+)$/i) ||
+        original.match(/^(?:pack)\s+(?:noch\s+)?vor\s+dem\s+([a-zäöüß]+)\s+satz[\.,:]?\s*(.+?)\s*rein[.!?]*$/i);
+      if (beforeSynonymMatch) {
+        const rawN = (beforeSynonymMatch[1] ?? "").trim();
+        const n = parseSentenceOrdinalOrNumberForAppendGuard(rawN);
+        let textRaw = (beforeSynonymMatch[2] ?? "").trim();
+        textRaw = textRaw
+          .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+          .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+          .trim();
+        if (/\bvorsatz\b/i.test(beforeSynonymMatch[0])) {
+          console.log(`[sentence] asr-alias detected: vorsatz->vor satz n=${n}`);
+        }
+        if (beforeSynonymMatch[0].toLowerCase().startsWith("ergänze") || beforeSynonymMatch[0].toLowerCase().startsWith("erganze")) {
+          console.log(`[sentence] synonym-insert-before detected: "ergänze" n=${n}`);
+        } else if (beforeSynonymMatch[0].toLowerCase().startsWith("pack")) {
+          console.log(`[sentence] synonym-insert-before detected: "pack rein" n=${n}`);
+        }
+        if (n >= 1 && textRaw.length > 0) {
+          console.log(`[sentence] routed edit insert-nth from intent_router position=before n=${n}`);
+          return { type: "sentence-insert-nth", payload: { position: "before", n, text: textRaw } };
+        }
+        console.log("[sentence] synonym-insert-before no-op (empty text)");
+        return { type: "unknown" };
+      }
+      return { type: "unknown" };
+    }
     const appendIntroOrigRe = /^(?:(?:füge|fuege|fuge)\s+(?:noch\s+)?(?:folgendes\s+)?hinzu|(?:ergänze|erganze)(?:\s+noch)?(?:\s+bitte)?|(?:erweitere)(?:\s+(?:das|die\s+mail|die\s+nachricht))?(?:\s+noch)?(?:\s+bitte)?|(?:hängen|haengen|hangen|hänge|haenge|hange|häng|haeng|hang)\s+(?:das\s+)?dran|pack(?:\s+noch)?(?:\s+bitte)?\s+dazu|setz(?:\s+noch)?(?:\s+bitte)?\s+dahinter|(?:füge|fuege|fuge)\s+am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+hinzu|am\s+ende(?:\s+noch)?(?:\s+bitte)?\s+dazu)/i;
     const introMatch = original.match(appendIntroOrigRe);
     const rest = introMatch ? original.slice(introMatch[0].length) : original;
@@ -7394,6 +7699,12 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         if (extractedEmail) {
           intent.to = extractedEmail;
         }
+        const explicitSubjectFromSource = extractExplicitSubjectFromSource(original);
+        if (explicitSubjectFromSource && intent.type === "email-compose") {
+          intent.explicitSubject = explicitSubjectFromSource;
+          intent.subjectHint = explicitSubjectFromSource;
+          console.log(`[intent-router][subject-from-source] explicitSubject="${explicitSubjectFromSource}"`);
+        }
 
         console.log('[intent-router][nachricht-an] matched', { toName: toRaw, subject: subjectHint, bodyPreview: bodyAfter.slice(0, 50) });
         return intent;
@@ -7490,6 +7801,12 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
             };
             const extractedEmail = extractEmailAddress(original);
             if (extractedEmail) intent.to = extractedEmail;
+            const explicitSubjectFromSource = extractExplicitSubjectFromSource(original);
+            if (explicitSubjectFromSource && intent.type === "email-compose") {
+              intent.explicitSubject = explicitSubjectFromSource;
+              intent.subjectHint = explicitSubjectFromSource;
+              console.log(`[intent-router][subject-from-source] explicitSubject="${explicitSubjectFromSource}"`);
+            }
             console.log('[intent-router][whatsapp-style-preview-smart] matched', { toName: nameRaw, subject: subjectHint, bodyPreview: bodyHint.slice(0, 50) });
             return intent;
           }

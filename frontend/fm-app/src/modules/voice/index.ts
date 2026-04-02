@@ -185,6 +185,32 @@ function cleanupSubjectTrailingRecipient(subject: string, toName?: string): stri
   return cleaned || subjRaw;
 }
 
+// FM PATCH: Expliziten Betreff aus aktuellem Compose-SourceText extrahieren.
+function extractExplicitSubjectFromComposeSource(sourceText: string): string {
+  const src = (sourceText ?? "").toString();
+  if (!src.trim()) return "";
+  const m = /\bbetreff\b/i.exec(src);
+  if (!m || m.index == null) return "";
+  let rest = src.slice(m.index + m[0].length).trim();
+  rest = rest.replace(/^[:\-–—\s]+/, "").trim();
+  if (!rest) return "";
+  const bodyStarters = new Set(["hi", "hallo", "hey", "moin", "servus", "guten", "hier", "ich"]);
+  const tokens = rest.split(/\s+/).filter(Boolean);
+  const subjectTokens: string[] = [];
+  for (const rawToken of tokens) {
+    const token = rawToken.replace(/^[`"'„“‚‘]+|[`"'„“‚‘]+$/g, "").trim();
+    if (!token) continue;
+    const lower = token.toLowerCase();
+    if (subjectTokens.length > 0 && bodyStarters.has(lower)) break;
+    const endsSentence = /[.!?]+$/.test(token);
+    const cleanedToken = token.replace(/[.!?]+$/g, "").trim();
+    if (cleanedToken) subjectTokens.push(cleanedToken);
+    if (endsSentence) break;
+    if (subjectTokens.length >= 8) break;
+  }
+  return subjectTokens.join(" ").replace(/[,:;\-–—]+$/g, "").trim();
+}
+
 /** Fügt appendText nahtlos an current Body an (keine Extra-Leerzeilen). */
 function mergeBodies(current: string, add: string): string {
   const currentTrimRight = (current ?? "").replace(/[ \t]+$/g, "");
@@ -1406,6 +1432,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const rawText = (emailIntentCheck?.meta?.source === "email-send-degrade" && (intent as any).sourceText != null)
         ? (intent as any).sourceText
         : (lastTranscript || intent.bodyHint || intent.toRaw || "");
+      const explicitSubjectFromCurrentCompose = extractExplicitSubjectFromComposeSource(rawText);
+      if (explicitSubjectFromCurrentCompose) {
+        (intent as any).explicitSubject = explicitSubjectFromCurrentCompose;
+        console.log(`[intent-router][subject-from-source] explicitSubject="${explicitSubjectFromCurrentCompose}"`);
+      }
       let wizard4Draft: any = null;
       
       if (rawText && typeof w.buildWizard4EmailFromInput === 'function') {
@@ -1422,7 +1453,10 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           });
 
           // Subject aus Intent übernehmen (höhere Priorität)
-          const intentExplicitSubject = ((intent as any)?.explicitSubject ?? "").toString().trim();
+          const intentExplicitSubject = (
+            explicitSubjectFromCurrentCompose ||
+            ((intent as any)?.explicitSubject ?? "").toString()
+          ).trim();
           const recipientForIntentSubjectCleanup =
             ((intent as any).toRaw ?? (intent as any).toName ?? wizard4Draft?.toName ?? "").toString();
           if (intentExplicitSubject && wizard4Draft) {
@@ -2160,9 +2194,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const emailIntentForSubject: any = intent;
       const freeDictationMetaForSubject = emailIntentForSubject?.meta?.freeDictationMeta;
       const hasExplicitSubject = !!(wizard4Draft as any)?.hasExplicitSubject && wizard4Draft?.subject?.trim();
-      const intentExplicitSubjectTrimmed = (emailIntentForSubject?.explicitSubject && typeof emailIntentForSubject?.explicitSubject === 'string')
-        ? String(emailIntentForSubject?.explicitSubject).trim()
-        : '';
+      const intentExplicitSubjectTrimmed = (
+        explicitSubjectFromCurrentCompose ||
+        ((emailIntentForSubject?.explicitSubject && typeof emailIntentForSubject?.explicitSubject === 'string')
+          ? String(emailIntentForSubject?.explicitSubject).trim()
+          : '')
+      ).trim();
       const draftSubjectTrimmed = wizard4Draft?.subject?.trim();
       const intentSubjectTrimmed = (emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint) && typeof (emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint) === 'string'
         ? String((emailIntentForSubject?.subject ?? emailIntentForSubject?.subjectHint)).trim()
@@ -2170,6 +2207,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const isSubjectLocked = !!w.__fm_subject_locked || !!(wizard4Draft as any)?.meta?.subjectLocked;
       const lockedSubjectValue = ((w.__fm_subject_locked_value ?? '') as string).toString().trim();
       const currentUiSubject = ((w.__fm_get_mail_subject?.() ?? '') as string).toString().trim();
+      let forceSetExplicitCurrentCompose = false;
+      let forceSetExplicitPrevious = currentUiSubject;
       let subject: string;
 
       if ((w as any).__fm_subject_manually_edited && typeof (w as any).__fm_get_mail_subject === 'function') {
@@ -2178,6 +2217,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         console.log('[wizard4][subject] keeping manual-edit, skip override:', subject);
       } else if (intentExplicitSubjectTrimmed) {
         subject = intentExplicitSubjectTrimmed;
+        forceSetExplicitCurrentCompose = true;
+        forceSetExplicitPrevious = currentUiSubject;
         w.__fm_subject_locked = true;
         w.__fm_subject_locked_value = intentExplicitSubjectTrimmed;
         (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
@@ -2585,6 +2626,18 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           body: finalBodyForUi,
           logPrefix: "[fm-voice] email-compose (Wizard4)",
         });
+        if (forceSetExplicitCurrentCompose && typeof w.__fm_set_mail_subject === "function") {
+          const prev = (forceSetExplicitPrevious ?? "").toString().trim();
+          const next = (subject ?? "").toString().trim();
+          if (next && prev !== next) {
+            console.log(`[wizard4][subject-explicit-current-compose] force subject="${next}" previous="${prev}"`);
+            try {
+              w.__fm_set_mail_subject(next);
+            } catch (err) {
+              console.error("[wizard4][subject-explicit-current-compose] force set failed", err);
+            }
+          }
+        }
         
         // Stelle sicher, dass finalToEmail IMMER gesetzt wird (auch wenn schon gesetzt)
         if (finalToEmail && typeof w.__fm_set_mail_to === 'function') {
@@ -2983,6 +3036,97 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
       const ok = readback.trim() === after.trim();
       console.info(`[sentence] delete-nth verify ok=${ok} waitedMs=${waitedMs} readbackLen=${readback.length} computedAfterLen=${after.length}`);
+    })();
+    return;
+  }
+
+  if (intent.type === "sentence-insert-nth") {
+    console.log("[sentence] edit intent -> subject untouched");
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const p = intent.payload as { position?: "after" | "before"; n?: number; text?: string };
+    const position = p?.position === "before" ? "before" : "after";
+    const n = Math.max(1, Math.min(20, Number.isFinite(p?.n as number) ? Math.floor(p!.n as number) : 1));
+    const before = (w?.__fm_get_mail_body?.() ?? "").toString();
+
+    const protectAbbreviations = (text: string): string =>
+      text.replace(/\bz\.\s*b\./gi, (m) => m.replace(/\./g, "__DOT__"));
+    const restoreAbbreviations = (text: string): string =>
+      text.replace(/__DOT__/g, ".");
+    const splitSentences = (text: string): string[] => {
+      const src = (text ?? "").replace(/\r\n/g, "\n").trim();
+      if (!src) return [];
+      const protectedText = protectAbbreviations(src);
+      return protectedText
+        .split(/(?<=[.!?]+)\s+|\n+/g)
+        .map((s) => restoreAbbreviations(s).trim())
+        .filter(Boolean);
+    };
+    const sanitizeInsertionText = (raw: string): string => {
+      let s = (raw ?? "").toString().trim();
+      s = s.replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "").trim();
+      if (!s) return "";
+      const m = /[A-Za-zÄÖÜäöüß]/.exec(s);
+      if (m && m.index >= 0) {
+        const i = m.index;
+        s = s.slice(0, i) + s.charAt(i).toUpperCase() + s.slice(i + 1);
+      }
+      return s;
+    };
+    const normalizeSentenceForJoin = (raw: string): string => {
+      let s = (raw ?? "").toString().trim();
+      s = s.replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "").trim();
+      if (!s) return "";
+      s = s.replace(/\s+/g, " ");
+      if (!/[.!?]$/.test(s)) s = `${s}.`;
+      return s;
+    };
+
+    const sentences = splitSentences(before);
+    const len = sentences.length;
+    if (n < 1 || n > len) {
+      console.warn(`[sentence] insert-nth invalid index position=${position} n=${n} len=${len}`);
+      return;
+    }
+
+    const insertText = sanitizeInsertionText((p?.text ?? "").toString());
+    if (!insertText) {
+      console.warn("[sentence] insert-nth no-op (empty insertion)");
+      return;
+    }
+
+    const insertIndex = position === "after" ? n : (n - 1);
+    const out = [...sentences];
+    out.splice(insertIndex, 0, insertText);
+    const after = out
+      .map(normalizeSentenceForJoin)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    console.info(
+      `[sentence] insert-nth position=${position} n=${n} idx=${insertIndex} sentencesBefore=${len} sentencesAfter=${out.length} beforeLen=${before.length} afterLen=${after.length}`
+    );
+
+    if (typeof w?.__fm_set_mail_body === "function") {
+      w.__fm_set_mail_body(after);
+    } else {
+      console.warn("[sentence] insert-nth setter missing");
+      return;
+    }
+    (async () => {
+      const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+      let waitedMs = 0;
+      await sleep(80);
+      waitedMs += 80;
+      const hasGetter = typeof w?.__fm_get_mail_body === "function";
+      let readback = hasGetter ? (w.__fm_get_mail_body?.() ?? "").toString() : after;
+      if (hasGetter && readback.trim() !== after.trim()) {
+        await sleep(120);
+        waitedMs += 120;
+        readback = (w.__fm_get_mail_body?.() ?? "").toString();
+      }
+      const ok = readback.trim() === after.trim();
+      console.info(`[sentence] insert-nth verify ok=${ok} waitedMs=${waitedMs} readbackLen=${readback.length} computedAfterLen=${after.length}`);
     })();
     return;
   }
