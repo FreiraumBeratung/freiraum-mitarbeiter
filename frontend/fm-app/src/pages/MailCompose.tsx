@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { PartnerBotBus } from "../components/PartnerBot";
+import AssistantPanel from "../components/AssistantPanel";
 
 // sayOnce Guard: Prevents duplicate "E-Mail wurde versendet" announcements
 // Cooldown: 1200ms (only for mail_sent key)
@@ -246,7 +247,7 @@ export default function MailCompose() {
   }, [showHintFromWindow]);
 
   return (
-    <>
+    <div className="h-screen w-full bg-black text-white flex">
       {/* Toast-Notification für erfolgreichen Versand */}
       {successMessage && (
         <div
@@ -268,7 +269,7 @@ export default function MailCompose() {
           {successMessage}
         </div>
       )}
-      
+
       {/* AutoSend-Safety-Hinweis */}
       {autosendHint && (
         <div
@@ -292,46 +293,59 @@ export default function MailCompose() {
           {autosendHint}
         </div>
       )}
-      <div className="glass-card" style={{ margin: "16px auto", maxWidth: 980, padding: 18 }}>
-        <h2 style={{ fontSize: 22, marginBottom: 10 }}>E-Mail verfassen</h2>
-        <div style={{ display: "grid", gap: 10 }}>
-        <input
-          placeholder="An"
-          value={to}
-          onChange={(e) => setTo(e.target.value)}
-          className="glass-card"
-          style={{ padding: 10 }}
-        />
-        <input
-          placeholder="Betreff"
-          value={subject}
-          onChange={(e) => setSubject(e.target.value)}
-          className="glass-card"
-          style={{ padding: 10 }}
-        />
-        <textarea
-          placeholder="Nachricht"
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          rows={10}
-          className="glass-card"
-          style={{ padding: 10 }}
-        />
-        <div style={{ display: "flex", gap: 10 }}>
-          <button className="chip" onClick={handlePreview}>
-            Vorschau drucken
-          </button>
-          <button
-            className="chip chip-active"
-            data-fm-mail="send-now"
-            onClick={handleSendNow}
-          >
-            Sofort senden
-          </button>
+
+      {/* LEFT SIDE – ASSISTANT */}
+      <div className="w-[35%] min-w-[320px] flex flex-col">
+        <div className="flex-1 p-6 overflow-visible">
+          <AssistantPanel />
         </div>
       </div>
+
+      {/* RIGHT SIDE – MAIL */}
+      <div className="flex-1 flex flex-col">
+        <div className="h-full p-10 max-w-[900px] mx-auto overflow-auto">
+          <div className="glass-card" style={{ margin: "16px auto", maxWidth: 980, padding: 18 }}>
+            <h2 style={{ fontSize: 22, marginBottom: 10 }}>E-Mail verfassen</h2>
+            <div style={{ display: "grid", gap: 10 }}>
+            <input
+              placeholder="An"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="glass-card"
+              style={{ padding: 10 }}
+            />
+            <input
+              placeholder="Betreff"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              className="glass-card"
+              style={{ padding: 10 }}
+            />
+            <textarea
+              placeholder="Nachricht"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={10}
+              className="glass-card"
+              style={{ padding: 10 }}
+            />
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="chip" onClick={handlePreview}>
+                Vorschau drucken
+              </button>
+              <button
+                className="chip chip-active"
+                data-fm-mail="send-now"
+                onClick={handleSendNow}
+              >
+                Sofort senden
+              </button>
+            </div>
+          </div>
+          </div>
+        </div>
       </div>
-    </>
+    </div>
   );
 }
 

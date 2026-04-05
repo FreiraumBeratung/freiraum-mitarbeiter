@@ -113,6 +113,7 @@ describe("intent_router sentence-insert-nth", () => {
     if (intent.type === "sentence-insert-nth") {
       expect(intent.payload.position).toBe("before");
       expect(intent.payload.n).toBe(2);
+      expect(intent.payload.text).toBe("Kurze Info");
     }
     expect(intent.type).not.toBe("email-append");
     expect(intent.type).not.toBe("email-compose");
@@ -164,6 +165,7 @@ describe("intent_router sentence-insert-nth", () => {
     if (intent.type === "sentence-insert-nth") {
       expect(intent.payload.position).toBe("before");
       expect(intent.payload.n).toBe(2);
+      expect(intent.payload.text).toBe("Kurze Info");
     }
     expect(intent.type).not.toBe("email-append");
     expect(intent.type).not.toBe("email-compose");
@@ -175,6 +177,7 @@ describe("intent_router sentence-insert-nth", () => {
     if (intent.type === "sentence-insert-nth") {
       expect(intent.payload.position).toBe("before");
       expect(intent.payload.n).toBe(2);
+      expect(intent.payload.text).toBe("Kurze Info");
     }
     expect(intent.type).not.toBe("email-append");
     expect(intent.type).not.toBe("email-compose");
@@ -205,6 +208,18 @@ describe("intent_router sentence-insert-nth", () => {
   it("ASR alias before no-op: Ergänze Vorsatz 2 -> unknown", () => {
     const intent = routeVoiceIntent("Ergänze Vorsatz 2");
     expect(intent.type).toBe("unknown");
+    expect(intent.type).not.toBe("email-append");
+    expect(intent.type).not.toBe("email-compose");
+  });
+
+  it("Hauptrouter before: Ergänze vor Satz 2 Guten Tag -> before n=2", () => {
+    const intent = routeVoiceIntent("Ergänze vor Satz 2 Guten Tag");
+    expect(intent.type).toBe("sentence-insert-nth");
+    if (intent.type === "sentence-insert-nth") {
+      expect(intent.payload.position).toBe("before");
+      expect(intent.payload.n).toBe(2);
+      expect(intent.payload.text).toBe("Guten Tag");
+    }
     expect(intent.type).not.toBe("email-append");
     expect(intent.type).not.toBe("email-compose");
   });

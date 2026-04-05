@@ -47,6 +47,7 @@ export type VoiceIntent =
   | { type: "sentence-insert-nth"; payload: { position: "after" | "before"; n: number; text: string } }
   | { type: "sentence-replace-first"; payload: { text: string } }
   | { type: "sentence-replace-last"; payload: { text: string } }
+  | { type: "sentence-replace-nth"; payload: { n: number; text: string } }
   | { type: "sentence-replace-n"; payload: { n: number; text: string } }
   | { type: "email-body-replace-first-sentence"; payload: { n?: number; replacement: string } }
   | { type: "leads-filter"; range: "today" | "yesterday" | "week" }
@@ -5388,6 +5389,21 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       return { type: "email-body-delete-last-sentence", payload: { n: 1 } };
     }
 
+    const deleteNthSynonym =
+      original.match(/^(?:loesch(?:e)?|losch(?:e)?|lösch(?:e)?|entfern(?:e)?|nimm)\s+(?:den\s+)?(?:satz\s+(\d{1,2})|(\d{1,2})\.?\s+satz|([a-zäöüß]+)\s+satz)(?:\s+raus)?(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i) ||
+      original.match(/^nimm\s+satz\s+(\d{1,2})\s+raus(?:\s+bitte)?[.!?]*$/i);
+    if (deleteNthSynonym && hasSentenceEditContext) {
+      const rawN = (deleteNthSynonym[1] ?? deleteNthSynonym[2] ?? deleteNthSynonym[3] ?? deleteNthSynonym[4] ?? "").trim();
+      const n = parseSentenceOrdinalOrNumber(rawN);
+      if (n >= 1) {
+        console.log(`[sentence] synonym-delete detected n=${n}`);
+        console.log(`[sentence] routed edit delete-nth from intent_router n=${n}`);
+        return { type: "sentence-delete-nth", payload: { n } };
+      }
+      console.log("[sentence] delete-nth no-op (index out of range)");
+      return { type: "unknown" };
+    }
+
     const deleteNth =
       original.match(/^(?:loesch(?:e)?|losch(?:e)?|lösch(?:e)?|entfern(?:e)?|streich(?:e)?)\s+(?:den\s+)?(?:satz\s+(\d{1,2})|(\d{1,2})\.?\s+satz|([a-zäöüß]+)\s+satz)(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i) ||
       original.match(/^(?:loesch(?:e)?|losch(?:e)?|lösch(?:e)?|entfern(?:e)?|streich(?:e)?)\s+satz\s+(\d{1,2})(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i);
@@ -5568,6 +5584,57 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       }
     }
 
+    const formatReplaceNthText = (raw: string): string => {
+      let s = (raw ?? "")
+        .toString()
+        .trim()
+        .replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "")
+        .trim();
+      if (!s) return "";
+      const firstAlpha = /[A-Za-zÄÖÜäöüß]/.exec(s);
+      if (firstAlpha && firstAlpha.index >= 0) {
+        const i = firstAlpha.index;
+        s = s.slice(0, i) + s.charAt(i).toUpperCase() + s.slice(i + 1);
+      }
+      if (!/[.!?]$/.test(s)) s = `${s}.`;
+      return s;
+    };
+
+    const asrSetzAlias = text.match(/^6\s+satz\s+(\d{1,2})\s+auf\s+(.+)$/i);
+    const asrSetzAliasOriginal = original.match(/^6\s+satz\s+(\d{1,2})\s+auf\s+(.+)$/i);
+    const replaceNthSource = asrSetzAlias
+      ? `setz satz ${asrSetzAliasOriginal?.[1] ?? asrSetzAlias[1]} auf ${asrSetzAliasOriginal?.[2] ?? asrSetzAlias[2]}`
+      : original;
+    if (asrSetzAlias) {
+      console.log(`[sentence] asr-alias detected: 6->setz n=${asrSetzAlias[1]}`);
+    }
+
+    const replaceNthSynonym =
+      replaceNthSource.match(/^ersetze\s+satz\s+(\d{1,2})\s+mit\s*[:\-–—]?\s*(.+)$/i) ||
+      replaceNthSource.match(/^tausche\s+satz\s+(\d{1,2})\s+gegen\s*[:\-–—]?\s*(.+)$/i) ||
+      replaceNthSource.match(/^(?:ändere|aendere)\s+satz\s+(\d{1,2})\s+zu\s*[:\-–—]?\s*(.+)$/i) ||
+      replaceNthSource.match(/^mach\s+satz\s+(\d{1,2})\s+zu\s*[:\-–—]?\s*(.+)$/i) ||
+      replaceNthSource.match(/^setz\s+satz\s+(\d{1,2})\s+auf\s*[:\-–—]?\s*(.+)$/i) ||
+      replaceNthSource.match(/^satz\s+(\d{1,2})\s+soll\s+(.+?)\s+sein[.!?]*$/i);
+    if (replaceNthSynonym && hasSentenceEditContext) {
+      const n = parseSentenceOrdinalOrNumber((replaceNthSynonym[1] ?? "").trim());
+      const textRaw = formatReplaceNthText((replaceNthSynonym[2] ?? "").trim());
+      if (n >= 1 && textRaw.length > 0) {
+        const full = (replaceNthSynonym[0] ?? "").toLowerCase();
+        const isExtended =
+          full.startsWith("mach satz") ||
+          full.startsWith("setz satz") ||
+          full.startsWith("satz ");
+        if (isExtended) {
+          console.log(`[sentence] synonym-replace detected (extended) n=${n} text="${textRaw}"`);
+        } else {
+          console.log(`[sentence] synonym-replace detected n=${n} text="${textRaw}"`);
+        }
+        console.log(`[sentence] routed edit replace-nth from intent_router n=${n}`);
+        return { type: "sentence-replace-nth", payload: { n, text: textRaw } };
+      }
+    }
+
     const replaceN =
       original.match(/^(?:ersetze|ersetz|er\s*setze|er\s*setzte|setze)\s+(?:den\s+)?(?:(satz|seit)\s+(\d{1,2})|(\d{1,2})\.?\s+(satz|seit)|(?:den\s+)?([a-zäöüß]+)\s+(satz|seit))\s+(?:durch|auf|mit)\s*[:\-–—]?\s*(.+)$/i);
     if (replaceN && hasSentenceEditContext) {
@@ -5699,6 +5766,67 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   }
 
   // ============================================================
+  // SENTENCE INSERT BEFORE (Hauptrouter, vor append-guard)
+  // Dedizierter Routing-Pfad für ASR "vorsatz" / "vor satz"
+  // ============================================================
+  {
+    const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+    const hasSentenceComposer =
+      !!w &&
+      typeof w.__fm_get_mail_body === "function" &&
+      typeof w.__fm_set_mail_body === "function";
+    const lastAction = getLastAction();
+    const hasDraftContext = !!(lastAction && lastAction.kind === "email-compose");
+    const hasSentenceEditContext = hasSentenceComposer || hasDraftContext;
+
+    const parseN = (rawN: string): number => {
+      const n = Number.parseInt((rawN ?? "").trim(), 10);
+      if (!Number.isFinite(n)) return -1;
+      return Math.max(1, Math.min(20, n));
+    };
+
+    const capitalizeFirstAlpha = (value: string): string => {
+      const s = (value ?? "").trim();
+      if (!s) return "";
+      const idx = s.search(/[A-Za-zÄÖÜäöüß]/);
+      if (idx < 0) return s;
+      return s.slice(0, idx) + s.charAt(idx).toUpperCase() + s.slice(idx + 1);
+    };
+
+    const beforeMainNoText =
+      text.match(/^(?:erganze)\s+(?:vorsatz|vor\s+satz)\s+(\d{1,2})[\.,:]?\s*$/i) ||
+      text.match(/^(?:fuge|fuege)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s*(?:ein)?\s*$/i);
+    if (beforeMainNoText && hasSentenceEditContext) {
+      console.log("[sentence] synonym-insert-before no-op (empty text)");
+      return { type: "unknown" };
+    }
+
+    const beforeMain =
+      text.match(/^(?:erganze)\s+vorsatz\s+(\d{1,2})[\.,:]?\s+(.+)$/i) ||
+      text.match(/^(?:erganze)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s+(.+)$/i) ||
+      text.match(/^(?:fuge|fuege)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s+(.+?)\s*(?:ein)?[.!?]*$/i);
+    if (beforeMain && hasSentenceEditContext) {
+      const n = parseN(beforeMain[1] ?? "");
+      let parsedText = (beforeMain[2] ?? "")
+        .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
+        .replace(/\b(?:ein)\b[.!?]*$/i, "")
+        .replace(/[.!?]+$/g, "")
+        .trim();
+      parsedText = capitalizeFirstAlpha(parsedText);
+      if (n >= 1 && parsedText.length > 0) {
+        if (/\bvorsatz\b/i.test(text)) {
+          console.log(`[sentence] asr-alias detected: vorsatz->vor satz n=${n}`);
+        }
+        console.log(`[sentence] synonym-insert-before detected: "ergänze" n=${n} text="${parsedText}"`);
+        console.log(`[sentence] routed edit insert-nth from intent_router position=before n=${n}`);
+        return { type: "sentence-insert-nth", payload: { position: "before", n, text: parsedText } };
+      }
+      console.log("[sentence] synonym-insert-before no-op (empty text)");
+      return { type: "unknown" };
+    }
+  }
+
+  // ============================================================
   // APPEND-GUARD: "Füge folgendes hinzu ...", "Hängen dran ...", "Ergänze ..." etc. bei offenem Composer → email-append
   // Muss VOR whatsapp-style-preview-smart stehen, damit nicht to=Hängen, body=dran.
   // ============================================================
@@ -5734,6 +5862,13 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         if (!Number.isFinite(n)) return -1;
         return Math.max(1, Math.min(20, n));
       };
+      const capitalizeFirstAlphaForAppendGuard = (value: string): string => {
+        const s = (value ?? "").trim();
+        if (!s) return "";
+        const idx = s.search(/[A-Za-zÄÖÜäöüß]/);
+        if (idx < 0) return s;
+        return s.slice(0, idx) + s.charAt(idx).toUpperCase() + s.slice(idx + 1);
+      };
 
       const beforeNoTextMatch =
         original.match(/^(?:ergänze|erganze)\s+(?:noch\s+)?(?:vor\s+satz|vorsatz)\s+(\d{1,2})[\.,:]?\s*$/i) ||
@@ -5764,7 +5899,9 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
         textRaw = textRaw
           .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
           .replace(/\b(?:rein|hinzu)\b[.!?]*$/i, "")
+          .replace(/[.!?]+$/g, "")
           .trim();
+        textRaw = capitalizeFirstAlphaForAppendGuard(textRaw);
         if (/\bvorsatz\b/i.test(beforeSynonymMatch[0])) {
           console.log(`[sentence] asr-alias detected: vorsatz->vor satz n=${n}`);
         }
@@ -5774,7 +5911,7 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
           console.log(`[sentence] synonym-insert-before detected: "pack rein" n=${n}`);
         }
         if (n >= 1 && textRaw.length > 0) {
-          console.log(`[sentence] routed edit insert-nth from intent_router position=before n=${n}`);
+          console.log(`[sentence] routed edit insert-nth from intent_router position=before n=${n} text="${textRaw}"`);
           return { type: "sentence-insert-nth", payload: { position: "before", n, text: textRaw } };
         }
         console.log("[sentence] synonym-insert-before no-op (empty text)");

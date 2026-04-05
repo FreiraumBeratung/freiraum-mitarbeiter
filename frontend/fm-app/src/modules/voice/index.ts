@@ -3247,6 +3247,77 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     return;
   }
 
+  if (intent.type === "sentence-replace-nth") {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const p = intent.payload as { n?: number; text?: string };
+    const n = Math.max(1, Math.min(20, Number.isFinite(p?.n as number) ? Math.floor(p!.n as number) : 1));
+    const replacement = (p?.text ?? "").toString().trim();
+    if (!replacement) {
+      console.warn("[sentence] replace-nth no-op (empty replacement)");
+      return;
+    }
+
+    const before = (w?.__fm_get_mail_body?.() ?? "").toString();
+    const protectAbbreviations = (text: string): string =>
+      text.replace(/\bz\.\s*b\./gi, (m) => m.replace(/\./g, "__DOT__"));
+    const restoreAbbreviations = (text: string): string =>
+      text.replace(/__DOT__/g, ".");
+    const splitSentences = (text: string): string[] => {
+      const src = (text ?? "").replace(/\r\n/g, "\n").trim();
+      if (!src) return [];
+      const protectedText = protectAbbreviations(src);
+      return protectedText
+        .split(/(?<=[.!?]+)\s+|\n+/g)
+        .map((s) => restoreAbbreviations(s).trim())
+        .filter(Boolean);
+    };
+    const normalizeSentenceForJoin = (raw: string): string => {
+      let s = (raw ?? "").toString().trim();
+      s = s.replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "").trim();
+      if (!s) return "";
+      s = s.replace(/\s+/g, " ");
+      if (!/[.!?]$/.test(s)) s = `${s}.`;
+      return s;
+    };
+
+    const sentences = splitSentences(before);
+    const idx = n - 1;
+    if (idx < 0 || idx >= sentences.length) {
+      console.warn("[sentence] replace-nth no-op (index out of range)");
+      return;
+    }
+
+    const out = [...sentences];
+    out[idx] = replacement;
+    const after = out
+      .map(normalizeSentenceForJoin)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    console.info(`[sentence] replace-nth n=${n} idx=${idx} sentencesBefore=${sentences.length} sentencesAfter=${out.length}`);
+
+    if (typeof w?.__fm_set_mail_body === "function") {
+      w.__fm_set_mail_body(after);
+    } else {
+      console.warn("[sentence] replace-nth setter missing");
+      return;
+    }
+
+    (async () => {
+      const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+      await sleep(80);
+      let readback = (w?.__fm_get_mail_body?.() ?? "").toString();
+      if (readback.trim() !== after.trim()) {
+        await sleep(120);
+        readback = (w?.__fm_get_mail_body?.() ?? "").toString();
+      }
+      const ok = readback.trim() === after.trim();
+      console.info(`[sentence] replace-nth verify ok=${ok}`);
+    })();
+    return;
+  }
+
   if (intent.type === "email-body-replace-first-sentence") {
     const w = typeof window !== "undefined" ? (window as any) : null;
     const p = intent.payload as { n?: number; replacement?: string };

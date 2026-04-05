@@ -119,7 +119,7 @@ function Shell() {
       <VoicePoseBridge />
       <WarmVoicePrefs />
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<Navigate to="/mail/compose" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/kontakte" element={<Leads />} />
         <Route path="/leads" element={<Leads />} />
@@ -142,7 +142,7 @@ function Shell() {
       <div className="ptt-compact">
         <VoiceButton />
       </div>
-      <PartnerBot />
+      {/* <PartnerBot /> */}
     </>
   );
 }

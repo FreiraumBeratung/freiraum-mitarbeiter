@@ -73,5 +73,33 @@ describe("applyVoiceIntent sentence-replace", () => {
     await new Promise((r) => setTimeout(r, 260));
     expect(body).toBe("Hier ist Dennis. Ich rufe dich morgen an. Ich melde mich später.");
   });
+
+  it("Neu: Ersetze Satz 2 mit Ich melde mich morgen", async () => {
+    processVoiceCommand("Ersetze Satz 2 mit Ich melde mich morgen", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Ich melde mich morgen. Ich melde mich später.");
+  });
+
+  it("Neu: Tausche Satz 1 gegen Hallo Max", async () => {
+    processVoiceCommand("Tausche Satz 1 gegen Hallo Max", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hallo Max. Ich bin gerade im Termin. Ich melde mich später.");
+  });
+
+  it("Neu: Ändere Satz 3 zu Ich rufe dich heute an", async () => {
+    processVoiceCommand("Ändere Satz 3 zu Ich rufe dich heute an", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Ich bin gerade im Termin. Ich rufe dich heute an.");
+  });
+
+  it("Neu: Ersetze Satz 5 mit Test -> no-op", async () => {
+    const before = body;
+    processVoiceCommand("Ersetze Satz 5 mit Test", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe(before);
+    expect(
+      warnSpy.mock.calls.some((c) => String(c[0]).includes("replace-nth no-op (index out of range)"))
+    ).toBe(true);
+  });
 });
 

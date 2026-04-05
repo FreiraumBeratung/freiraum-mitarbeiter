@@ -33,6 +33,23 @@ describe("intent_router sentence-delete-nth", () => {
     if (intent.type === "sentence-delete-nth") expect(intent.payload.n).toBe(3);
   });
 
+  it("Entferne Satz 1 -> sentence-delete-nth(n=1)", () => {
+    const intent = routeVoiceIntent("Entferne Satz 1");
+    expect(intent.type).toBe("sentence-delete-nth");
+    if (intent.type === "sentence-delete-nth") expect(intent.payload.n).toBe(1);
+  });
+
+  it("Nimm Satz 3 raus -> sentence-delete-nth(n=3)", () => {
+    const intent = routeVoiceIntent("Nimm Satz 3 raus");
+    expect(intent.type).toBe("sentence-delete-nth");
+    if (intent.type === "sentence-delete-nth") expect(intent.payload.n).toBe(3);
+  });
+
+  it("Lösche Satz 99 -> sentence-delete-nth (execute no-op later)", () => {
+    const intent = routeVoiceIntent("Lösche Satz 99");
+    expect(intent.type).toBe("sentence-delete-nth");
+  });
+
   it("Ersetze nicht in email-compose-fallback", () => {
     const intent = routeVoiceIntent("Lösche den dritten Satz.");
     expect(intent.type).not.toBe("email-compose");

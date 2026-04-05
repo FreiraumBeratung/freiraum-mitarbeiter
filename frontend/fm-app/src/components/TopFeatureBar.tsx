@@ -4,13 +4,13 @@ import GlassChip from "./GlassChip";
 import { PartnerBotBus } from "../modules/partnerbot";
 
 const items = [
-  { label: "Control Center", path: "/control-center" },
-  { label: "Leads", path: "/leads" },
+  // { label: "Control Center", path: "/control-center" },
+  // { label: "Leads", path: "/leads" },
   { label: "E-Mail", path: "/mail/compose" },
-  { label: "Lead-Radar", path: "/lead-radar" },
-  { label: "Voice-Diagnostics", path: "/voice-diagnostics" },
-  { label: "Leads Real", path: "/leads/real" },
-  { label: "Exporte", path: "/exports" },
+  // { label: "Lead-Radar", path: "/lead-radar" },
+  // { label: "Voice-Diagnostics", path: "/voice-diagnostics" },
+  // { label: "Leads Real", path: "/leads/real" },
+  // { label: "Exporte", path: "/exports" },
 ];
 
 export default function TopFeatureBar() {
