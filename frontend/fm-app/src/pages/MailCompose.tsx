@@ -247,101 +247,53 @@ export default function MailCompose() {
   }, [showHintFromWindow]);
 
   return (
-    <div className="h-screen w-full bg-black text-white flex">
-      {/* Toast-Notification für erfolgreichen Versand */}
-      {successMessage && (
-        <div
-          className="glass-card"
-          style={{
-            position: "fixed",
-            top: 20,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 1000,
-            padding: "12px 24px",
-            borderRadius: 8,
-            backgroundColor: "rgba(0, 0, 0, 0.85)",
-            color: "white",
-            fontSize: 14,
-            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.3)",
-          }}
-        >
-          {successMessage}
-        </div>
-      )}
-
-      {/* AutoSend-Safety-Hinweis */}
-      {autosendHint && (
-        <div
-          className="glass-card"
-          style={{
-            position: "fixed",
-            top: 20,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 999,
-            padding: "12px 24px",
-            borderRadius: 8,
-            backgroundColor: "rgba(40, 40, 40, 0.95)",
-            color: "white",
-            fontSize: 13,
-            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.3)",
-            maxWidth: "600px",
-            textAlign: "center",
-          }}
-        >
-          {autosendHint}
-        </div>
-      )}
-
-      {/* LEFT SIDE – ASSISTANT */}
-      <div className="w-[35%] min-w-[320px] flex flex-col">
-        <div className="flex-1 p-6 overflow-visible">
+    <div className="w-full h-full flex">
+      <div className="flex w-full h-full">
+        {/* LEFT SIDE - ROBOT */}
+        <div className="w-1/2 flex items-center justify-center">
           <AssistantPanel />
         </div>
-      </div>
 
-      {/* RIGHT SIDE – MAIL */}
-      <div className="flex-1 flex flex-col">
-        <div className="h-full p-10 max-w-[900px] mx-auto overflow-auto">
-          <div className="glass-card" style={{ margin: "16px auto", maxWidth: 980, padding: 18 }}>
-            <h2 style={{ fontSize: 22, marginBottom: 10 }}>E-Mail verfassen</h2>
-            <div style={{ display: "grid", gap: 10 }}>
+        {/* RIGHT SIDE - MAIL */}
+        <div className="w-1/2 flex items-center justify-center">
+          <div className="bg-zinc-900/80 backdrop-blur-md rounded-2xl p-6 w-[400px] shadow-xl">
+            <h2 className="text-white text-xl font-semibold mb-4">
+              E-Mail verfassen
+            </h2>
+
             <input
               placeholder="An"
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              className="glass-card"
-              style={{ padding: 10 }}
+              className="w-full mb-2 p-2 rounded bg-zinc-800 text-white"
             />
+
             <input
               placeholder="Betreff"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
-              className="glass-card"
-              style={{ padding: 10 }}
+              className="w-full mb-2 p-2 rounded bg-zinc-800 text-white"
             />
+
             <textarea
               placeholder="Nachricht"
               value={body}
               onChange={(e) => setBody(e.target.value)}
-              rows={10}
-              className="glass-card"
-              style={{ padding: 10 }}
+              className="w-full mb-4 p-2 rounded bg-zinc-800 text-white h-32"
             />
-            <div style={{ display: "flex", gap: 10 }}>
-              <button className="chip" onClick={handlePreview}>
+
+            <div className="flex justify-between">
+              <button className="bg-zinc-700 text-white px-3 py-2 rounded" onClick={handlePreview}>
                 Vorschau drucken
               </button>
               <button
-                className="chip chip-active"
+                className="bg-orange-500 text-black px-3 py-2 rounded"
                 data-fm-mail="send-now"
                 onClick={handleSendNow}
               >
                 Sofort senden
               </button>
             </div>
-          </div>
           </div>
         </div>
       </div>

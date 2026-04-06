@@ -111,34 +111,37 @@ function WarmVoicePrefs() {
 function Shell() {
   return (
     <>
-      <HeroFloatCanvas />
       <Backdrop />
-      <TopFeatureBar />
+      <div className="h-20 flex items-center px-6 border-b border-neutral-800">
+        <TopFeatureBar />
+      </div>
       <VoiceIntentListener />
       <VoiceOSMListener />
       <VoicePoseBridge />
       <WarmVoicePrefs />
-      <Routes>
-        <Route path="/" element={<Navigate to="/mail/compose" replace />} />
-        <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/kontakte" element={<Leads />} />
-        <Route path="/leads" element={<Leads />} />
-        <Route path="/berichte" element={<Reports />} />
-        <Route path="/nachfassungen" element={<Followups />} />
-        <Route path="/einstellungen" element={<Settings />} />
-        <Route path="/wissensbasis" element={<KnowledgeBase />} />
-        <Route path="/ablaufplaene" element={<Sequences />} />
-        <Route path="/kalender" element={<Calendar />} />
-        <Route path="/kontakt-suche-async" element={<LeadsHunterAsync />} />
-        <Route path="/voice-diagnostics" element={<VoiceDiagnostics />} />
-        <Route path="/leads-real" element={<LeadsRealMode />} />
-        <Route path="/leads/real" element={<LeadsRealMode />} />
-        <Route path="/control-center" element={<ControlCenter />} />
-        <Route path="/lead-radar" element={<LeadRadar />} />
-        <Route path="/leads/osm/results" element={<LeadsOSMResults />} />
-        <Route path="/mail/compose" element={<MailCompose />} />
-        <Route path="/exports" element={<Exports />} />
-      </Routes>
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <Routes>
+          <Route path="/" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/kontakte" element={<Leads />} />
+          <Route path="/leads" element={<Leads />} />
+          <Route path="/berichte" element={<Reports />} />
+          <Route path="/nachfassungen" element={<Followups />} />
+          <Route path="/einstellungen" element={<Settings />} />
+          <Route path="/wissensbasis" element={<KnowledgeBase />} />
+          <Route path="/ablaufplaene" element={<Sequences />} />
+          <Route path="/kalender" element={<Calendar />} />
+          <Route path="/kontakt-suche-async" element={<LeadsHunterAsync />} />
+          <Route path="/voice-diagnostics" element={<VoiceDiagnostics />} />
+          <Route path="/leads-real" element={<LeadsRealMode />} />
+          <Route path="/leads/real" element={<LeadsRealMode />} />
+          <Route path="/control-center" element={<ControlCenter />} />
+          <Route path="/lead-radar" element={<LeadRadar />} />
+          <Route path="/leads/osm/results" element={<LeadsOSMResults />} />
+          <Route path="/mail/compose" element={<MailCompose />} />
+          <Route path="/exports" element={<Exports />} />
+        </Routes>
+      </div>
       <div className="ptt-compact">
         <VoiceButton />
       </div>
@@ -166,8 +169,13 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      {transitionMessage && <TransitionOverlay message={transitionMessage} />}
-      <Shell />
+      <div className="h-screen flex flex-col overflow-hidden bg-black text-white">
+        <div className="fixed inset-0 -z-10">
+          <HeroFloatCanvas />
+        </div>
+        {transitionMessage && <TransitionOverlay message={transitionMessage} />}
+        <Shell />
+      </div>
     </BrowserRouter>
   );
 }
