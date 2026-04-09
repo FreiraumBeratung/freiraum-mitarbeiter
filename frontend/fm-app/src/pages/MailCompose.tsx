@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { PartnerBotBus } from "../components/PartnerBot";
-import AssistantPanel from "../components/AssistantPanel";
+import RobotAvatar from "../components/robot/RobotAvatar";
 
 // sayOnce Guard: Prevents duplicate "E-Mail wurde versendet" announcements
 // Cooldown: 1200ms (only for mail_sent key)
@@ -251,7 +251,7 @@ export default function MailCompose() {
       <div className="flex w-full h-full">
         {/* LEFT SIDE - ROBOT */}
         <div className="w-1/2 flex items-center justify-center">
-          <AssistantPanel />
+          <RobotAvatar />
         </div>
 
         {/* RIGHT SIDE - MAIL */}

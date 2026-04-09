@@ -17,6 +17,8 @@ import LeadRadar from "./pages/LeadRadar";
 import LeadsOSMResults from "./pages/LeadsOSMResults";
 import MailCompose from "./pages/MailCompose";
 import Exports from "./pages/Exports";
+import FreiraumLayout from "./layouts/FreiraumLayout";
+import RobotAvatar from "./components/robot/RobotAvatar";
 
 import Backdrop from "./components/layout/Backdrop";
 import TopFeatureBar from "./components/TopFeatureBar";
@@ -109,6 +111,17 @@ function WarmVoicePrefs() {
 }
 
 function Shell() {
+  const mailComposeLayout = (
+    <FreiraumLayout
+      robot={<RobotAvatar />}
+      composer={
+        <div className="text-white/50">
+          Composer coming soon
+        </div>
+      }
+    />
+  );
+
   return (
     <>
       <Backdrop />
@@ -138,7 +151,7 @@ function Shell() {
           <Route path="/control-center" element={<ControlCenter />} />
           <Route path="/lead-radar" element={<LeadRadar />} />
           <Route path="/leads/osm/results" element={<LeadsOSMResults />} />
-          <Route path="/mail/compose" element={<MailCompose />} />
+          <Route path="/mail/compose" element={mailComposeLayout} />
           <Route path="/exports" element={<Exports />} />
         </Routes>
       </div>
