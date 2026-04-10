@@ -1787,52 +1787,61 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           console.log('[fm-voice][wizard4][contact-resolver] Versuche Kontakt aufzulösen:', finalNameForResolver);
           
           try {
-            const resolveUrl = `/api/contacts/resolve?name=${encodeURIComponent(finalNameForResolver)}`;
+            const resolveUrl = `${BACKEND}/api/contacts/resolve?name=${encodeURIComponent(finalNameForResolver)}`;
             const resolveResponse = await fetch(resolveUrl);
             
             if (resolveResponse.ok) {
-              const resolveData = await resolveResponse.json();
-              console.log('[fm-voice][wizard4][contact-resolver] Response:', resolveData);
-              
-              if (resolveData.ok && resolveData.email && isStrictValidEmail(resolveData.email)) {
-                finalToEmail = resolveData.email;
-                console.log('[fm-voice][wizard4][contact-resolver] Kontakt aufgelöst:', finalNameForResolver, '->', finalToEmail);
-                
-                // Draft-Felder setzen, damit AutoSend-Guard die E-Mail erkennt
-                if (wizard4Draft) {
-                  wizard4Draft.toEmail = resolveData.email;
-                  if ((wizard4Draft as any).to !== undefined) {
-                    (wizard4Draft as any).to = resolveData.email;
-                  }
-                  
-                  // Anzeigenamen aus Resolver-Response übernehmen (für saubere Anrede)
-                  const resolvedDisplayName =
-                    resolveData?.matchedContact?.displayName ||
-                    resolveData?.matchedContact?.name ||
-                    wizard4Draft.toName;
-                  
-                  if (resolvedDisplayName && typeof resolvedDisplayName === 'string') {
-                    wizard4Draft.toName = resolvedDisplayName;
-                  }
-                  
-                  console.log('[fm-voice][wizard4][debug] resolver applied:', {
-                    toEmail: wizard4Draft.toEmail,
-                    to: (wizard4Draft as any).to,
-                    toName: wizard4Draft.toName
-                  });
-                  
-                  // safeAutoSendEmail aktualisieren, damit der Guard die E-Mail erkennt
-                  safeAutoSendEmail = normalizeEmailForAutoSend(resolveData.email);
-                  
-                  // Debug-Info in Draft speichern (optional, für spätere UI-Anzeige)
-                  (wizard4Draft as any).toResolvedFrom = finalNameForResolver;
-                  (wizard4Draft as any).contactResolution = {
-                    matchedContact: resolveData.matchedContact,
-                    debug: resolveData.debug
-                  };
-                }
+              const contentType = (resolveResponse.headers.get("content-type") || "").toLowerCase();
+              if (!contentType.includes("application/json")) {
+                const raw = await resolveResponse.text().catch(() => "");
+                console.warn(
+                  '[fm-voice][wizard4][contact-resolver] Unerwarteter Response-Typ (kein JSON), Resolver wird uebersprungen:',
+                  { contentType, preview: raw.slice(0, 120) }
+                );
               } else {
-                console.log('[fm-voice][wizard4][contact-resolver] Kein Match gefunden für:', finalNameForResolver, resolveData.debug?.result);
+                const resolveData = await resolveResponse.json();
+                console.log('[fm-voice][wizard4][contact-resolver] Response:', resolveData);
+                
+                if (resolveData.ok && resolveData.email && isStrictValidEmail(resolveData.email)) {
+                  finalToEmail = resolveData.email;
+                  console.log('[fm-voice][wizard4][contact-resolver] Kontakt aufgelöst:', finalNameForResolver, '->', finalToEmail);
+                  
+                  // Draft-Felder setzen, damit AutoSend-Guard die E-Mail erkennt
+                  if (wizard4Draft) {
+                    wizard4Draft.toEmail = resolveData.email;
+                    if ((wizard4Draft as any).to !== undefined) {
+                      (wizard4Draft as any).to = resolveData.email;
+                    }
+                    
+                    // Anzeigenamen aus Resolver-Response übernehmen (für saubere Anrede)
+                    const resolvedDisplayName =
+                      resolveData?.matchedContact?.displayName ||
+                      resolveData?.matchedContact?.name ||
+                      wizard4Draft.toName;
+                    
+                    if (resolvedDisplayName && typeof resolvedDisplayName === 'string') {
+                      wizard4Draft.toName = resolvedDisplayName;
+                    }
+                    
+                    console.log('[fm-voice][wizard4][debug] resolver applied:', {
+                      toEmail: wizard4Draft.toEmail,
+                      to: (wizard4Draft as any).to,
+                      toName: wizard4Draft.toName
+                    });
+                    
+                    // safeAutoSendEmail aktualisieren, damit der Guard die E-Mail erkennt
+                    safeAutoSendEmail = normalizeEmailForAutoSend(resolveData.email);
+                    
+                    // Debug-Info in Draft speichern (optional, für spätere UI-Anzeige)
+                    (wizard4Draft as any).toResolvedFrom = finalNameForResolver;
+                    (wizard4Draft as any).contactResolution = {
+                      matchedContact: resolveData.matchedContact,
+                      debug: resolveData.debug
+                    };
+                  }
+                } else {
+                  console.log('[fm-voice][wizard4][contact-resolver] Kein Match gefunden für:', finalNameForResolver, resolveData.debug?.result);
+                }
               }
             } else {
               console.warn('[fm-voice][wizard4][contact-resolver] API-Fehler:', resolveResponse.status);

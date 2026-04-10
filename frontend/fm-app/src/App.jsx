@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import Dashboard from "./pages/Dashboard";
 import Leads from "./pages/Leads.jsx";
@@ -19,6 +19,7 @@ import MailCompose from "./pages/MailCompose";
 import Exports from "./pages/Exports";
 import FreiraumLayout from "./layouts/FreiraumLayout";
 import RobotAvatar from "./components/robot/RobotAvatar";
+import MailComposeForm from "./components/mail/MailComposeForm";
 
 import Backdrop from "./components/layout/Backdrop";
 import TopFeatureBar from "./components/TopFeatureBar";
@@ -111,23 +112,26 @@ function WarmVoicePrefs() {
 }
 
 function Shell() {
+  const location = useLocation();
+  const path = location.pathname || "";
+  const isMailWorkspace = path === "/" || path === "/mail/compose" || path.startsWith("/mail/compose/");
+
   const mailComposeLayout = (
     <FreiraumLayout
       robot={<RobotAvatar />}
-      composer={
-        <div className="text-white/50">
-          Composer coming soon
-        </div>
-      }
+      composer={<MailComposeForm />}
+      ptt={<VoiceButton />}
     />
   );
 
   return (
     <>
-      <Backdrop />
-      <div className="h-20 flex items-center px-6 border-b border-neutral-800">
-        <TopFeatureBar />
-      </div>
+      {!isMailWorkspace && <Backdrop />}
+      {!isMailWorkspace && (
+        <div className="h-20 flex items-center px-6 border-b border-neutral-800">
+          <TopFeatureBar />
+        </div>
+      )}
       <VoiceIntentListener />
       <VoiceOSMListener />
       <VoicePoseBridge />
@@ -155,9 +159,11 @@ function Shell() {
           <Route path="/exports" element={<Exports />} />
         </Routes>
       </div>
-      <div className="ptt-compact">
-        <VoiceButton />
-      </div>
+      {isMailWorkspace ? null : (
+        <div className="ptt-compact">
+          <VoiceButton />
+        </div>
+      )}
       {/* <PartnerBot /> */}
     </>
   );

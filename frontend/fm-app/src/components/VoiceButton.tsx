@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 
 import { voice, type VoiceState } from "../modules/voice";
 
 export default function VoiceButton() {
   const [state, setState] = useState<VoiceState>("idle");
+  const location = useLocation();
+  const isMailWorkspace = (location.pathname || "").startsWith("/mail/compose");
 
   useEffect(() => {
     const handler = (e: CustomEvent<{ state: VoiceState }>) => {
@@ -29,11 +32,18 @@ export default function VoiceButton() {
   const listening = state === "listening";
 
   return (
-    <div className="glass-card" style={{ padding: 14, display: "grid", gap: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontWeight: 600 }}>Push-to-Talk</span>
-        <span style={{ fontSize: 12, opacity: 0.7 }}>{label(state)}</span>
-      </div>
+    <div
+      className="glass-card"
+      style={{
+        padding: 10,
+        borderRadius: 9999,
+        background: "rgba(14,16,19,0.78)",
+        border: "1px solid rgba(255,255,255,.14)",
+        boxShadow: "0 16px 34px rgba(0,0,0,.45)",
+        transform: isMailWorkspace ? "translateY(-22px)" : "none",
+        transition: "transform 180ms ease",
+      }}
+    >
       <button
         onMouseDown={press}
         onMouseUp={release}
@@ -43,8 +53,8 @@ export default function VoiceButton() {
         onTouchCancel={release}
         title="Push-to-Talk"
         style={{
-          width: 66,
-          height: 66,
+          width: 72,
+          height: 72,
           borderRadius: 9999,
           background: listening ? "rgba(255,115,0,.9)" : "rgba(255,255,255,.10)",
           border: "1px solid rgba(255,255,255,.25)",
