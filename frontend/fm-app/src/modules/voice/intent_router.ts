@@ -2041,6 +2041,33 @@ function normalizeGreeting(input: string): string | null {
   return null;
 }
 
+function normalizeFreeGreeting(input: string): string | null {
+  const strict = normalizeGreeting(input);
+
+  let s = (input ?? "")
+    .trim()
+    .replace(/^[,.:;\s-]+/, "")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+  if (!s) return null;
+
+  // Bei kombinierten Befehlen nur den eigentlichen Anrede-Teil nehmen.
+  s = s.split(/\b(?:und|aber)\b/i)[0]?.trim() ?? s;
+  s = s
+    .replace(/\s+(?:und|aber)\s+.*$/i, "")
+    .replace(/\s+(?:mach(?:e)?|ändere|aendere|ersetze|schreib(?:e)?|füge|fuege|fuge|erwähne|erwahne)\b.*$/i, "")
+    .trim();
+
+  if (!s) return null;
+  if (/^(?:anrede|betreff|text|mail|nachricht)$/i.test(s)) return null;
+
+  const words = s.split(/\s+/).filter(Boolean).slice(0, 6);
+  const merged = words.join(" ").trim();
+  if (!merged) return null;
+  if (strict && merged.toLowerCase() === strict.toLowerCase()) return strict;
+  return merged.charAt(0).toUpperCase() + merged.slice(1);
+}
+
 /**
  * Erkennt Wizard2-Intents (Anrede/Betreff/Text bearbeiten).
  * Robuste Erkennung für umgangssprachliche Formulierungen.
@@ -2315,10 +2342,13 @@ function detectWizard2Intent(normalized: string, raw: string): VoiceIntent | nul
   }
 
   // 13) Short-Form-Anrede ("die anrede auf X" ohne "ändere")
-  const anredeShortMatch = n.match(/die\s+anrede\s+auf\s+(.+)/);
+  const anredeShortMatch =
+    rawTrimmed.match(/die\s+anrede\s+auf\s+(.+)/i) ||
+    rawTrimmed.match(/(?:setz|setze|nimm)\s+(?:als\s+)?anrede\s+(?:auf\s+|zu\s+|in\s+)?(.+)/i) ||
+    rawTrimmed.match(/anrede\s*:\s*(.+)$/i);
   if (anredeShortMatch) {
     const anredeRaw = anredeShortMatch[1].trim();
-    const greeting = normalizeGreeting(anredeRaw);
+    const greeting = normalizeFreeGreeting(anredeRaw);
     if (greeting) {
       // Nur Anrede (keine Text-Komponente prüfen, das wird später behandelt)
       console.log("[fm-voice] detectWizard2Intent -> wizard2-edit-anrede (Short-Form):", greeting);
@@ -2329,6 +2359,28 @@ function detectWizard2Intent(normalized: string, raw: string): VoiceIntent | nul
     }
     // Wenn kein Greeting erkannt wird, lassen wir das hier durchfallen,
     // und ggf. später als rewrite-body behandeln.
+  }
+
+  // 13b) Replace-Form-Anrede ("ersetze die anrede durch X", "mach aus der anrede X")
+  {
+    const anredeReplaceMatch =
+      rawTrimmed.match(/^(?:ersetze|ersetz|ändere|aendere|ander|andere)\s+die\s+anrede\s+(?:durch|zu|auf|in)\s+(.+)$/i) ||
+      rawTrimmed.match(/^mach\s+aus\s+der\s+anrede\s+(.+)$/i);
+    if (anredeReplaceMatch) {
+      const anredeRaw = (anredeReplaceMatch[1] ?? "")
+        .trim()
+        .replace(/^[,.:;\s-]+/, "")
+        .replace(/[.!?]+$/g, "")
+        .trim();
+      const greeting = normalizeFreeGreeting(anredeRaw);
+      if (greeting) {
+        console.log("[fm-voice] detectWizard2Intent -> wizard2-edit-anrede (Replace-Form):", greeting);
+        return {
+          type: "wizard2-edit-anrede",
+          newAnrede: greeting,
+        };
+      }
+    }
   }
 
   // 14) Anrede-Basis-Match (mit "ändere" oder "mach")

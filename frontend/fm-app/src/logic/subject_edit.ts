@@ -70,8 +70,10 @@ export function parseSubjectEditIntent(raw: string): SubjectEditIntent | null {
   const replacePartRe = /^(?:ersetze?|ersetz)\s+im\s+betreff\s+(.+?)\s+durch\s+(.+?)(?:\s+ersetzen)?$/i;
   const replacePartRe2 = /^im\s+betreff\s+(.+?)\s+durch\s+(.+)$/i;
   const replacePartRe3 = /^(?:ändere|aendere)\s+im\s+betreff\s+(.+?)\s+zu\s+(.+)$/i;
-  const replacePartRe4 = /^mach\s+aus\s+(.+?)\s+(?:->|durch|zu)\s+(.+)$/i;
-  for (const re of [replacePartRe, replacePartRe2, replacePartRe3, replacePartRe4]) {
+  const replacePartRe4 = /^mach\s+aus\s+dem\s+betreff\s+(.+?)\s+(?:->|durch|zu)\s+(.+)$/i;
+  const replacePartRe5 = /^mach\s+aus\s+im\s+betreff\s+(.+?)\s+(?:->|durch|zu)\s+(.+)$/i;
+  const replacePartRe6 = /^(?:ersetze?|ersetz)\s+im\s+betreff\s+(?:das\s+)?(?:wort|den\s+begriff)\s+(.+?)\s+durch\s+(.+)$/i;
+  for (const re of [replacePartRe6, replacePartRe, replacePartRe2, replacePartRe3, replacePartRe4, replacePartRe5]) {
     const m = oTrim.match(re);
     if (m?.[1] && m?.[2]) {
       const from = normalizeSubjectToken(m[1]);

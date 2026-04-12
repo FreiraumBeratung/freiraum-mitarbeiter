@@ -3971,13 +3971,34 @@ async function handleWizard2EditAnrede(newAnrede: string, options?: { silent?: b
   // Entferne alte Anrede, füge neue hinzu
   const bodyWithoutGreeting = removeGreetingLine(currentBody);
   const newBody = `${newAnrede}\n\n${bodyWithoutGreeting}`.trim();
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
   
-  if (typeof window !== "undefined" && window.__fm_set_mail_body) {
+  if (typeof window !== "undefined" && typeof window.__fm_set_mail_body === "function") {
     window.__fm_set_mail_body(newBody);
-    console.log("[fm-voice] handleWizard2EditAnrede: Body aktualisiert");
-    if (!options?.silent) {
-      PartnerBotBus.say("Anrede wurde aktualisiert.");
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    let readback = (window.__fm_get_mail_body?.() ?? "").toString();
+
+    // Sync-Fix: Wenn der Composer-State den Body nicht sofort übernimmt, einmal kontrolliert nachsetzen.
+    if (readback.trim() !== newBody.trim()) {
+      console.warn("[fm-voice] handleWizard2EditAnrede: readback mismatch after first set, retrying", {
+        expectedPreview: newBody.slice(0, 80),
+        readbackPreview: readback.slice(0, 80),
+      });
+      await sleep(120);
+      window.__fm_set_mail_body(newBody);
+      await sleep(120);
+      readback = (window.__fm_get_mail_body?.() ?? "").toString();
     }
+
+    if (readback.trim() !== newBody.trim()) {
+      (window as any).__fm_pending_body_replace = newBody;
+      console.warn("[fm-voice] handleWizard2EditAnrede: readback still mismatched, stored pending body replace");
+    }
+
+    console.log("[fm-voice] handleWizard2EditAnrede: Body aktualisiert", {
+      readbackMatches: readback.trim() === newBody.trim(),
+    });
+    if (!options?.silent) PartnerBotBus.say("Anrede wurde aktualisiert.");
   }
 }
 

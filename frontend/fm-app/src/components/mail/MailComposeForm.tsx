@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { PartnerBotBus } from "../PartnerBot";
 
@@ -21,14 +21,29 @@ export default function MailComposeForm() {
   const [to, setTo] = useState(sp.get("to") || "");
   const [subject, setSubject] = useState(sp.get("subject") || "");
   const [body, setBody] = useState(sp.get("body") || "");
+  const toRef = useRef(to);
+  const subjectRef = useRef(subject);
+  const bodyRef = useRef(body);
+
+  useEffect(() => {
+    toRef.current = to;
+  }, [to]);
+
+  useEffect(() => {
+    subjectRef.current = subject;
+  }, [subject]);
+
+  useEffect(() => {
+    bodyRef.current = body;
+  }, [body]);
 
   const handlePreview = useCallback(() => {
     window.print();
   }, []);
 
   const handleSendNow = useCallback(async () => {
-    const safeTo = to.trim();
-    const safeBody = body.trim();
+    const safeTo = toRef.current.trim();
+    const safeBody = bodyRef.current.trim();
     if (!safeTo || !safeBody) return;
 
     const API_BASE =
@@ -44,7 +59,7 @@ export default function MailComposeForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           to: safeTo,
-          subject: subject?.trim() || null,
+          subject: subjectRef.current?.trim() || null,
           body: safeBody,
         }),
       });
@@ -58,18 +73,27 @@ export default function MailComposeForm() {
     } catch {
       PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
     }
-  }, [to, subject, body]);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     const w = window as Window;
 
-    w.__fm_set_mail_body = (text: string) => setBody(text);
-    w.__fm_set_mail_to = (addr: string) => setTo(addr);
-    w.__fm_set_mail_subject = (subj: string) => setSubject(subj);
-    w.__fm_get_mail_body = () => body || null;
-    w.__fm_get_mail_subject = () => subject || null;
-    w.__fm_get_mail_to = () => to || null;
+    w.__fm_set_mail_body = (text: string) => {
+      bodyRef.current = text;
+      setBody(text);
+    };
+    w.__fm_set_mail_to = (addr: string) => {
+      toRef.current = addr;
+      setTo(addr);
+    };
+    w.__fm_set_mail_subject = (subj: string) => {
+      subjectRef.current = subj;
+      setSubject(subj);
+    };
+    w.__fm_get_mail_body = () => bodyRef.current || null;
+    w.__fm_get_mail_subject = () => subjectRef.current || null;
+    w.__fm_get_mail_to = () => toRef.current || null;
     w.__fm_preview_mail = () => handlePreview();
     w.__fm_send_mail_now = () => {
       void handleSendNow();
@@ -93,7 +117,7 @@ export default function MailComposeForm() {
       delete w.__fm_preview_mail;
       delete w.__fm_send_mail_now;
     };
-  }, [to, subject, body, handlePreview, handleSendNow]);
+  }, [handlePreview, handleSendNow]);
 
   return (
     <div

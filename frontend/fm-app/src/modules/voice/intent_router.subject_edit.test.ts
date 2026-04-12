@@ -68,6 +68,24 @@ describe('Subject-Edit Intents', () => {
     }
   });
 
+  it('"mach aus dem betreff Pizza durch Pasta" -> email-subject-replace-part', () => {
+    const intent = routeVoiceIntent('mach aus dem betreff Pizza durch Pasta');
+    expect(intent.type).toBe('email-subject-replace-part');
+    if (intent.type === 'email-subject-replace-part') {
+      expect(intent.payload.from).toBe('Pizza');
+      expect(intent.payload.to).toBe('Pasta');
+    }
+  });
+
+  it('"ersetze im betreff das wort Pizza durch Pasta" -> email-subject-replace-part', () => {
+    const intent = routeVoiceIntent('ersetze im betreff das wort Pizza durch Pasta');
+    expect(intent.type).toBe('email-subject-replace-part');
+    if (intent.type === 'email-subject-replace-part') {
+      expect(intent.payload.from).toBe('Pizza');
+      expect(intent.payload.to).toBe('Pasta');
+    }
+  });
+
   it('"betreff löschen" -> email-subject-clear', () => {
     const intent = routeVoiceIntent('betreff löschen');
     expect(intent.type).toBe('email-subject-clear');
