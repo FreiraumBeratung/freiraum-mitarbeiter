@@ -20,6 +20,7 @@ import Exports from "./pages/Exports";
 import FreiraumLayout from "./layouts/FreiraumLayout";
 import RobotAvatar from "./components/robot/RobotAvatar";
 import MailComposeForm from "./components/mail/MailComposeForm";
+import ExchangeInboxPanel from "./components/mail/ExchangeInboxPanel";
 
 import Backdrop from "./components/layout/Backdrop";
 import TopFeatureBar from "./components/TopFeatureBar";
@@ -120,6 +121,7 @@ function Shell() {
     <FreiraumLayout
       robot={<RobotAvatar />}
       composer={<MailComposeForm />}
+      exchange={<ExchangeInboxPanel />}
       ptt={<VoiceButton />}
     />
   );

@@ -21,6 +21,11 @@ import { stripSubjectCommand } from "../../logic/wizard4/subject_command_strip";
 import { stripLeadingSubjectEcho } from "../../logic/wizard4/strip_leading_subject_echo";
 import { isFollowUpSendCurrentDraft, isUiDraftAvailable } from "../../logic/wizard4/followup_send_draft";
 import { rewriteLeadingDassClause } from "./dass_rewrite";
+import { getSelectedMailContext } from "../mail/selectedMailContext";
+import {
+  buildReplyIntentFromSelectedMailContext,
+  isExplicitContextSendConfirmation,
+} from "./reply_context_phase_a";
 import {
   subjectSet,
   subjectAppend,
@@ -1385,6 +1390,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     (async () => {
       const w = window as any;
       let didAutoSend = false;
+      let completionSpoken = false;
+      const sayPreparedOnce = (fallbackText: string) => {
+        if (completionSpoken) return;
+        completionSpoken = true;
+        PartnerBotBus.say((intent as any)?.meta?.uiHint || fallbackText);
+      };
       
       // ============================================================
       // FOLLOW-UP SEND: "Schick die Nachricht aus" etc. → aktuellen Draft im UI abschicken
@@ -2756,14 +2767,14 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                   });
                   // AutoSend fehlgeschlagen, zeige prepared-Nachricht
                   if (!didAutoSend) {
-                    PartnerBotBus.say((intent as any)?.meta?.uiHint || "Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
+                    sayPreparedOnce("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
                   }
                 }
               } catch (err: any) {
                 // DEFENSIV: Fange alle Exceptions ab, damit kein "Uncaught (in promise)" auftritt
                 console.error('[fm-voice][wizard4] AutoSend: Unerwarteter Fehler in trySend:', err);
                 if (!didAutoSend) {
-                  PartnerBotBus.say((intent as any)?.meta?.uiHint || "E-Mail vorbereitet. Bitte prüfen und manuell senden.");
+                  sayPreparedOnce("E-Mail vorbereitet. Bitte prüfen und manuell senden.");
                 }
               }
             };
@@ -2780,14 +2791,14 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             });
             // AutoSend nicht ausgeführt, zeige prepared-Nachricht
             if (!didAutoSend) {
-              PartnerBotBus.say((intent as any)?.meta?.uiHint || "Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
+              sayPreparedOnce("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
             }
           }
         } catch (err) {
           console.error('[fm-voice][wizard4] Fehler beim AutoSend:', err);
           // Bei Fehler zeige prepared-Nachricht
           if (!didAutoSend) {
-            PartnerBotBus.say((intent as any)?.meta?.uiHint || "Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
+            sayPreparedOnce("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
           }
         }
       }, 100);
@@ -4099,6 +4110,46 @@ function handleWizard2EditSubject(newSubject: string) {
 
 export function processVoiceCommand(transcript: string, navigate: NavigateFunction) {
   lastTranscript = transcript; // Für Wizard4Intent-Parsing speichern
-  const intent = routeVoiceIntent(transcript);
+  const selectedContext = getSelectedMailContext();
+  if (selectedContext && isExplicitContextSendConfirmation(transcript)) {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const to = String(w?.__fm_get_mail_to?.() ?? "").trim();
+    const subject = String(w?.__fm_get_mail_subject?.() ?? "").trim();
+    const body = String(w?.__fm_get_mail_body?.() ?? "").trim();
+    const isValidDraft = !!to && !!subject && body.length > 0;
+
+    if (!isValidDraft) {
+      if (w) {
+        w.__fm_last_hint = {
+          kind: "reply_send_needs_draft",
+          message: "Zum Senden fehlt noch ein vollständiger Antwortentwurf. Diktiere bitte zuerst den Antworttext.",
+          ts: Date.now(),
+        };
+        if (typeof window.dispatchEvent === "function") {
+          window.dispatchEvent(new CustomEvent("fm-hint-update"));
+        }
+      }
+      PartnerBotBus.say("Zum Senden fehlt noch ein vollständiger Antwortentwurf. Diktiere bitte zuerst den Antworttext.");
+      return;
+    }
+
+    console.log("[fm-voice][exchange-context] explicit send confirmation accepted", {
+      contextUid: selectedContext.uid,
+      to,
+      subject,
+      bodyLength: body.length,
+    });
+    applyVoiceIntent({ type: "email-send" }, navigate);
+    return;
+  }
+
+  const replyIntent = buildReplyIntentFromSelectedMailContext(transcript, selectedContext);
+  if (replyIntent) {
+    console.log("[fm-voice][exchange-context] reply intent from active mail context", {
+      contextUid: selectedContext?.uid ?? null,
+      hasBodyHint: "bodyHint" in replyIntent && !!replyIntent.bodyHint,
+    });
+  }
+  const intent = replyIntent ?? routeVoiceIntent(transcript);
   applyVoiceIntent(intent, navigate);
 }

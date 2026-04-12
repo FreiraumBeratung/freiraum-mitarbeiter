@@ -110,9 +110,9 @@ export default function MailComposeForm() {
         boxSizing: "border-box",
       }}
     >
-      <div style={{ fontSize: 19, fontWeight: 700, color: "rgba(255,255,255,0.95)", lineHeight: 1.1 }}>Composer Preview</div>
+      <div style={{ fontSize: 19, fontWeight: 700, color: "rgba(255,255,255,0.95)", lineHeight: 1.1 }}>E-Mail-Maske</div>
       <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: -4, marginBottom: 4 }}>
-        Entwurfsvorschau fuer den Live-PTT-Flow
+        Von Sprache zu E-Mail: prüfen, anpassen oder direkt per Sprachbefehl versenden.
       </div>
 
       <input

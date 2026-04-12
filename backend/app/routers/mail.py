@@ -4,6 +4,10 @@ import logging
 import os
 import smtplib
 import ssl
+import imaplib
+import email
+import re
+from email.header import decode_header
 from email.message import EmailMessage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -33,6 +37,126 @@ class MailSendRequest(BaseModel):
 class MailSendResponse(BaseModel):
     status: str
     result: str | None = None
+
+
+class InboxMessageItem(BaseModel):
+    uid: str
+    messageId: str | None = None
+    subject: str
+    fromName: str | None = None
+    fromEmail: str | None = None
+    receivedAt: str | None = None
+    preview: str | None = None
+
+
+class InboxListResponse(BaseModel):
+    ok: bool
+    total: int
+    items: list[InboxMessageItem]
+
+
+class InboxMessageDetailResponse(BaseModel):
+    ok: bool
+    uid: str
+    messageId: str | None = None
+    subject: str
+    fromName: str | None = None
+    fromEmail: str | None = None
+    to: list[str]
+    receivedAt: str | None = None
+    bodyText: str
+
+
+def _imap_host() -> str:
+    return os.getenv("IMAP_HOST", "")
+
+
+def _imap_port() -> int:
+    return int(os.getenv("IMAP_PORT", "993"))
+
+
+def _imap_user() -> str:
+    return os.getenv("IMAP_USER") or os.getenv("IMAP_USERNAME") or ""
+
+
+def _imap_pass() -> str:
+    return os.getenv("IMAP_PASS") or os.getenv("IMAP_PASSWORD") or ""
+
+
+def _decode_mime_header(value: str | None) -> str:
+    if not value:
+        return ""
+    decoded_parts: list[str] = []
+    for text, charset in decode_header(value):
+        if isinstance(text, bytes):
+            try:
+                decoded_parts.append(text.decode(charset or "utf-8", errors="replace"))
+            except Exception:
+                decoded_parts.append(text.decode("utf-8", errors="replace"))
+        else:
+            decoded_parts.append(text)
+    return "".join(decoded_parts).strip()
+
+
+def _extract_email_parts(header_value: str | None) -> tuple[str | None, str | None]:
+    if not header_value:
+        return None, None
+    parsed_name, parsed_email = email.utils.parseaddr(header_value)
+    name = _decode_mime_header(parsed_name) if parsed_name else None
+    addr = parsed_email.strip() if parsed_email else None
+    return name or None, addr or None
+
+
+def _normalize_preview(text: str, max_len: int = 180) -> str:
+    compact = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(compact) <= max_len:
+        return compact
+    return compact[: max_len - 1].rstrip() + "…"
+
+
+def _extract_text_from_message(msg: email.message.Message) -> str:
+    text_chunks: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            content_type = part.get_content_type()
+            if content_type != "text/plain":
+                continue
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                text_chunks.append(payload.decode(charset, errors="replace"))
+            except Exception:
+                text_chunks.append(payload.decode("utf-8", errors="replace"))
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            try:
+                text_chunks.append(payload.decode(charset, errors="replace"))
+            except Exception:
+                text_chunks.append(payload.decode("utf-8", errors="replace"))
+    return "\n".join(chunk.strip() for chunk in text_chunks if chunk and chunk.strip()).strip()
+
+
+def _open_imap_client() -> imaplib.IMAP4_SSL:
+    host = _imap_host()
+    user = _imap_user()
+    password = _imap_pass()
+    if not host or not user or not password:
+        raise HTTPException(status_code=503, detail="IMAP Konfiguration unvollständig.")
+    try:
+        client = imaplib.IMAP4_SSL(host, _imap_port())
+        client.login(user, password)
+        return client
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("IMAP Verbindung fehlgeschlagen")
+        raise HTTPException(status_code=503, detail="IMAP Verbindung fehlgeschlagen.") from exc
 
 
 def _build_smtp_client() -> smtplib.SMTP:
@@ -274,4 +398,118 @@ async def send_mail(req: MailSendRequest):
     except Exception as e:
         logger.exception("Mailversand fehlgeschlagen (allgemeiner Fehler)")
         raise HTTPException(status_code=500, detail="Mailversand fehlgeschlagen.")
+
+
+@router.get("/inbox", response_model=InboxListResponse)
+async def get_inbox(limit: int = 25, offset: int = 0):
+    safe_limit = max(1, min(limit, 60))
+    safe_offset = max(0, offset)
+
+    client = _open_imap_client()
+    try:
+        status, _ = client.select("INBOX", readonly=True)
+        if status != "OK":
+            raise HTTPException(status_code=503, detail="INBOX konnte nicht geöffnet werden.")
+
+        status, data = client.uid("SEARCH", None, "ALL")
+        if status != "OK":
+            raise HTTPException(status_code=500, detail="Inbox-Liste konnte nicht geladen werden.")
+
+        all_uids = data[0].split() if data and data[0] else []
+        all_uids = list(reversed(all_uids))
+        total = len(all_uids)
+        selected_uids = all_uids[safe_offset : safe_offset + safe_limit]
+
+        items: list[InboxMessageItem] = []
+        for uid_bytes in selected_uids:
+            uid = uid_bytes.decode("utf-8", errors="replace")
+            fetch_status, fetch_data = client.uid("FETCH", uid, "(RFC822)")
+            if fetch_status != "OK" or not fetch_data:
+                continue
+
+            raw_email = None
+            for part in fetch_data:
+                if isinstance(part, tuple) and len(part) > 1:
+                    raw_email = part[1]
+                    break
+            if not raw_email:
+                continue
+
+            msg = email.message_from_bytes(raw_email)
+            subject = _decode_mime_header(msg.get("Subject")) or "(ohne Betreff)"
+            from_name, from_email = _extract_email_parts(msg.get("From"))
+            message_id = (msg.get("Message-ID") or "").strip() or None
+            received_at = (msg.get("Date") or "").strip() or None
+            body_text = _extract_text_from_message(msg)
+            preview = _normalize_preview(body_text) if body_text else None
+
+            items.append(
+                InboxMessageItem(
+                    uid=uid,
+                    messageId=message_id,
+                    subject=subject,
+                    fromName=from_name,
+                    fromEmail=from_email,
+                    receivedAt=received_at,
+                    preview=preview,
+                )
+            )
+
+        return InboxListResponse(ok=True, total=total, items=items)
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+@router.get("/inbox/{uid}", response_model=InboxMessageDetailResponse)
+async def get_inbox_message(uid: str):
+    safe_uid = (uid or "").strip()
+    if not safe_uid:
+        raise HTTPException(status_code=400, detail="uid ist erforderlich.")
+
+    client = _open_imap_client()
+    try:
+        status, _ = client.select("INBOX", readonly=True)
+        if status != "OK":
+            raise HTTPException(status_code=503, detail="INBOX konnte nicht geöffnet werden.")
+
+        fetch_status, fetch_data = client.uid("FETCH", safe_uid, "(RFC822)")
+        if fetch_status != "OK" or not fetch_data:
+            raise HTTPException(status_code=404, detail="Nachricht nicht gefunden.")
+
+        raw_email = None
+        for part in fetch_data:
+            if isinstance(part, tuple) and len(part) > 1:
+                raw_email = part[1]
+                break
+        if not raw_email:
+            raise HTTPException(status_code=404, detail="Nachricht nicht gefunden.")
+
+        msg = email.message_from_bytes(raw_email)
+        subject = _decode_mime_header(msg.get("Subject")) or "(ohne Betreff)"
+        from_name, from_email = _extract_email_parts(msg.get("From"))
+        to_headers = msg.get_all("To", [])
+        to_addresses = [addr for _, addr in [email.utils.parseaddr(v) for v in to_headers] if addr]
+        message_id = (msg.get("Message-ID") or "").strip() or None
+        received_at = (msg.get("Date") or "").strip() or None
+        body_text = _extract_text_from_message(msg) or "(kein Textinhalt)"
+
+        return InboxMessageDetailResponse(
+            ok=True,
+            uid=safe_uid,
+            messageId=message_id,
+            subject=subject,
+            fromName=from_name,
+            fromEmail=from_email,
+            to=to_addresses,
+            receivedAt=received_at,
+            bodyText=body_text,
+        )
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
 

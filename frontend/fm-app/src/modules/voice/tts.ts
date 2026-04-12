@@ -1,6 +1,14 @@
 const PIPER_TTS_URL = "http://localhost:30521/api/voice/tts";
 const DEFAULT_VOICE = "de_DE-thorsten-medium";
 
+function emitTtsEvent(
+  type: "start" | "end" | "error",
+  detail: { text: string; provider: "piper" | "webspeech"; reason?: string }
+) {
+  if (typeof window === "undefined") return;
+  document.dispatchEvent(new CustomEvent("fm-tts", { detail: { type, ...detail } }));
+}
+
 async function tryPiperTts(text: string): Promise<boolean> {
   try {
     const response = await fetch(PIPER_TTS_URL, {
@@ -20,12 +28,22 @@ async function tryPiperTts(text: string): Promise<boolean> {
 
     const cleanup = () => {
       URL.revokeObjectURL(url);
+      audio.onplaying = null;
       audio.onended = null;
       audio.onerror = null;
     };
 
-    audio.onended = cleanup;
-    audio.onerror = cleanup;
+    audio.onplaying = () => {
+      emitTtsEvent("start", { text, provider: "piper" });
+    };
+    audio.onended = () => {
+      emitTtsEvent("end", { text, provider: "piper" });
+      cleanup();
+    };
+    audio.onerror = () => {
+      emitTtsEvent("error", { text, provider: "piper", reason: "playback_error" });
+      cleanup();
+    };
 
     await audio.play();
     return true;
@@ -56,6 +74,16 @@ function fallbackWebSpeech(text: string) {
   if (germanVoices.length > 0) {
     utterance.voice = germanVoices[0];
   }
+
+  utterance.onstart = () => {
+    emitTtsEvent("start", { text, provider: "webspeech" });
+  };
+  utterance.onend = () => {
+    emitTtsEvent("end", { text, provider: "webspeech" });
+  };
+  utterance.onerror = () => {
+    emitTtsEvent("error", { text, provider: "webspeech", reason: "speech_error" });
+  };
 
   if (synth.getVoices().length === 0) {
     synth.onvoiceschanged = () => {
