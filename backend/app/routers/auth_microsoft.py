@@ -28,7 +28,7 @@ def microsoft_auth_start():
     if not oauth_config_valid():
         raise HTTPException(
             status_code=503,
-            detail="Microsoft OAuth ist nicht konfiguriert. Bitte MSGRAPH_TENANT_ID, MSGRAPH_CLIENT_ID und MS_OAUTH_REDIRECT_URI setzen.",
+            detail="Microsoft OAuth ist nicht konfiguriert. Bitte MSGRAPH_TENANT_ID, MSGRAPH_CLIENT_ID, MS_OAUTH_REDIRECT_URI und (für Backend-Flow) MSGRAPH_CLIENT_SECRET setzen.",
         )
     try:
         _, auth_url = create_authorization_url()

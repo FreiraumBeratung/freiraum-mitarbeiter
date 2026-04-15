@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 try:
     from dotenv import load_dotenv
 
-    load_dotenv()
+    # Lade backend/.env deterministisch, unabhängig vom Startverzeichnis.
+    backend_env = Path(__file__).resolve().parents[1] / ".env"
+    if backend_env.exists():
+        load_dotenv(dotenv_path=backend_env, override=True)
+    else:
+        load_dotenv(override=True)
 except Exception:
     pass
 

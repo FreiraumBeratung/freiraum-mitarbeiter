@@ -236,6 +236,31 @@ export default function ExchangeInboxPanel() {
   };
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const hasResult = params.has("ms_oauth");
+    const hasCodeState = params.has("code") && params.has("state");
+    const hasAzureError = params.has("error");
+    if (hasResult || (!hasCodeState && !hasAzureError)) return;
+    const state = params.get("state") || "";
+    if (state) {
+      const stateBridgeKey = `fm_ms_oauth_bridge_${state}`;
+      if (window.sessionStorage.getItem(stateBridgeKey) === "1") {
+        return;
+      }
+      window.sessionStorage.setItem(stateBridgeKey, "1");
+    }
+
+    const callback = new URL(`${backendBase()}/api/auth/microsoft/callback`);
+    const passThroughKeys = ["code", "state", "error", "error_description", "session_state"];
+    for (const key of passThroughKeys) {
+      const value = params.get(key);
+      if (value) callback.searchParams.set(key, value);
+    }
+    window.location.href = callback.toString();
+  }, []);
+
+  useEffect(() => {
     void loadInbox();
     void loadMicrosoftAuthStatus();
   }, []);

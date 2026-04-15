@@ -24,6 +24,10 @@ def _client_id() -> str:
     return (os.getenv("MSGRAPH_CLIENT_ID") or "").strip()
 
 
+def _client_secret() -> str:
+    return (os.getenv("MSGRAPH_CLIENT_SECRET") or "").strip()
+
+
 def _redirect_uri() -> str:
     value = (os.getenv("MS_OAUTH_REDIRECT_URI") or "http://localhost:30521/api/auth/microsoft/callback").strip()
     # Azure erlaubt lokal meist "http://localhost" einfacher als 127.0.0.1.
@@ -36,18 +40,36 @@ def _frontend_redirect_uri() -> str:
     return (os.getenv("MS_OAUTH_FRONTEND_REDIRECT") or "http://localhost:5173/mail/compose").strip()
 
 
+def _public_client_mode() -> bool:
+    # Option B (confidential backend flow) ist Default.
+    value = (os.getenv("MS_OAUTH_PUBLIC_CLIENT") or "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _authorization_redirect_uri() -> str:
+    # Public-Client: zuerst ins Frontend und von dort kontrolliert an /callback bridgen.
+    if _public_client_mode():
+        return _frontend_redirect_uri()
+    return _redirect_uri()
+
+
 def _scopes() -> str:
     return (os.getenv("MS_OAUTH_SCOPES") or DEFAULT_SCOPES).strip()
 
 
 def oauth_config_valid() -> bool:
-    return bool(_tenant_id() and _client_id() and _redirect_uri())
+    if not (_tenant_id() and _client_id() and _authorization_redirect_uri()):
+        return False
+    if _public_client_mode():
+        return True
+    return bool(_client_secret())
 
 
 @dataclass
 class OAuthState:
     created_at: float
     code_verifier: str
+    redirect_uri: str
 
 
 @dataclass
@@ -59,9 +81,12 @@ class TokenBundle:
     token_type: str
     id_token: str | None
     user_hint: str | None
+    redirect_uri: str
 
 
 _state_store: Dict[str, OAuthState] = {}
+_state_inflight: Dict[str, float] = {}
+_state_completed: Dict[str, float] = {}
 _token_bundle: TokenBundle | None = None
 
 
@@ -74,6 +99,12 @@ def _cleanup_state_store(ttl_seconds: int = 600) -> None:
     stale = [key for key, value in _state_store.items() if value.created_at < threshold]
     for key in stale:
         _state_store.pop(key, None)
+    stale_processing = [key for key, started_at in _state_inflight.items() if started_at < threshold]
+    for key in stale_processing:
+        _state_inflight.pop(key, None)
+    stale_completed = [key for key, completed_at in _state_completed.items() if completed_at < threshold]
+    for key in stale_completed:
+        _state_completed.pop(key, None)
 
 
 def _build_pkce_pair() -> tuple[str, str]:
@@ -85,16 +116,22 @@ def _build_pkce_pair() -> tuple[str, str]:
 
 def create_authorization_url() -> tuple[str, str]:
     if not oauth_config_valid():
-        raise RuntimeError("OAuth Konfiguration unvollständig (MSGRAPH_TENANT_ID / MSGRAPH_CLIENT_ID / MS_OAUTH_REDIRECT_URI).")
+        raise RuntimeError(
+            "OAuth Konfiguration unvollständig "
+            "(MSGRAPH_TENANT_ID / MSGRAPH_CLIENT_ID / MS_OAUTH_REDIRECT_URI"
+            + (" / MSGRAPH_CLIENT_SECRET" if not _public_client_mode() else "")
+            + ")."
+        )
     _cleanup_state_store()
     state = secrets.token_urlsafe(24)
     code_verifier, code_challenge = _build_pkce_pair()
-    _state_store[state] = OAuthState(created_at=_now(), code_verifier=code_verifier)
+    redirect_uri = _authorization_redirect_uri()
+    _state_store[state] = OAuthState(created_at=_now(), code_verifier=code_verifier, redirect_uri=redirect_uri)
     query = urlencode(
         {
             "client_id": _client_id(),
             "response_type": "code",
-            "redirect_uri": _redirect_uri(),
+            "redirect_uri": redirect_uri,
             "response_mode": "query",
             "scope": _scopes(),
             "state": state,
@@ -110,7 +147,7 @@ def _token_endpoint() -> str:
     return f"{GRAPH_AUTH_BASE}/{_tenant_id()}/oauth2/v2.0/token"
 
 
-def _store_token_payload(payload: Dict[str, Any]) -> TokenBundle:
+def _store_token_payload(payload: Dict[str, Any], redirect_uri: str) -> TokenBundle:
     global _token_bundle
     expires_in = int(payload.get("expires_in") or 0)
     expires_at = _now() + max(60, expires_in)
@@ -122,6 +159,7 @@ def _store_token_payload(payload: Dict[str, Any]) -> TokenBundle:
         token_type=str(payload.get("token_type") or "Bearer"),
         id_token=(str(payload.get("id_token")) if payload.get("id_token") else None),
         user_hint=None,
+        redirect_uri=redirect_uri,
     )
     _token_bundle = bundle
     return bundle
@@ -133,28 +171,43 @@ def exchange_code_for_token(code: str, state: str) -> TokenBundle:
     if not code or not state:
         raise RuntimeError("Fehlender OAuth code/state.")
     _cleanup_state_store()
-    state_entry = _state_store.pop(state, None)
+    state_entry = _state_store.get(state)
     if state_entry is None:
+        # Idempotenz: Doppelte Callback-Aufrufe nach erfolgreichem Abschluss tolerieren.
+        if state in _state_completed and _token_bundle is not None and bool(_token_bundle.access_token):
+            return _token_bundle
         raise RuntimeError("Ungültiger oder abgelaufener OAuth state.")
+    if state in _state_inflight:
+        if _token_bundle is not None and bool(_token_bundle.access_token):
+            return _token_bundle
+        raise RuntimeError("OAuth state wird bereits verarbeitet.")
 
-    response = requests.post(
-        _token_endpoint(),
-        data={
-            "client_id": _client_id(),
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": _redirect_uri(),
-            "code_verifier": state_entry.code_verifier,
-        },
-        timeout=15,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"OAuth Token-Austausch fehlgeschlagen ({response.status_code}): {response.text[:220]}")
-    payload = response.json() if response.content else {}
-    bundle = _store_token_payload(payload)
-    if not bundle.access_token:
-        raise RuntimeError("OAuth Token-Antwort enthält kein access_token.")
-    return bundle
+    _state_inflight[state] = _now()
+
+    try:
+        response = requests.post(
+            _token_endpoint(),
+            data={
+                "client_id": _client_id(),
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": state_entry.redirect_uri,
+                "code_verifier": state_entry.code_verifier,
+                **({"client_secret": _client_secret()} if (not _public_client_mode() and _client_secret()) else {}),
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"OAuth Token-Austausch fehlgeschlagen ({response.status_code}): {response.text[:220]}")
+        payload = response.json() if response.content else {}
+        bundle = _store_token_payload(payload, redirect_uri=state_entry.redirect_uri)
+        if not bundle.access_token:
+            raise RuntimeError("OAuth Token-Antwort enthält kein access_token.")
+        _state_store.pop(state, None)
+        _state_completed[state] = _now()
+        return bundle
+    finally:
+        _state_inflight.pop(state, None)
 
 
 def refresh_access_token() -> TokenBundle:
@@ -169,15 +222,16 @@ def refresh_access_token() -> TokenBundle:
             "client_id": _client_id(),
             "grant_type": "refresh_token",
             "refresh_token": _token_bundle.refresh_token,
-            "redirect_uri": _redirect_uri(),
+            "redirect_uri": _token_bundle.redirect_uri or _authorization_redirect_uri(),
             "scope": _scopes(),
+            **({"client_secret": _client_secret()} if (not _public_client_mode() and _client_secret()) else {}),
         },
         timeout=15,
     )
     if response.status_code >= 400:
         raise RuntimeError(f"OAuth Token-Refresh fehlgeschlagen ({response.status_code}): {response.text[:220]}")
     payload = response.json() if response.content else {}
-    bundle = _store_token_payload(payload)
+    bundle = _store_token_payload(payload, redirect_uri=_token_bundle.redirect_uri or _authorization_redirect_uri())
     if not bundle.access_token:
         raise RuntimeError("OAuth Refresh-Antwort enthält kein access_token.")
     return bundle
@@ -223,3 +277,5 @@ def clear_auth_session() -> None:
     global _token_bundle
     _token_bundle = None
     _state_store.clear()
+    _state_inflight.clear()
+    _state_completed.clear()
