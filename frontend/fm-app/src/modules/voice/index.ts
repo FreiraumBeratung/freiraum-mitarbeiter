@@ -766,8 +766,14 @@ function cleanNameForResolver(raw?: string | null): string | null {
   text = text.replace(/\s+/g, " ");
 
   // Führende und nachgestellte Füllwörter entfernen
-  const leadingStopWords = ["dem", "den", "der", "die", "das", "bei", "an", "am", "im", "in", "vom", "zum", "zur", "bitte"];
-  const trailingStopWords = ["eine", "einen", "ein", "ne", "nen", "kurze", "kurzen", "kurz", "mail", "email", "e-mail", "bitte"];
+  const leadingStopWords = [
+    "dem", "den", "der", "die", "das", "bei", "an", "am", "im", "in", "vom", "zum", "zur", "bitte",
+    "folgende", "folgendes", "nachricht", "mail", "email", "e-mail",
+  ];
+  const trailingStopWords = [
+    "eine", "einen", "ein", "ne", "nen", "kurze", "kurzen", "kurz", "mail", "email", "e-mail", "bitte",
+    "folgende", "folgendes", "nachricht", "nachrichten",
+  ];
 
   let parts = text.split(" ").filter(Boolean);
 
@@ -815,6 +821,41 @@ function cleanNameForResolver(raw?: string | null): string | null {
   // Für jetzt geben wir die normalisierte Version zurück (ohne Leerzeichen)
   // Das ermöglicht "freiraum beratung" -> "freiraumberatung" Matching
   return normalizedForMatching;
+}
+
+function isResolverPlaceholderName(value?: string | null): boolean {
+  const raw = (value || "").toString().trim().toLowerCase();
+  if (!raw) return true;
+  const compact = raw.replace(/[^\p{L}\p{N}\s-]/gu, "").replace(/\s+/g, " ").trim();
+  if (!compact) return true;
+  return [
+    "folgende",
+    "folgendes",
+    "nachricht",
+    "mail",
+    "email",
+    "e mail",
+    "e-mail",
+  ].includes(compact);
+}
+
+function extractNameAfterAn(source?: string | null): string | null {
+  const text = (source || "").toString().trim();
+  if (!text) return null;
+  const match = text.match(/\ban\s+([^.!?,:\n]+)/i);
+  if (!match?.[1]) return null;
+  const rawSegment = match[1].trim();
+  if (!rawSegment) return null;
+  const tokens = rawSegment
+    .split(/\s+/)
+    .map((t) => t.replace(/[^\p{L}\p{N}-]/gu, "").trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return null;
+  const first = tokens[0];
+  const second = tokens[1];
+  const candidate = second && second.length > 1 ? `${first} ${second}` : first;
+  const name = cleanNameForResolver(candidate);
+  return name && !isResolverPlaceholderName(name) ? name : null;
 }
 
 /**
@@ -1791,7 +1832,19 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         
         // Bereinige diese Basis mit der Helper-Funktion
         const cleanedForResolver = cleanNameForResolver(baseForResolver);
-        const finalNameForResolver = cleanedForResolver || baseForResolver;
+        const fallbackFromSourceText =
+          extractNameAfterAn((intent as any)?.sourceText || "") ||
+          extractNameAfterAn((wizard4Draft as any)?.sourceText || "");
+        const finalNameForResolver = !isResolverPlaceholderName(cleanedForResolver)
+          ? cleanedForResolver
+          : fallbackFromSourceText;
+
+        if (wizard4Draft && finalNameForResolver && finalNameForResolver.trim()) {
+          const existingName = (wizard4Draft.toName || "").toString().trim();
+          if (!existingName || isResolverPlaceholderName(existingName)) {
+            wizard4Draft.toName = finalNameForResolver;
+          }
+        }
         
         // Schritt 3: Contact Resolver (nur wenn noch keine E-Mail vorhanden) - JETZT MIT AWAIT
         if (!finalToEmail && finalNameForResolver && finalNameForResolver.trim()) {
@@ -1850,12 +1903,48 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                       debug: resolveData.debug
                     };
                   }
+                } else if (resolveData?.ambiguity?.choices?.length) {
+                  const choices = (resolveData.ambiguity.choices as Array<{ displayName?: string; email?: string }>)
+                    .slice(0, 3)
+                    .map((choice) => {
+                      const label = (choice.displayName || "").trim();
+                      const email = (choice.email || "").trim();
+                      return label && email ? `${label} (${email})` : (label || email);
+                    })
+                    .filter(Boolean);
+                  if (choices.length > 0) {
+                    const choiceText = choices.join(" oder ");
+                    const hintMessage = `Mehrdeutiger Kontakt: ${choiceText}. Nenne bitte den genauen Namen.`;
+                    (window as any).__fm_last_hint = {
+                      kind: "contact_ambiguous",
+                      message: hintMessage,
+                      ts: Date.now(),
+                    };
+                    if (typeof window?.dispatchEvent === "function") {
+                      window.dispatchEvent(new CustomEvent("fm-hint-update"));
+                    }
+                    PartnerBotBus.say(`Ich habe mehrere Kontakte gefunden: ${choiceText}. Wen meinst du genau?`);
+                    console.log("[fm-voice][wizard4][contact-resolver] ambiguity detected", {
+                      input: finalNameForResolver,
+                      choices,
+                    });
+                  }
                 } else {
                   console.log('[fm-voice][wizard4][contact-resolver] Kein Match gefunden für:', finalNameForResolver, resolveData.debug?.result);
                 }
               }
             } else {
               console.warn('[fm-voice][wizard4][contact-resolver] API-Fehler:', resolveResponse.status);
+              if (resolveResponse.status >= 500) {
+                (window as any).__fm_last_hint = {
+                  kind: "contact_resolver_unavailable",
+                  message: "Kontaktauflösung ist gerade nicht verfügbar. Bitte E-Mail-Adresse nennen oder später erneut versuchen.",
+                  ts: Date.now(),
+                };
+                if (typeof window?.dispatchEvent === "function") {
+                  window.dispatchEvent(new CustomEvent("fm-hint-update"));
+                }
+              }
             }
           } catch (err) {
             console.error('[fm-voice][wizard4][contact-resolver] Fehler beim Auflösen:', err);

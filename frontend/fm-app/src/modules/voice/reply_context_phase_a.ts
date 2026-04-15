@@ -36,11 +36,11 @@ function hasAddressedSenderDirective(text: string, context: SelectedMailContext 
 }
 
 function hasReplyVerb(text: string): boolean {
-  return /\b(antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?)\b/i.test(text);
+  return /\b(antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?)\b/i.test(text);
 }
 
 function hasLeadingReplyCommand(text: string): boolean {
-  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+|bitte\s+)*(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:)/i.test(
+  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+|bitte\s+)*(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:|direkt(?:e)?\s+antwort(?:\s*:)?|kurze?\s+antwort(?:\s*:)?)/i.test(
     text
   );
 }
@@ -49,7 +49,14 @@ function hasContextualReplyShortcut(text: string): boolean {
   return (
     /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:sag\s+(?:ihm|ihr|denen)(?:\s+bitte)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s+wie\s+folgt|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:)/i.test(
       text
-    ) || /\bantwort\s+wie\s+folgt\b/i.test(text)
+    ) ||
+    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:direkt(?:e)?\s+antwort|kurze?\s+antwort|antwort\s+direkt|direkt(?:e)?\s+r[üu]ckmeldung)\b/i.test(
+      text
+    ) ||
+    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?wissen|gib\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?durch|sag\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?bescheid)\b/i.test(
+      text
+    ) ||
+    /\bantwort\s+wie\s+folgt\b/i.test(text)
   );
 }
 
@@ -65,7 +72,10 @@ function hasDirectReplyTrigger(text: string): boolean {
   return (
     /\b(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|schreib\s+zur(?:ue|[üu])ck)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
     /\b(?:direkt|sofort)\s+(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|zurück)\b/i.test(text) ||
-    /\b(?:sende|schick(?:e)?)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text)
+    /\b(?:sende|schick(?:e)?)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
+    /\bdirekt(?:e)?\s+antwort\b/i.test(text) ||
+    /\b(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+)?)?(?:direkt|sofort)\s+wissen\b/i.test(text) ||
+    /\b(?:gib|sag)\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:direkt|sofort)\s+(?:durch|bescheid)\b/i.test(text)
   );
 }
 
@@ -74,11 +84,15 @@ function normalizeBodyHint(bodyHint: string | undefined): string | undefined {
   const trimmed = bodyHint.trim();
   if (!trimmed) return undefined;
   const low = trimmed.toLowerCase();
+  const canonical = low.replace(/[.!?]+$/g, "").trim();
   if (
-    /^(?:auf\s+)?(?:diese|die)\s+(?:mail|e-?mail|email|nachricht|antwort)$/.test(low) ||
-    /^(?:mail|e-?mail|email|nachricht|antwort)$/.test(low) ||
+    /^(?:auf\s+)?(?:diese|die)\s+(?:mail|e-?mail|email|nachricht|antwort)$/.test(canonical) ||
+    /^(?:mail|e-?mail|email|nachricht|antwort)$/.test(canonical) ||
+    /^(?:(?:bitte|direkt|sofort)\s+)*(?:antwort(?:e|en)?|antworte|beantworte|zurück(?:schreiben|schreib)?)(?:\s+auf)?\s*(?:diese|die)?\s*(?:mail|e-?mail|email|nachricht|antwort)?$/.test(
+      canonical
+    ) ||
     /^(?:(?:bitte|direkt|sofort)\s+)*(?:antworten?|antworte|beantworte|zurück(?:schreiben|schreib)?)?(?:\s+auf)?\s*(?:diese|die)?\s*(?:mail|e-?mail|email|nachricht|antwort)?$/.test(
-      low
+      canonical
     )
   ) {
     return undefined;
@@ -119,6 +133,15 @@ export function extractReplyBodyHint(
     /^\s*(?:bitte\s+)?(?:sag\s+(?:ihm|ihr|denen)(?:\s+bitte)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s+wie\s+folgt|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:)[\s,:\-]*/i,
     ""
   );
+  rest = rest.replace(
+    /^\s*(?:bitte\s+)?(?:direkt(?:e)?\s+antwort|kurze?\s+antwort|antwort\s+direkt|direkt(?:e)?\s+r[üu]ckmeldung)\s*[:\-]?\s*/i,
+    ""
+  );
+  rest = rest.replace(
+    /^\s*(?:bitte\s+)?(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?wissen|gib\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?durch|sag\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?bescheid)\s*[:\-]?\s*/i,
+    ""
+  );
+  rest = rest.replace(/^\s*(?:direkt|sofort)\s+bescheid\b[\s,:\-]*/i, "");
   rest = rest.replace(
     /^\s*(?:bitte\s+)?(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?)(?:\s+bitte)?\s+(?:direkt|sofort)\s*/i,
     ""
@@ -169,7 +192,14 @@ export function buildReplyIntentFromSelectedMailContext(
   const hasShortcut = hasContextualReplyShortcut(normalized);
   if (!hasStrongReply && !hasShortcut && !addressedSender) return null;
 
-  const bodyHint = normalizeBodyHint(extractReplyBodyHint(normalized, selectedContext));
+  let bodyHint = normalizeBodyHint(extractReplyBodyHint(normalized, selectedContext));
+  if (
+    /^\s*(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?)(?:\s+auf\s+(?:diese|die)\s+(?:mail|e-?mail|email|nachricht))?\s*[.!?]*\s*$/i.test(
+      normalized
+    )
+  ) {
+    bodyHint = undefined;
+  }
 
   return {
     type: "email-compose",

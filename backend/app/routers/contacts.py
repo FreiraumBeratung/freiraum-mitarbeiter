@@ -34,7 +34,8 @@ def resolve_contact(name: str = Query(..., description="Name, der aufgelöst wer
         "inputName": name,
         "email": result.email,
         "matchedContact": None,
-        "debug": result.debug
+        "debug": result.debug,
+        "ambiguity": None,
     }
     
     if result.matched_contact:
@@ -43,6 +44,19 @@ def resolve_contact(name: str = Query(..., description="Name, der aufgelöst wer
             "displayName": result.matched_contact.display_name,
             "aliases": result.matched_contact.aliases,
             "emails": result.matched_contact.emails
+        }
+
+    if result.ambiguous_contacts:
+        response["ambiguity"] = {
+            "message": "Mehrere Kontakte passen. Bitte Auswahl präzisieren.",
+            "choices": [
+                {
+                    "id": c.id,
+                    "displayName": c.display_name,
+                    "email": c.emails[0] if c.emails else None,
+                }
+                for c in result.ambiguous_contacts
+            ],
         }
     
     return response

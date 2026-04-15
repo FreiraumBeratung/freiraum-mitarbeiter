@@ -202,6 +202,56 @@ describe("reply_context_phase_a", () => {
     }
   });
 
+  it("supports informal shortcut 'direkte Antwort ...' in active context", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Direkte Antwort: Bei mir ist alles gut.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.bodyHint).toBe("Bei mir ist alles gut.");
+    }
+  });
+
+  it("supports informal shortcut 'lass ihn sofort wissen ...'", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Lass ihn sofort wissen, wir sind startklar.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.bodyHint).toBe("wir sind startklar.");
+    }
+  });
+
+  it("supports informal shortcut 'gib ihm direkt durch ...'", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Gib ihm direkt durch, wir melden uns in 10 Minuten.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.bodyHint).toBe("wir melden uns in 10 Minuten.");
+    }
+  });
+
+  it("supports informal shortcut 'sag ihm direkt Bescheid ...'", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Sag ihm direkt Bescheid, der Termin steht.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.bodyHint).toBe("der Termin steht.");
+    }
+  });
+
   it("keeps preview mode when direct reply requested without body", () => {
     const intent = buildReplyIntentFromSelectedMailContext(
       "Bitte direkt antworten auf diese Mail",

@@ -6,6 +6,8 @@ import {
   type SelectedMailContext,
 } from "../../modules/mail/selectedMailContext";
 
+const OPENED_UIDS_STORAGE_KEY = "fm_exchange_opened_uids_v1";
+
 type InboxItem = {
   uid: string;
   messageId?: string | null;
@@ -14,12 +16,20 @@ type InboxItem = {
   fromEmail?: string | null;
   receivedAt?: string | null;
   preview?: string | null;
+  isRead?: boolean;
 };
 
 type InboxResponse = {
   ok: boolean;
   total: number;
   items: InboxItem[];
+};
+
+type MicrosoftAuthStatus = {
+  ok: boolean;
+  connected?: boolean;
+  oauthConfigured?: boolean;
+  expiresInSec?: number;
 };
 
 function backendBase(): string {
@@ -80,6 +90,21 @@ export default function ExchangeInboxPanel() {
   const [query, setQuery] = useState("");
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [activeContext, setActiveContext] = useState<SelectedMailContext | null>(null);
+  const [openedUids, setOpenedUids] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = window.localStorage.getItem(OPENED_UIDS_STORAGE_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set();
+      const sanitized = parsed.filter((v) => typeof v === "string" && v.trim().length > 0);
+      return new Set(sanitized);
+    } catch {
+      return new Set();
+    }
+  });
+  const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
+  const [msAuthLoading, setMsAuthLoading] = useState(false);
 
   const normalizedItems = useMemo(
     () =>
@@ -102,6 +127,10 @@ export default function ExchangeInboxPanel() {
   }, [normalizedItems, query]);
 
   const visible = useMemo(() => filtered.slice(0, 20), [filtered]);
+  const unreadVisible = useMemo(
+    () => visible.filter((item) => item.isRead === false && !openedUids.has(item.uid)).length,
+    [visible, openedUids]
+  );
 
   function buildContext(item: InboxItem): SelectedMailContext {
     return {
@@ -122,6 +151,11 @@ export default function ExchangeInboxPanel() {
       return;
     }
     setSelectedUid(item.uid);
+    setOpenedUids((prev) => {
+      const next = new Set(prev);
+      next.add(item.uid);
+      return next;
+    });
     const context = buildContext(item);
     setSelectedMailContext(context);
     setActiveContext(context);
@@ -131,7 +165,13 @@ export default function ExchangeInboxPanel() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${backendBase()}/api/mail/inbox?limit=50&offset=0`);
+      const inboxUrl = `${backendBase()}/api/mail/inbox?limit=50&offset=0`;
+      let res = await fetch(inboxUrl);
+      if (res.status === 503) {
+        // Initiale IMAP-Anmeldung kann kurz verzögert sein -> stiller Einmal-Retry.
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        res = await fetch(inboxUrl);
+      }
       const data = (await res.json()) as InboxResponse;
       if (!res.ok || !data?.ok) throw new Error("Inbox konnte nicht geladen werden.");
       const nextItems = data.items || [];
@@ -140,8 +180,7 @@ export default function ExchangeInboxPanel() {
       const persisted = getSelectedMailContext();
       const bySelectedUid = selectedUid ? nextItems.find((it) => it.uid === selectedUid) : null;
       const byPersistedUid = persisted?.uid ? nextItems.find((it) => it.uid === persisted.uid) : null;
-      const fallback = nextItems[0] || null;
-      applySelection(bySelectedUid || byPersistedUid || fallback);
+      applySelection(bySelectedUid || byPersistedUid || null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Inbox konnte nicht geladen werden.");
     } finally {
@@ -149,8 +188,56 @@ export default function ExchangeInboxPanel() {
     }
   };
 
+  const loadMicrosoftAuthStatus = async () => {
+    try {
+      const res = await fetch(`${backendBase()}/api/auth/microsoft/status`);
+      const data = (await res.json()) as MicrosoftAuthStatus;
+      if (res.ok && data?.ok) {
+        setMsAuth(data);
+      } else {
+        setMsAuth({ ok: false, connected: false, oauthConfigured: false });
+      }
+    } catch {
+      setMsAuth({ ok: false, connected: false, oauthConfigured: false });
+    }
+  };
+
+  const connectMicrosoft = async () => {
+    setMsAuthLoading(true);
+    try {
+      const res = await fetch(`${backendBase()}/api/auth/microsoft/start`);
+      const data = (await res.json()) as { ok?: boolean; authUrl?: string };
+      if (!res.ok || !data?.ok || !data?.authUrl) {
+        throw new Error("Microsoft OAuth Start fehlgeschlagen.");
+      }
+      const authUrl = data.authUrl.replace(
+        "redirect_uri=http%3A%2F%2F127.0.0.1%3A30521%2Fapi%2Fauth%2Fmicrosoft%2Fcallback",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A30521%2Fapi%2Fauth%2Fmicrosoft%2Fcallback"
+      );
+      window.location.href = authUrl;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Microsoft OAuth Start fehlgeschlagen.";
+      setError(msg);
+    } finally {
+      setMsAuthLoading(false);
+    }
+  };
+
+  const disconnectMicrosoft = async () => {
+    setMsAuthLoading(true);
+    try {
+      await fetch(`${backendBase()}/api/auth/microsoft/logout`, { method: "POST" });
+    } catch {
+      // no-op
+    } finally {
+      await loadMicrosoftAuthStatus();
+      setMsAuthLoading(false);
+    }
+  };
+
   useEffect(() => {
     void loadInbox();
+    void loadMicrosoftAuthStatus();
   }, []);
 
   useEffect(() => {
@@ -165,6 +252,15 @@ export default function ExchangeInboxPanel() {
       window.removeEventListener("fm-selected-mail-context", onChanged as EventListener);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(OPENED_UIDS_STORAGE_KEY, JSON.stringify(Array.from(openedUids)));
+    } catch {
+      // ignore localStorage errors (private mode/quota)
+    }
+  }, [openedUids]);
 
   return (
     <div
@@ -219,6 +315,32 @@ export default function ExchangeInboxPanel() {
         >
           Aktualisieren
         </button>
+        <button
+          onClick={() => {
+            if (msAuth?.connected) {
+              void disconnectMicrosoft();
+            } else {
+              void connectMicrosoft();
+            }
+          }}
+          disabled={msAuthLoading || (msAuth?.oauthConfigured === false && !msAuth?.connected)}
+          style={{
+            height: 26,
+            borderRadius: 999,
+            border: msAuth?.connected
+              ? "1px solid rgba(112,237,161,0.38)"
+              : "1px solid rgba(255,255,255,0.18)",
+            background: msAuth?.connected ? "rgba(78,196,126,0.18)" : "rgba(255,255,255,0.10)",
+            color: msAuth?.connected ? "rgba(210,255,225,0.95)" : "rgba(255,255,255,0.85)",
+            padding: "0 10px",
+            fontSize: 11,
+            cursor: msAuthLoading ? "wait" : "pointer",
+            whiteSpace: "nowrap",
+          }}
+          title={msAuth?.connected ? "Microsoft Konto trennen" : "Mit Microsoft verbinden"}
+        >
+          {msAuth?.connected ? "Microsoft verbunden" : "Microsoft verbinden"}
+        </button>
       </div>
 
       <div
@@ -271,6 +393,22 @@ export default function ExchangeInboxPanel() {
           Kontext lösen
         </button>
       </div>
+      {msAuth && (
+        <div
+          style={{
+            marginBottom: 8,
+            fontSize: 10,
+            color: msAuth.connected ? "rgba(142,243,181,0.88)" : "rgba(255,255,255,0.55)",
+            paddingLeft: 2,
+          }}
+        >
+          {msAuth.connected
+            ? `Microsoft OAuth aktiv${typeof msAuth.expiresInSec === "number" ? ` (${Math.max(0, Math.floor(msAuth.expiresInSec / 60))}m)` : ""}`
+            : msAuth.oauthConfigured === false
+            ? "Microsoft OAuth nicht konfiguriert (Backend ENV prüfen)"
+            : "Microsoft OAuth nicht verbunden"}
+        </div>
+      )}
 
       <div
         style={{
@@ -295,6 +433,7 @@ export default function ExchangeInboxPanel() {
           visible.map((item) => {
             const selected = item.uid === selectedUid;
             const fromLabel = item.fromName || item.fromEmail || "Unbekannt";
+            const isUnread = item.isRead === false && !openedUids.has(item.uid);
             return (
               <button
                 key={item.uid}
@@ -302,8 +441,16 @@ export default function ExchangeInboxPanel() {
                 style={{
                   width: "100%",
                   borderRadius: 12,
-                  border: selected ? "1px solid rgba(255,255,255,0.30)" : "1px solid rgba(255,255,255,0.13)",
-                  background: selected ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
+                  border: selected
+                    ? "1px solid rgba(255,255,255,0.30)"
+                    : isUnread
+                    ? "1px solid rgba(129,178,255,0.42)"
+                    : "1px solid rgba(255,255,255,0.13)",
+                  background: selected
+                    ? "rgba(255,255,255,0.15)"
+                    : isUnread
+                    ? "linear-gradient(180deg, rgba(56,98,160,0.24), rgba(255,255,255,0.08))"
+                    : "rgba(255,255,255,0.08)",
                   color: "#fff",
                   padding: "9px 11px",
                   textAlign: "left",
@@ -312,8 +459,29 @@ export default function ExchangeInboxPanel() {
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: "rgba(255,255,255,0.94)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {item.subject}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                    <span
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: 999,
+                        background: isUnread ? "rgba(129,178,255,0.95)" : "rgba(255,255,255,0.24)",
+                        boxShadow: isUnread ? "0 0 0 3px rgba(129,178,255,0.18)" : "none",
+                        flexShrink: 0,
+                      }}
+                    />
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: isUnread ? 700 : 600,
+                        color: isUnread ? "rgba(255,255,255,0.99)" : "rgba(255,255,255,0.94)",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {item.subject}
+                    </div>
                   </div>
                   <div style={{ fontSize: 10, color: "rgba(255,255,255,0.52)", flexShrink: 0 }}>{fmtDate(item.receivedAt)}</div>
                 </div>
@@ -331,7 +499,7 @@ export default function ExchangeInboxPanel() {
 
         {!loading && !error && (
           <div style={{ paddingTop: 2, fontSize: 10, color: "rgba(255,255,255,0.42)" }}>
-            {visible.length} sichtbar / {filtered.length} gefiltert / {total} gesamt
+            {unreadVisible} ungelesen · {visible.length} sichtbar / {filtered.length} gefiltert / {total} gesamt
           </div>
         )}
       </div>

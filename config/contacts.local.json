@@ -13,14 +13,32 @@
   },
   {
     "id": "endrit",
-    "displayName": "Endrit Bytyqi",
-    "aliases": ["endrit", "Endrit", "Endrit Bytyqi", "dit", "Dit", "bruder", "Bruder"],
-    "emails": ["bac598@web.de"]
+    "displayName": "Bruder Bytyqi",
+    "aliases": ["bruder bytyqi", "Bruder Bytyqi", "endrit", "Endrit", "Endrit Bytyqi", "dit", "Dit", "did", "Did", "bruder", "Bruder"],
+    "emails": ["Endrit.bytyqi@allianz.de"]
   },
   {
     "id": "thomas",
     "displayName": "Thomas Müller",
     "aliases": ["thomas", "Thomas", "Thomas Müller", "Thomas Mueller", "dem thomas", "den thomas", "bei thomas", "an thomas", "mueller", "Müller", "Mueller"],
     "emails": ["DenisBytyqi598@web.de"]
+  },
+  {
+    "id": "jens",
+    "displayName": "Jens Hoffmann",
+    "aliases": ["jens", "Jens", "Jens Hoffmann", "dem jens", "den jens", "bei jens", "an jens", "hoffmann", "Hoffmann"],
+    "emails": ["bac598@web.de"]
+  },
+  {
+    "id": "fabian",
+    "displayName": "Fabian Hoffmann",
+    "aliases": ["fabian", "Fabian", "Fabian Hoffmann", "dem fabian", "den fabian", "bei fabian", "an fabian", "hoffmann", "Hoffmann"],
+    "emails": ["mirjetajusufi94@web.de"]
+  },
+  {
+    "id": "dirk",
+    "displayName": "Dirk Müller",
+    "aliases": ["dirk", "Dirk", "Dirk Müller", "Dirk Mueller", "dem dirk", "den dirk", "bei dirk", "an dirk", "mueller", "Müller", "Mueller"],
+    "emails": ["freiraumberatung@web.de"]
   }
 ]

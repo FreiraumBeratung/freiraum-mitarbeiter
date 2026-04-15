@@ -111,6 +111,14 @@ try:
 except Exception as e:
     print(f"[fm-contacts] FEHLER beim Laden des Contacts-Routers: {e}")
     pass
+try:
+    from .routers.auth_microsoft import router as auth_microsoft_router
+
+    app.include_router(auth_microsoft_router)
+    print("[fm-auth] Microsoft OAuth Router registriert")
+except Exception as e:
+    print(f"[fm-auth] FEHLER beim Laden des Microsoft OAuth Routers: {e}")
+    pass
 # lead_hunter_osm will be loaded by router_loader
 load_and_include_routers(app)
 

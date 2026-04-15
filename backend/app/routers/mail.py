@@ -7,6 +7,7 @@ import ssl
 import imaplib
 import email
 import re
+import time
 from email.header import decode_header
 from email.message import EmailMessage
 from email.mime.multipart import MIMEMultipart
@@ -47,6 +48,7 @@ class InboxMessageItem(BaseModel):
     fromEmail: str | None = None
     receivedAt: str | None = None
     preview: str | None = None
+    isRead: bool = False
 
 
 class InboxListResponse(BaseModel):
@@ -157,6 +159,26 @@ def _open_imap_client() -> imaplib.IMAP4_SSL:
     except Exception as exc:
         logger.exception("IMAP Verbindung fehlgeschlagen")
         raise HTTPException(status_code=503, detail="IMAP Verbindung fehlgeschlagen.") from exc
+
+
+def _open_imap_client_with_retry(max_attempts: int = 2, delay_seconds: float = 0.7) -> imaplib.IMAP4_SSL:
+    """
+    Öffnet IMAP mit kurzem Retry-Backoff.
+    Hilft bei temporären Start-/Reconnect-Rennen ohne die API unnötig fehlschlagen zu lassen.
+    """
+    last_exc: HTTPException | None = None
+    attempts = max(1, max_attempts)
+    for attempt in range(attempts):
+        try:
+            return _open_imap_client()
+        except HTTPException as exc:
+            last_exc = exc
+            if exc.status_code != 503 or attempt >= attempts - 1:
+                raise
+            time.sleep(delay_seconds)
+    if last_exc is not None:
+        raise last_exc
+    raise HTTPException(status_code=503, detail="IMAP Verbindung fehlgeschlagen.")
 
 
 def _build_smtp_client() -> smtplib.SMTP:
@@ -405,7 +427,7 @@ async def get_inbox(limit: int = 25, offset: int = 0):
     safe_limit = max(1, min(limit, 60))
     safe_offset = max(0, offset)
 
-    client = _open_imap_client()
+    client = _open_imap_client_with_retry()
     try:
         status, _ = client.select("INBOX", readonly=True)
         if status != "OK":
@@ -423,13 +445,18 @@ async def get_inbox(limit: int = 25, offset: int = 0):
         items: list[InboxMessageItem] = []
         for uid_bytes in selected_uids:
             uid = uid_bytes.decode("utf-8", errors="replace")
-            fetch_status, fetch_data = client.uid("FETCH", uid, "(RFC822)")
+            fetch_status, fetch_data = client.uid("FETCH", uid, "(FLAGS RFC822)")
             if fetch_status != "OK" or not fetch_data:
                 continue
 
             raw_email = None
+            is_read = False
             for part in fetch_data:
                 if isinstance(part, tuple) and len(part) > 1:
+                    if isinstance(part[0], bytes):
+                        head_blob = part[0]
+                        if b"FLAGS" in head_blob and b"\\Seen" in head_blob:
+                            is_read = True
                     raw_email = part[1]
                     break
             if not raw_email:
@@ -452,6 +479,7 @@ async def get_inbox(limit: int = 25, offset: int = 0):
                     fromEmail=from_email,
                     receivedAt=received_at,
                     preview=preview,
+                    isRead=is_read,
                 )
             )
 
@@ -469,7 +497,7 @@ async def get_inbox_message(uid: str):
     if not safe_uid:
         raise HTTPException(status_code=400, detail="uid ist erforderlich.")
 
-    client = _open_imap_client()
+    client = _open_imap_client_with_retry()
     try:
         status, _ = client.select("INBOX", readonly=True)
         if status != "OK":
