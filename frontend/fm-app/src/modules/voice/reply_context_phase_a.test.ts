@@ -162,6 +162,33 @@ describe("reply_context_phase_a", () => {
     }
   });
 
+  it("sets autosend for 'Antworte bitte ...' when body is present", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Antworte bitte, mir geht es gut.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.bodyHint).toBe("mir geht es gut.");
+    }
+  });
+
+  it("forces preview-only for context direct reply when cancel phrase is present", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Antworte bitte direkt, wir melden uns morgen lieber doch nicht.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(false);
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
+      expect(intent.meta?.cancelled).toBe(true);
+      expect(intent.meta?.disableSendPhraseDetection).toBe(true);
+    }
+  });
+
   it("supports sender-addressed command 'Dennis bitte folgendes ...'", () => {
     const dennisContext = { ...baseContext, fromName: "Dennis Schuster", fromEmail: "dennis@example.com" };
     const intent = buildReplyIntentFromSelectedMailContext(

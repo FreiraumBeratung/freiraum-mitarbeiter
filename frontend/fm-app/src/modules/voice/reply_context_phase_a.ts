@@ -1,5 +1,6 @@
 import type { SelectedMailContext } from "../mail/selectedMailContext";
 import type { VoiceIntent } from "./intent_router";
+import { hasCancelPhrase, stripCancelPhraseFromBody } from "../../logic/wizard4/cancel_phrase";
 type EmailComposeIntent = Extract<VoiceIntent, { type: "email-compose" }>;
 
 function escapeRegex(input: string): string {
@@ -11,6 +12,20 @@ function normalizeCommandText(text: string): string {
     .trim()
     .replace(/\s+/g, " ")
     .replace(/zurueck/gi, "zurück");
+}
+
+function normalizeForCancelDetection(text: string): string {
+  return (text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function senderAliases(context: SelectedMailContext | null | undefined): string[] {
@@ -70,6 +85,8 @@ function hasMailTargetHint(text: string): boolean {
 
 function hasDirectReplyTrigger(text: string): boolean {
   return (
+    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?)\s+bitte\b/i.test(text) ||
+    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*bitte\s+(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?)\b/i.test(text) ||
     /\b(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|schreib\s+zur(?:ue|[üu])ck)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
     /\b(?:direkt|sofort)\s+(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|zurück)\b/i.test(text) ||
     /\b(?:sende|schick(?:e)?)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
@@ -200,6 +217,18 @@ export function buildReplyIntentFromSelectedMailContext(
   ) {
     bodyHint = undefined;
   }
+  const rawBodyHint = bodyHint;
+  if (bodyHint) {
+    const stripped = stripCancelPhraseFromBody(bodyHint).trim();
+    bodyHint = stripped.length > 0 ? stripped : bodyHint;
+  }
+  const cancelRequested = hasCancelPhrase({
+    raw: transcript,
+    normalized: normalizeForCancelDetection(transcript),
+  });
+  const hasBodyForSend = !!bodyHint;
+  const autoSend = directRequested && hasBodyForSend && !cancelRequested;
+  const forcePreviewOnly = !autoSend || cancelRequested;
 
   return {
     type: "email-compose",
@@ -207,15 +236,20 @@ export function buildReplyIntentFromSelectedMailContext(
     toRaw: selectedContext.fromName || selectedContext.fromEmail,
     subjectHint: normalizeReplySubject(selectedContext.subject),
     bodyHint,
-    bodyHintRaw: bodyHint,
+    bodyHintRaw: rawBodyHint,
     meta: {
       source: directRequested
         ? "exchange-context-reply-direct"
         : "exchange-context-reply-phase-a",
-      autoSend: directRequested && !!bodyHint,
-      forcePreviewOnly: !(directRequested && !!bodyHint),
+      autoSend,
+      forcePreviewOnly,
+      ...(cancelRequested && {
+        cancelled: true,
+        disableSendPhraseDetection: true,
+        forcePreviewOnlyReason: "cancel_phrase",
+      }),
       uiHint: bodyHint
-        ? directRequested
+        ? autoSend
           ? "Direktantwort erkannt. Ich sende sofort, sobald der Entwurf vollständig ist."
           : undefined
         : "Mail-Kontext aktiv. Diktiere jetzt den Antworttext, ich erstelle den Entwurf.",

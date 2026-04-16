@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import secrets
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
@@ -88,10 +90,82 @@ _state_store: Dict[str, OAuthState] = {}
 _state_inflight: Dict[str, float] = {}
 _state_completed: Dict[str, float] = {}
 _token_bundle: TokenBundle | None = None
+_token_loaded_from_disk = False
 
 
 def _now() -> float:
     return time.time()
+
+
+def _session_file_path() -> Path:
+    configured = (os.getenv("MS_OAUTH_SESSION_FILE") or "").strip()
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[2] / "data" / "cache" / "ms_oauth_session.json"
+
+
+def _save_token_bundle_to_disk(bundle: TokenBundle) -> None:
+    path = _session_file_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "access_token": bundle.access_token,
+            "refresh_token": bundle.refresh_token,
+            "expires_at": bundle.expires_at,
+            "scope": bundle.scope,
+            "token_type": bundle.token_type,
+            "id_token": bundle.id_token,
+            "user_hint": bundle.user_hint,
+            "redirect_uri": bundle.redirect_uri,
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        # Persistenz ist Best-Effort, Laufzeitbetrieb darf nicht scheitern.
+        pass
+
+
+def _clear_token_bundle_from_disk() -> None:
+    path = _session_file_path()
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def _load_token_bundle_from_disk() -> TokenBundle | None:
+    path = _session_file_path()
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return None
+        access_token = str(raw.get("access_token") or "")
+        if not access_token:
+            return None
+        return TokenBundle(
+            access_token=access_token,
+            refresh_token=(str(raw.get("refresh_token")) if raw.get("refresh_token") else None),
+            expires_at=float(raw.get("expires_at") or 0.0),
+            scope=str(raw.get("scope") or ""),
+            token_type=str(raw.get("token_type") or "Bearer"),
+            id_token=(str(raw.get("id_token")) if raw.get("id_token") else None),
+            user_hint=(str(raw.get("user_hint")) if raw.get("user_hint") else None),
+            redirect_uri=str(raw.get("redirect_uri") or _authorization_redirect_uri()),
+        )
+    except Exception:
+        return None
+
+
+def _ensure_token_loaded() -> None:
+    global _token_bundle, _token_loaded_from_disk
+    if _token_bundle is not None or _token_loaded_from_disk:
+        return
+    _token_loaded_from_disk = True
+    persisted = _load_token_bundle_from_disk()
+    if persisted is not None:
+        _token_bundle = persisted
 
 
 def _cleanup_state_store(ttl_seconds: int = 600) -> None:
@@ -162,6 +236,7 @@ def _store_token_payload(payload: Dict[str, Any], redirect_uri: str) -> TokenBun
         redirect_uri=redirect_uri,
     )
     _token_bundle = bundle
+    _save_token_bundle_to_disk(bundle)
     return bundle
 
 
@@ -239,6 +314,7 @@ def refresh_access_token() -> TokenBundle:
 
 def get_valid_access_token(refresh_if_needed: bool = True) -> str | None:
     global _token_bundle
+    _ensure_token_loaded()
     if _token_bundle is None or not _token_bundle.access_token:
         return None
     # 60s Puffer
@@ -254,6 +330,7 @@ def get_valid_access_token(refresh_if_needed: bool = True) -> str | None:
 
 
 def get_auth_status() -> Dict[str, Any]:
+    _ensure_token_loaded()
     if _token_bundle is None:
         return {
             "connected": False,
@@ -261,9 +338,11 @@ def get_auth_status() -> Dict[str, Any]:
             "frontendRedirect": _frontend_redirect_uri(),
             "oauthConfigured": oauth_config_valid(),
         }
+    # "connected" soll den tatsächlich nutzbaren Tokenzustand widerspiegeln.
+    active_token = get_valid_access_token(refresh_if_needed=True)
     remaining = int(max(0, _token_bundle.expires_at - _now()))
     return {
-        "connected": bool(_token_bundle.access_token),
+        "connected": bool(active_token),
         "provider": "microsoft",
         "oauthConfigured": oauth_config_valid(),
         "scopes": _token_bundle.scope,
@@ -279,3 +358,4 @@ def clear_auth_session() -> None:
     _state_store.clear()
     _state_inflight.clear()
     _state_completed.clear()
+    _clear_token_bundle_from_disk()

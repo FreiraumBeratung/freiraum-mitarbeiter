@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from email.header import decode_header
 
 logger = logging.getLogger(__name__)
+from .contact_store import get_contact_store
 
 # Stopwords, die entfernt werden sollen
 STOPWORDS = {
@@ -73,14 +74,18 @@ class ContactResolver:
         self.contacts: List[Contact] = []
         self._mailbox_contacts: List[Contact] = []
         self._graph_contacts: List[Contact] = []
+        self._learned_contacts: List[Contact] = []
         self._last_mtime: float = 0.0
         self._mailbox_contacts_loaded_at: float = 0.0
         self._graph_contacts_loaded_at: float = 0.0
+        self._learned_contacts_loaded_at: float = 0.0
+        self._contact_store = get_contact_store()
         
         # Initiales Laden
         self._load_contacts()
         self._load_mailbox_contacts()
         self._load_graph_contacts()
+        self._load_learned_contacts()
         
         logger.info(
             f"contacts.local.json loaded: {len(self.contacts)} contacts (path={self.contacts_file})"
@@ -117,6 +122,10 @@ class ContactResolver:
     def _imap_pass() -> str:
         return os.getenv("IMAP_PASS") or os.getenv("IMAP_PASSWORD") or ""
 
+    @classmethod
+    def _imap_config_available(cls) -> bool:
+        return bool(cls._imap_host() and cls._imap_user() and cls._imap_pass())
+
     @staticmethod
     def _graph_headers() -> Optional[Dict[str, str]]:
         token = os.getenv("MSGRAPH_TOKEN", "").strip()
@@ -133,6 +142,59 @@ class ContactResolver:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
+
+    def _load_learned_contacts(self) -> None:
+        rows = self._contact_store.get_contacts()
+        contacts: List[Contact] = []
+        for row in rows:
+            email_value = (row.get("email") or "").strip().lower()
+            if not email_value:
+                continue
+            display_name = (row.get("display_name") or "").strip() or email_value.split("@", 1)[0]
+            aliases = row.get("aliases") if isinstance(row.get("aliases"), list) else []
+            contacts.append(
+                Contact(
+                    id=f"learned:{email_value}",
+                    display_name=display_name,
+                    aliases=[str(a) for a in aliases if isinstance(a, str)],
+                    emails=[email_value],
+                )
+            )
+        self._learned_contacts = contacts
+        self._learned_contacts_loaded_at = time.time()
+
+    def get_status_snapshot(self) -> Dict:
+        return {
+            "localJson": len(self.contacts),
+            "mailboxDerived": len(self._mailbox_contacts),
+            "graphContacts": len(self._graph_contacts),
+            "learnedStore": len(self._learned_contacts),
+            "contactsFile": str(self.contacts_file),
+            "lastLoadedAt": {
+                "mailbox": self._mailbox_contacts_loaded_at,
+                "graph": self._graph_contacts_loaded_at,
+                "learned": self._learned_contacts_loaded_at,
+            },
+        }
+
+    def _remember_contact_batch(self, contacts: List[Contact], source: str) -> None:
+        for contact in contacts:
+            if not contact.emails:
+                continue
+            email_value = (contact.emails[0] or "").strip().lower()
+            if not email_value:
+                continue
+            self._contact_store.upsert_contact(
+                email=email_value,
+                display_name=contact.display_name,
+                aliases=contact.aliases,
+                source=source,
+            )
+
+    @staticmethod
+    def _quote_imap_mailbox(name: str) -> str:
+        safe = (name or "").replace('"', '\\"')
+        return f'"{safe}"'
 
     def _load_graph_contacts(self) -> None:
         """
@@ -220,6 +282,7 @@ class ContactResolver:
                 )
 
             self._graph_contacts = contacts
+            self._remember_contact_batch(self._graph_contacts, source="graph")
             self._graph_contacts_loaded_at = time.time()
             logger.info("Loaded Graph contacts for resolver: %s", len(self._graph_contacts))
         except Exception as exc:
@@ -232,7 +295,10 @@ class ContactResolver:
         Lädt aus der Inbox eine kleine Liste realer Absender als Resolver-Kandidaten.
         Dies ist ein pragmatischer Exchange-Näherungswert, bis native Contacts-APIs genutzt werden.
         """
-        enabled = os.getenv("CONTACT_RESOLVER_USE_INBOX_SENDERS", "true").lower() in ("1", "true", "yes")
+        graph_mode = os.getenv("GRAPH_MAIL_MODE", "true").lower() in ("1", "true", "yes", "on")
+        graph_fallback = os.getenv("GRAPH_MAIL_AUTO_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
+        default_enabled = "true" if (not graph_mode or (graph_fallback and self._imap_config_available())) else "false"
+        enabled = os.getenv("CONTACT_RESOLVER_USE_INBOX_SENDERS", default_enabled).lower() in ("1", "true", "yes")
         if not enabled:
             self._mailbox_contacts = []
             self._mailbox_contacts_loaded_at = time.time()
@@ -262,11 +328,20 @@ class ContactResolver:
                 ("INBOX.Gesendet", "TO_CC"),
             ]
             for folder_name, source_mode in folders:
-                status, _ = client.select(folder_name, readonly=True)
+                try:
+                    status, _ = client.select(folder_name, readonly=True)
+                    if status != "OK":
+                        # Fallback: quoted mailbox-Name für Server mit strikter Argumentprüfung.
+                        status, _ = client.select(self._quote_imap_mailbox(folder_name), readonly=True)
+                except Exception:
+                    continue
                 if status != "OK":
                     continue
 
-                status, data = client.uid("SEARCH", None, "ALL")
+                try:
+                    status, data = client.uid("SEARCH", None, "ALL")
+                except Exception:
+                    continue
                 if status != "OK" or not data or not data[0]:
                     continue
 
@@ -278,7 +353,10 @@ class ContactResolver:
                     else:
                         fetch_expr = "(BODY.PEEK[HEADER.FIELDS (TO CC)])"
 
-                    fetch_status, fetch_data = client.uid("FETCH", uid, fetch_expr)
+                    try:
+                        fetch_status, fetch_data = client.uid("FETCH", uid, fetch_expr)
+                    except Exception:
+                        continue
                     if fetch_status != "OK" or not fetch_data:
                         continue
 
@@ -328,6 +406,7 @@ class ContactResolver:
                         )
 
             self._mailbox_contacts = list(found.values())
+            self._remember_contact_batch(self._mailbox_contacts, source="mailbox")
             self._mailbox_contacts_loaded_at = time.time()
             logger.info("Loaded mailbox sender contacts for resolver: %s", len(self._mailbox_contacts))
         except Exception as exc:
@@ -430,6 +509,10 @@ class ContactResolver:
         graph_ttl_sec = max(30, min(int(os.getenv("CONTACT_RESOLVER_GRAPH_CACHE_SEC", "300")), 3600))
         if (time.time() - self._graph_contacts_loaded_at) > graph_ttl_sec:
             self._load_graph_contacts()
+
+        learned_ttl_sec = max(20, min(int(os.getenv("CONTACT_RESOLVER_LEARNED_CACHE_SEC", "120")), 1800))
+        if (time.time() - self._learned_contacts_loaded_at) > learned_ttl_sec:
+            self._load_learned_contacts()
     
     @staticmethod
     def _normalize(text: str) -> str:
@@ -551,6 +634,10 @@ class ContactResolver:
         """
         # Auto-Reload prüfen
         self._check_reload()
+        # Graph-Kontakte bei Bedarf on-demand nachladen (z. B. direkt nach frischem OAuth-Connect).
+        graph_enabled = os.getenv("CONTACT_RESOLVER_USE_GRAPH_CONTACTS", "true").lower() in ("1", "true", "yes")
+        if graph_enabled and len(self._graph_contacts) == 0:
+            self._load_graph_contacts()
         
         debug_info = {
             "inputName": to_name,
@@ -576,6 +663,25 @@ class ContactResolver:
         if not normalized_input:
             debug_info["result"] = "normalized_empty"
             return ResolveResult(email=None, matched_contact=None, debug=debug_info, ambiguous_contacts=[])
+
+        remembered = self._contact_store.get_remembered_resolution(normalized_input)
+        if remembered and remembered.get("email"):
+            remembered_email = str(remembered["email"]).strip().lower()
+            remembered_name = str(remembered.get("display_name") or remembered_email.split("@", 1)[0])
+            remembered_contact = Contact(
+                id=f"memory:{remembered_email}",
+                display_name=remembered_name,
+                aliases=[remembered_name, normalized_input, remembered_email],
+                emails=[remembered_email],
+            )
+            debug_info["result"] = "matched_from_memory"
+            debug_info["memoryHit"] = True
+            return ResolveResult(
+                email=remembered_email,
+                matched_contact=remembered_contact,
+                debug=debug_info,
+                ambiguous_contacts=[],
+            )
         
         # Alle Kandidaten scoren
         scored_candidates = []
@@ -584,10 +690,12 @@ class ContactResolver:
         combined_contacts.extend(self.contacts)
         combined_contacts.extend(self._mailbox_contacts)
         combined_contacts.extend(self._graph_contacts)
+        combined_contacts.extend(self._learned_contacts)
         debug_info["sourceCounts"] = {
             "localJson": len(self.contacts),
             "mailboxDerived": len(self._mailbox_contacts),
             "graphContacts": len(self._graph_contacts),
+            "learnedStore": len(self._learned_contacts),
         }
 
         deduped_by_email: Dict[str, Contact] = {}
@@ -649,6 +757,17 @@ class ContactResolver:
                 matched_contact = scored_candidates[0]["contact"]
                 email = matched_contact.emails[0]
                 debug_info["result"] = "matched_single_token_soft_threshold"
+                self._contact_store.remember_resolution(
+                    query_norm=normalized_input,
+                    email=email,
+                    display_name=matched_contact.display_name,
+                )
+                self._contact_store.upsert_contact(
+                    email=email,
+                    display_name=matched_contact.display_name,
+                    aliases=matched_contact.aliases,
+                    source="resolved",
+                )
                 return ResolveResult(
                     email=email,
                     matched_contact=matched_contact,
@@ -680,6 +799,17 @@ class ContactResolver:
         logger.info(
             f"Contact resolved: '{to_name}' -> '{email}' "
             f"(matched: {matched_contact.id}, score: {top_score:.2f})"
+        )
+        self._contact_store.remember_resolution(
+            query_norm=normalized_input,
+            email=email,
+            display_name=matched_contact.display_name,
+        )
+        self._contact_store.upsert_contact(
+            email=email,
+            display_name=matched_contact.display_name,
+            aliases=matched_contact.aliases,
+            source="resolved",
         )
         
         return ResolveResult(

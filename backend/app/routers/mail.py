@@ -6,8 +6,10 @@ import smtplib
 import ssl
 import imaplib
 import email
+import html as html_lib
 import re
 import time
+import requests
 from email.header import decode_header
 from email.message import EmailMessage
 from email.mime.multipart import MIMEMultipart
@@ -38,6 +40,19 @@ class MailSendRequest(BaseModel):
 class MailSendResponse(BaseModel):
     status: str
     result: str | None = None
+
+
+class MailModeStatusResponse(BaseModel):
+    ok: bool
+    preferredMode: str
+    activeMode: str
+    graphEnabled: bool
+    graphFallbackEnabled: bool
+    oauthConnected: bool
+    graphMailboxAvailable: bool
+    imapAvailable: bool
+    smtpAvailable: bool
+    reason: str | None = None
 
 
 class InboxMessageItem(BaseModel):
@@ -83,6 +98,208 @@ def _imap_user() -> str:
 
 def _imap_pass() -> str:
     return os.getenv("IMAP_PASS") or os.getenv("IMAP_PASSWORD") or ""
+
+
+def _graph_mail_mode_enabled() -> bool:
+    # Produktmodus: Mail transportiert über Graph statt IMAP/SMTP.
+    value = (os.getenv("GRAPH_MAIL_MODE", "true") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _graph_auto_fallback_enabled() -> bool:
+    # Wenn Graph-Mailbox nicht verfügbar ist, automatisch IMAP/SMTP nutzen.
+    value = (os.getenv("GRAPH_MAIL_AUTO_FALLBACK", "true") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _imap_config_available() -> bool:
+    return bool(_imap_host() and _imap_user() and _imap_pass())
+
+
+def _smtp_config_available() -> bool:
+    host = (os.getenv("SMTP_HOST") or "").strip()
+    username = (os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or "").strip()
+    password = (os.getenv("SMTP_PASSWORD") or os.getenv("SMTP_PASS") or "").strip()
+    return bool(host and username and password)
+
+
+def _graph_headers(access_token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _graph_access_token() -> str:
+    try:
+        from ..services.ms_oauth import get_valid_access_token
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Microsoft OAuth Service nicht verfügbar.") from exc
+
+    token = (get_valid_access_token(refresh_if_needed=True) or "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Microsoft OAuth Token im Backend nicht verfügbar.")
+    return token
+
+
+def _graph_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    json_payload: dict | None = None,
+    timeout_sec: float = 15,
+) -> requests.Response:
+    base = "https://graph.microsoft.com/v1.0"
+    url = path if path.startswith("http://") or path.startswith("https://") else f"{base}{path}"
+    access_token = _graph_access_token()
+    headers = _graph_headers(access_token)
+    if params and "$count" in params:
+        headers["ConsistencyLevel"] = "eventual"
+
+    response = requests.request(method, url, headers=headers, params=params, json=json_payload, timeout=timeout_sec)
+    if response.status_code in (429, 503, 504):
+        # Kurzer Retry bei transienten Graph-Fehlern.
+        time.sleep(0.8)
+        response = requests.request(method, url, headers=headers, params=params, json=json_payload, timeout=timeout_sec)
+    if response.status_code == 401:
+        # Einmaliger Refresh-Versuch bei abgelaufenem Token.
+        try:
+            from ..services.ms_oauth import refresh_access_token
+
+            refreshed = refresh_access_token()
+            headers = _graph_headers(refreshed.access_token)
+            if params and "$count" in params:
+                headers["ConsistencyLevel"] = "eventual"
+            response = requests.request(method, url, headers=headers, params=params, json=json_payload, timeout=timeout_sec)
+            if response.status_code in (429, 503, 504):
+                time.sleep(0.8)
+                response = requests.request(method, url, headers=headers, params=params, json=json_payload, timeout=timeout_sec)
+        except Exception:
+            pass
+    return response
+
+
+def _graph_raise_for_status(response: requests.Response, default_detail: str) -> None:
+    if response.status_code < 400:
+        return
+    try:
+        detail = response.json()
+    except Exception:
+        detail = response.text[:300]
+    if response.status_code in (401, 403):
+        if not (response.text or "").strip():
+            mailbox_detail = _graph_mailbox_unavailable_detail()
+            if mailbox_detail:
+                raise HTTPException(status_code=403, detail=mailbox_detail)
+        raise HTTPException(status_code=response.status_code, detail=f"Microsoft Graph Auth-Fehler ({response.status_code}): {detail}")
+    raise HTTPException(status_code=502, detail=f"{default_detail} (Graph {response.status_code}): {detail}")
+
+
+def _graph_to_inbox_item(row: dict) -> InboxMessageItem:
+    sender = row.get("from") or {}
+    sender_addr = sender.get("emailAddress") or {}
+    received_at = row.get("receivedDateTime")
+    preview = _normalize_preview((row.get("bodyPreview") or "").strip()) if row.get("bodyPreview") else None
+    return InboxMessageItem(
+        uid=(row.get("id") or "").strip(),
+        messageId=(row.get("internetMessageId") or None),
+        subject=(row.get("subject") or "(ohne Betreff)").strip() or "(ohne Betreff)",
+        fromName=(sender_addr.get("name") or None),
+        fromEmail=(sender_addr.get("address") or None),
+        receivedAt=(received_at or None),
+        preview=preview,
+        isRead=bool(row.get("isRead", False)),
+    )
+
+
+def _graph_mailbox_unavailable_detail() -> str | None:
+    """
+    Liefert eine klare Diagnose, wenn der angemeldete Graph-User kein Exchange-Postfach hat
+    (typisch bei externen Gastkonten mit #EXT#).
+    """
+    try:
+        response = _graph_request(
+            "GET",
+            "/me",
+            params={
+                "$select": "id,mail,userPrincipalName,displayName",
+            },
+        )
+        if response.status_code >= 400:
+            return None
+        payload = response.json() if response.content else {}
+        if not isinstance(payload, dict):
+            return None
+        upn = str(payload.get("userPrincipalName") or "").strip()
+        mail = str(payload.get("mail") or "").strip()
+        if not mail or "#EXT#" in upn.upper():
+            return (
+                "Der angemeldete Microsoft-Account hat in diesem Tenant kein Exchange-Postfach "
+                "(Gastkonto/externes Konto erkannt). Bitte mit einem mailbox-fähigen Outlook/Exchange-Konto anmelden."
+            )
+        return None
+    except Exception:
+        return None
+
+
+def _is_graph_mailbox_unavailable_error(exc: HTTPException) -> bool:
+    detail = str(exc.detail or "")
+    return "kein Exchange-Postfach" in detail or "Gastkonto/externes Konto" in detail
+
+
+def _probe_graph_mailbox_capability() -> tuple[bool, str | None]:
+    try:
+        response = _graph_request(
+            "GET",
+            "/me/messages",
+            params={"$top": 1, "$select": "id"},
+            timeout_sec=8,
+        )
+        if response.status_code < 400:
+            return True, None
+        if response.status_code in (401, 403):
+            mailbox_detail = _graph_mailbox_unavailable_detail()
+            if mailbox_detail:
+                return False, mailbox_detail
+            return False, f"Graph Auth-Fehler ({response.status_code})"
+        return False, f"Graph-Fehler ({response.status_code})"
+    except HTTPException as exc:
+        if _is_graph_mailbox_unavailable_error(exc):
+            return False, str(exc.detail)
+        return False, str(exc.detail)
+    except Exception:
+        return False, "Graph Mailbox-Check fehlgeschlagen."
+
+
+def _html_to_text(value: str) -> str:
+    compact = re.sub(r"<style[\s\S]*?</style>", " ", value or "", flags=re.IGNORECASE)
+    compact = re.sub(r"<script[\s\S]*?</script>", " ", compact, flags=re.IGNORECASE)
+    compact = re.sub(r"<[^>]+>", " ", compact)
+    compact = html_lib.unescape(compact)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    return compact
+
+
+def _learn_contacts_from_inbox_items(items: list[InboxMessageItem]) -> None:
+    try:
+        from ..services.contact_store import get_contact_store
+
+        store = get_contact_store()
+        for item in items:
+            email_value = (item.fromEmail or "").strip().lower()
+            if not email_value or "@" not in email_value:
+                continue
+            display = (item.fromName or "").strip() or email_value.split("@", 1)[0]
+            aliases = [display, email_value]
+            store.upsert_contact(
+                email=email_value,
+                display_name=display,
+                aliases=aliases,
+                source="inbox",
+            )
+    except Exception:
+        pass
 
 
 def _decode_mime_header(value: str | None) -> str:
@@ -397,6 +614,83 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
     return "ok"
 
 
+def _send_email_via_graph(to: str, subject: str, body: str) -> str:
+    html_body = _build_email_html_with_signature(body)
+    response = _graph_request(
+        "POST",
+        "/me/sendMail",
+        json_payload={
+            "message": {
+                "subject": subject,
+                "body": {
+                    "contentType": "HTML",
+                    "content": html_body,
+                },
+                "toRecipients": [
+                    {
+                        "emailAddress": {
+                            "address": to,
+                        }
+                    }
+                ],
+            },
+            "saveToSentItems": True,
+        },
+        timeout_sec=20,
+    )
+    _graph_raise_for_status(response, "Mailversand über Graph fehlgeschlagen")
+    return "ok"
+
+
+@router.get("/mode", response_model=MailModeStatusResponse)
+async def get_mail_mode_status():
+    graph_enabled = _graph_mail_mode_enabled()
+    fallback_enabled = _graph_auto_fallback_enabled()
+    imap_available = _imap_config_available()
+    smtp_available = _smtp_config_available()
+
+    oauth_connected = False
+    try:
+        from ..services.ms_oauth import get_auth_status
+
+        oauth_connected = bool((get_auth_status() or {}).get("connected"))
+    except Exception:
+        oauth_connected = False
+
+    graph_mailbox_available = False
+    reason: str | None = None
+    if graph_enabled and oauth_connected:
+        graph_mailbox_available, reason = _probe_graph_mailbox_capability()
+    elif graph_enabled and not oauth_connected:
+        reason = "OAuth nicht verbunden"
+
+    if graph_enabled and graph_mailbox_available:
+        active_mode = "graph"
+    elif graph_enabled and fallback_enabled and imap_available:
+        active_mode = "imap_smtp_fallback"
+        if reason is None:
+            reason = "Graph nicht nutzbar, IMAP/SMTP-Fallback aktiv"
+    elif graph_enabled:
+        active_mode = "graph_unavailable"
+    else:
+        active_mode = "imap_smtp"
+
+    preferred_mode = "graph" if graph_enabled else "imap_smtp"
+
+    return MailModeStatusResponse(
+        ok=True,
+        preferredMode=preferred_mode,
+        activeMode=active_mode,
+        graphEnabled=graph_enabled,
+        graphFallbackEnabled=fallback_enabled,
+        oauthConnected=oauth_connected,
+        graphMailboxAvailable=graph_mailbox_available,
+        imapAvailable=imap_available,
+        smtpAvailable=smtp_available,
+        reason=reason,
+    )
+
+
 @router.post("/send", response_model=MailSendResponse)
 async def send_mail(req: MailSendRequest):
     """
@@ -409,7 +703,36 @@ async def send_mail(req: MailSendRequest):
     subject = req.subject or "Nachricht vom Freiraum-Mitarbeiter"
 
     try:
-        result = _send_email_via_smtp(req.to, subject, req.body)
+        if _graph_mail_mode_enabled():
+            try:
+                result = _send_email_via_graph(req.to, subject, req.body)
+            except HTTPException as exc:
+                # Auto-Fallback für Kunden ohne Graph-Mailbox (z. B. IONOS/externes Konto).
+                if (
+                    _graph_auto_fallback_enabled()
+                    and _is_graph_mailbox_unavailable_error(exc)
+                    and _smtp_config_available()
+                ):
+                    logger.warning("Graph send unavailable, falling back to SMTP transport.")
+                    result = _send_email_via_smtp(req.to, subject, req.body)
+                else:
+                    raise
+        else:
+            result = _send_email_via_smtp(req.to, subject, req.body)
+        try:
+            from ..services.contact_store import get_contact_store
+
+            store = get_contact_store()
+            email_value = str(req.to).strip().lower()
+            display_name = email_value.split("@", 1)[0].replace(".", " ").replace("_", " ").strip() or email_value
+            store.upsert_contact(
+                email=email_value,
+                display_name=display_name,
+                aliases=[display_name, email_value],
+                source="send",
+            )
+        except Exception:
+            pass
         return MailSendResponse(status="ok", result=result)
     except HTTPException:
         # HTTPException von _build_smtp_client direkt weiterwerfen
@@ -426,6 +749,43 @@ async def send_mail(req: MailSendRequest):
 async def get_inbox(limit: int = 25, offset: int = 0):
     safe_limit = max(1, min(limit, 60))
     safe_offset = max(0, offset)
+
+    if _graph_mail_mode_enabled():
+        try:
+            response = _graph_request(
+                "GET",
+                "/me/messages",
+                params={
+                    "$top": safe_limit,
+                    "$skip": safe_offset,
+                    "$orderby": "receivedDateTime desc",
+                    "$select": "id,internetMessageId,subject,from,receivedDateTime,bodyPreview,isRead",
+                    "$count": "true",
+                },
+            )
+            _graph_raise_for_status(response, "Inbox-Liste konnte nicht über Graph geladen werden")
+            payload = response.json() if response.content else {}
+            values = payload.get("value", []) if isinstance(payload, dict) else []
+            if not isinstance(values, list):
+                values = []
+            items = [_graph_to_inbox_item(row) for row in values if isinstance(row, dict) and row.get("id")]
+            _learn_contacts_from_inbox_items(items)
+            total = payload.get("@odata.count") if isinstance(payload, dict) else None
+            try:
+                total_count = int(total) if total is not None else (safe_offset + len(items))
+            except Exception:
+                total_count = safe_offset + len(items)
+            return InboxListResponse(ok=True, total=total_count, items=items)
+        except HTTPException as exc:
+            # Auto-Fallback für Kunden ohne Graph-Mailbox.
+            if (
+                _graph_auto_fallback_enabled()
+                and _is_graph_mailbox_unavailable_error(exc)
+                and _imap_config_available()
+            ):
+                logger.warning("Graph inbox unavailable, falling back to IMAP inbox.")
+            else:
+                raise
 
     client = _open_imap_client_with_retry()
     try:
@@ -483,6 +843,7 @@ async def get_inbox(limit: int = 25, offset: int = 0):
                 )
             )
 
+        _learn_contacts_from_inbox_items(items)
         return InboxListResponse(ok=True, total=total, items=items)
     finally:
         try:
@@ -496,6 +857,71 @@ async def get_inbox_message(uid: str):
     safe_uid = (uid or "").strip()
     if not safe_uid:
         raise HTTPException(status_code=400, detail="uid ist erforderlich.")
+
+    if _graph_mail_mode_enabled():
+        try:
+            response = _graph_request(
+                "GET",
+                f"/me/messages/{safe_uid}",
+                params={
+                    "$select": "id,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,body,bodyPreview",
+                },
+            )
+            if response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Nachricht nicht gefunden.")
+            _graph_raise_for_status(response, "Nachricht konnte nicht über Graph geladen werden")
+            payload = response.json() if response.content else {}
+            if not isinstance(payload, dict) or not payload.get("id"):
+                raise HTTPException(status_code=404, detail="Nachricht nicht gefunden.")
+
+            sender = payload.get("from") or {}
+            sender_addr = sender.get("emailAddress") or {}
+            to_recipients = payload.get("toRecipients") or []
+            cc_recipients = payload.get("ccRecipients") or []
+            all_recipients = []
+            if isinstance(to_recipients, list):
+                all_recipients.extend(to_recipients)
+            if isinstance(cc_recipients, list):
+                all_recipients.extend(cc_recipients)
+            to_addresses: list[str] = []
+            for recipient in all_recipients:
+                if not isinstance(recipient, dict):
+                    continue
+                email_address = recipient.get("emailAddress") or {}
+                address = (email_address.get("address") or "").strip()
+                if address:
+                    to_addresses.append(address)
+
+            body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+            body_content = (body.get("content") or "") if isinstance(body, dict) else ""
+            body_type = ((body.get("contentType") or "") if isinstance(body, dict) else "").strip().lower()
+            if body_type == "html":
+                body_text = _html_to_text(body_content)
+            else:
+                body_text = re.sub(r"\s+", " ", (body_content or "").strip())
+            if not body_text:
+                body_text = _normalize_preview(payload.get("bodyPreview") or "") or "(kein Textinhalt)"
+
+            return InboxMessageDetailResponse(
+                ok=True,
+                uid=safe_uid,
+                messageId=(payload.get("internetMessageId") or None),
+                subject=(payload.get("subject") or "(ohne Betreff)").strip() or "(ohne Betreff)",
+                fromName=(sender_addr.get("name") or None),
+                fromEmail=(sender_addr.get("address") or None),
+                to=to_addresses,
+                receivedAt=(payload.get("receivedDateTime") or None),
+                bodyText=body_text,
+            )
+        except HTTPException as exc:
+            if (
+                _graph_auto_fallback_enabled()
+                and _is_graph_mailbox_unavailable_error(exc)
+                and _imap_config_available()
+            ):
+                logger.warning("Graph message detail unavailable, falling back to IMAP detail.")
+            else:
+                raise
 
     client = _open_imap_client_with_retry()
     try:

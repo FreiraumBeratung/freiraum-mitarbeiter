@@ -40,5 +40,11 @@
     "displayName": "Dirk Müller",
     "aliases": ["dirk", "Dirk", "Dirk Müller", "Dirk Mueller", "dem dirk", "den dirk", "bei dirk", "an dirk", "mueller", "Müller", "Mueller"],
     "emails": ["freiraumberatung@web.de"]
+  },
+  {
+    "id": "peter-schneider",
+    "displayName": "Peter Schneider",
+    "aliases": ["peter", "Peter", "peter schneider", "Peter Schneider", "dem peter", "den peter", "bei peter", "an peter", "schneider", "Schneider"],
+    "emails": ["zlatan95@web.de"]
   }
 ]

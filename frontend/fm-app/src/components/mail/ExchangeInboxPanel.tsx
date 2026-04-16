@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   clearSelectedMailContext,
   getSelectedMailContext,
@@ -7,6 +7,7 @@ import {
 } from "../../modules/mail/selectedMailContext";
 
 const OPENED_UIDS_STORAGE_KEY = "fm_exchange_opened_uids_v1";
+const INBOX_AUTO_REFRESH_MS = 60_000;
 
 type InboxItem = {
   uid: string;
@@ -105,6 +106,7 @@ export default function ExchangeInboxPanel() {
   });
   const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
   const [msAuthLoading, setMsAuthLoading] = useState(false);
+  const inboxLoadInFlightRef = useRef(false);
 
   const normalizedItems = useMemo(
     () =>
@@ -161,7 +163,11 @@ export default function ExchangeInboxPanel() {
     setActiveContext(context);
   }
 
-  const loadInbox = async () => {
+  const loadInbox = useCallback(async () => {
+    if (inboxLoadInFlightRef.current) {
+      return;
+    }
+    inboxLoadInFlightRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -184,9 +190,10 @@ export default function ExchangeInboxPanel() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Inbox konnte nicht geladen werden.");
     } finally {
+      inboxLoadInFlightRef.current = false;
       setLoading(false);
     }
-  };
+  }, [selectedUid]);
 
   const loadMicrosoftAuthStatus = async () => {
     try {
@@ -263,7 +270,18 @@ export default function ExchangeInboxPanel() {
   useEffect(() => {
     void loadInbox();
     void loadMicrosoftAuthStatus();
-  }, []);
+  }, [loadInbox]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void loadInbox();
+    }, INBOX_AUTO_REFRESH_MS);
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [loadInbox]);
 
   useEffect(() => {
     const current = getSelectedMailContext();

@@ -190,6 +190,20 @@ Gib NUR den korrigierten E-Mail-Body zurück, ohne Erklärungen, ohne Labels, oh
         removed: beforeSanitize.substring(0, 50)
       });
     }
+    if (containsPromptInstructionLeak(polishedBody)) {
+      const isSendNow = mode === "sendNow";
+      console.warn("[email-polish] Prompt-Leak erkannt, fallback auf original body", {
+        mode,
+        leakedPreview: polishedBody.slice(0, 140),
+      });
+      return {
+        ok: false,
+        body: originalBody,
+        usedAi: false,
+        reason: "prompt_instruction_leak_detected",
+        sentWithoutPolish: isSendNow,
+      };
+    }
 
     console.log('[email-polish] Body erfolgreich poliert', {
       mode,
@@ -356,6 +370,22 @@ function sanitizePolishedEmailBody(text: string): string {
   sanitized = sanitized.trim();
 
   return sanitized;
+}
+
+function containsPromptInstructionLeak(text: string): boolean {
+  if (!text || typeof text !== "string") return false;
+  const t = text.trim();
+  if (!t) return false;
+  const markers = [
+    /gib\s+nur\s+den\s+korrigierten\s+e-?mail-?body/i,
+    /ohne\s+erkl[aä]rungen,\s*ohne\s+labels,\s*ohne\s+meta-?w[oö]rter/i,
+    /text\s+zum\s+korrigieren\s*:/i,
+    /korrigierter\s+text\s*:/i,
+    /absolute\s+regeln/i,
+    /du\s+bist\s+ein\s+deutscher\s+korrektor/i,
+    /nur\s+rechtschreibung,\s*satzzeichen,\s*gro[ßs]\/?[- ]?\/?kleinschreibung/i,
+  ];
+  return markers.some((re) => re.test(t));
 }
 
 /**

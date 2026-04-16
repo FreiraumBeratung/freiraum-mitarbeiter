@@ -62,6 +62,18 @@ def resolve_contact(name: str = Query(..., description="Name, der aufgelöst wer
     return response
 
 
+@router.get("/status")
+def contacts_status():
+    """
+    Diagnostik-Endpoint für Contact-Quellen und Lernspeicher.
+    """
+    resolver = get_contact_resolver()
+    return {
+        "ok": True,
+        "sources": resolver.get_status_snapshot(),
+    }
+
+
 
 
 
