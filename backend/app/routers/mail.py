@@ -10,6 +10,7 @@ import email
 import html as html_lib
 import re
 import time
+import unicodedata
 import requests
 from email.header import decode_header
 from email.message import EmailMessage
@@ -84,6 +85,14 @@ class InboxMessageDetailResponse(BaseModel):
     receivedAt: str | None = None
     bodyText: str
     bodyHtml: str | None = None
+
+
+class SignatureImportResponse(BaseModel):
+    ok: bool
+    accountKey: str
+    imported: bool
+    source: str
+    reason: str | None = None
 
 
 def _imap_host() -> str:
@@ -171,6 +180,110 @@ def _mail_setup_state() -> dict:
         return get_mail_setup_store().get_state() or {}
     except Exception:
         return {}
+
+
+DEFAULT_SIGNATURE_HTML = """
+<br><br>
+<strong style="font-family: Arial, sans-serif; font-size: 16px;">Mit freundlichen Grüßen</strong>
+<br><br>
+<strong style="font-family: Arial, sans-serif; font-size: 16px;">Denis Bytyqi</strong><br>
+<span style="font-family: Arial, sans-serif; font-size: 14px; font-style: italic;">Geschäftsführer</span>
+<br><br>
+<span style="font-family: Arial, sans-serif; font-size: 14px;">
+Digitale Ordnung & Optimierung<br>
+Digitale Architektur für Sauerland-Unternehmen<br>
+Effiziente Prozesse · Automatisierung · Überblick
+</span>
+<br><br>
+<span style="font-family: Arial, sans-serif; font-size: 14px;">
+<strong>E-Mail:</strong> <a href="mailto:info@freiraum-unternehmensberatung.de">info@freiraum-unternehmensberatung.de</a><br>
+<strong>Mobil:</strong> <a href="tel:015156538030">0151 56538030</a>
+</span>
+<br><br>
+<img src="cid:freiraum_logo" width="230" style="display:block; margin-top:10px;" alt="Freiraum Logo">
+""".strip()
+
+DEFAULT_SIGNATURE_TEXT = (
+    "\n\n"
+    "Mit freundlichen Grüßen\n\n"
+    "Denis Bytyqi\n"
+    "Geschäftsführer\n\n"
+    "Digitale Ordnung & Optimierung\n"
+    "Digitale Architektur für Sauerland-Unternehmen\n"
+    "Effiziente Prozesse · Automatisierung · Überblick\n\n"
+    "E-Mail: info@freiraum-unternehmensberatung.de\n"
+    "Mobil: 0151 56538030\n"
+)
+
+SIGNATURE_MARKERS = [
+    "mit freundlichen grüßen",
+    "mit freundlichen grussen",
+    "freundliche grüße",
+    "freundliche grusse",
+    "liebe grüße",
+    "liebe grusse",
+    "viele grüße",
+    "viele grusse",
+    "beste grüße",
+    "beste grusse",
+    "best regards",
+    "kind regards",
+]
+
+_GRAPH_ACCOUNT_EMAIL_CACHE: dict[str, str | float] = {"value": "", "expires_at": 0.0}
+
+
+def _mail_signature_store():
+    from ..services.mail_signature_store import get_mail_signature_store
+
+    return get_mail_signature_store()
+
+
+def _imap_sent_folder_candidates() -> list[str]:
+    return [
+        "Sent",
+        "Sent Items",
+        "Gesendet",
+        "INBOX.Sent",
+        "INBOX.Gesendet",
+        "INBOX.Sent Items",
+    ]
+
+
+def _normalize_account_key(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    return normalized if "@" in normalized else ""
+
+
+def _graph_account_email() -> str:
+    now = time.time()
+    cached = str(_GRAPH_ACCOUNT_EMAIL_CACHE.get("value") or "").strip().lower()
+    expires_at = float(_GRAPH_ACCOUNT_EMAIL_CACHE.get("expires_at") or 0.0)
+    if cached and expires_at > now:
+        return cached
+    try:
+        response = _graph_request("GET", "/me", params={"$select": "mail,userPrincipalName"}, timeout_sec=8)
+        if response.status_code >= 400:
+            return ""
+        payload = response.json() if response.content else {}
+        if not isinstance(payload, dict):
+            return ""
+        address = str(payload.get("mail") or payload.get("userPrincipalName") or "").strip().lower()
+        if "@" not in address:
+            return ""
+        _GRAPH_ACCOUNT_EMAIL_CACHE["value"] = address
+        _GRAPH_ACCOUNT_EMAIL_CACHE["expires_at"] = now + 300
+        return address
+    except Exception:
+        return ""
+
+
+def _active_signature_account_key() -> str:
+    if _graph_mail_mode_enabled():
+        graph_email = _graph_account_email()
+        if graph_email:
+            return graph_email
+    return _normalize_account_key(_smtp_user()) or _normalize_account_key(_imap_user())
 
 
 def _graph_mail_mode_enabled() -> bool:
@@ -428,6 +541,72 @@ def _replace_cid_sources_with_data_uris(html_value: str, inline_map: dict[str, s
     return output
 
 
+def _extract_signature_from_text(text: str) -> str:
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return ""
+    lines = [line.rstrip() for line in raw.split("\n")]
+    if not lines:
+        return ""
+    start_at = -1
+    threshold = max(0, len(lines) // 4)
+    for idx, line in enumerate(lines):
+        lower = line.strip().lower()
+        lower_ascii = unicodedata.normalize("NFKD", lower).encode("ascii", "ignore").decode("ascii")
+        if not lower:
+            continue
+        fuzzy_greeting = (
+            ("liebe" in lower or "freund" in lower or "viele" in lower or "beste" in lower)
+            and "gr" in lower
+        )
+        if idx >= threshold and (any(marker in lower for marker in SIGNATURE_MARKERS) or any(marker in lower_ascii for marker in SIGNATURE_MARKERS) or fuzzy_greeting):
+            start_at = idx
+            break
+    if start_at < 0:
+        for idx, line in enumerate(lines):
+            lower = line.strip().lower()
+            if idx >= threshold and ("mailto:" in lower or "@" in lower or "tel:" in lower):
+                start_at = max(0, idx - 2)
+                break
+    if start_at < 0:
+        return ""
+    signature = "\n".join(lines[start_at:]).strip()
+    return signature if len(signature) >= 20 else ""
+
+
+def _extract_signature_from_html(html_value: str) -> str:
+    html_raw = (html_value or "").strip()
+    if not html_raw:
+        return ""
+    lowered = html_raw.lower()
+    start_at = -1
+    for marker in SIGNATURE_MARKERS:
+        idx = lowered.find(marker)
+        if idx >= 0 and idx > len(html_raw) * 0.2:
+            start_at = idx
+            break
+    if start_at < 0:
+        img_idx = lowered.rfind("<img")
+        if img_idx >= 0 and img_idx > len(html_raw) * 0.35:
+            start_at = img_idx
+    if start_at < 0:
+        return ""
+    block_start = max(
+        html_raw.rfind("<table", 0, start_at),
+        html_raw.rfind("<div", 0, start_at),
+        html_raw.rfind("<p", 0, start_at),
+        html_raw.rfind("<br", 0, start_at),
+    )
+    if block_start < 0:
+        block_start = html_raw.rfind("<", 0, start_at)
+    if block_start < 0:
+        block_start = start_at
+    signature = html_raw[block_start:].strip()
+    if len(signature) < 30:
+        return ""
+    return signature
+
+
 def _learn_contacts_from_inbox_items(items: list[InboxMessageItem]) -> None:
     try:
         from ..services.contact_store import get_contact_store
@@ -584,6 +763,153 @@ def _extract_message_content(msg: email.message.Message) -> tuple[str, str]:
     return plain_text, safe_html
 
 
+def _latest_sent_message_content_from_imap() -> tuple[str, str]:
+    client = _open_imap_client_with_retry()
+    try:
+        for folder_name in _imap_sent_folder_candidates():
+            try:
+                status, _ = client.select(folder_name, readonly=True)
+                if status != "OK":
+                    status, _ = client.select(f'"{folder_name}"', readonly=True)
+            except Exception:
+                continue
+            if status != "OK":
+                continue
+            try:
+                search_status, data = client.uid("SEARCH", None, "ALL")
+            except Exception:
+                continue
+            if search_status != "OK" or not data or not data[0]:
+                continue
+            latest_uid = data[0].split()[-1].decode("utf-8", errors="replace")
+            fetch_status, fetch_data = client.uid("FETCH", latest_uid, "(RFC822)")
+            if fetch_status != "OK" or not fetch_data:
+                continue
+            raw_email = None
+            for part in fetch_data:
+                if isinstance(part, tuple) and len(part) > 1:
+                    raw_email = part[1]
+                    break
+            if not raw_email:
+                continue
+            msg = email.message_from_bytes(raw_email)
+            return _extract_message_content(msg)
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+    return "", ""
+
+
+def _latest_sent_message_content_from_graph() -> tuple[str, str]:
+    try:
+        response = _graph_request(
+            "GET",
+            "/me/mailFolders/sentitems/messages",
+            params={
+                "$top": 5,
+                "$orderby": "sentDateTime desc",
+                "$select": "id,body",
+            },
+            timeout_sec=12,
+        )
+        _graph_raise_for_status(response, "Graph Sent Items konnten nicht geladen werden")
+        payload = response.json() if response.content else {}
+        values = payload.get("value", []) if isinstance(payload, dict) else []
+        if not isinstance(values, list):
+            return "", ""
+        for entry in values:
+            if not isinstance(entry, dict):
+                continue
+            body_obj = entry.get("body") if isinstance(entry.get("body"), dict) else {}
+            content = str(body_obj.get("content") or "").strip()
+            content_type = str(body_obj.get("contentType") or "").strip().lower()
+            if not content:
+                continue
+            if content_type == "html":
+                safe_html = _sanitize_html_for_render(content)
+                text = _html_to_text(content)
+                return text, safe_html
+            return content, ""
+    except Exception:
+        return "", ""
+    return "", ""
+
+
+def _import_signature_for_active_account(force: bool = False) -> dict:
+    account_key = _active_signature_account_key()
+    if not account_key:
+        return {"ok": False, "account_key": "", "imported": False, "source": "none", "reason": "Kein aktives Konto erkannt."}
+    store = _mail_signature_store()
+    existing = store.get_signature(account_key)
+    if existing and not force:
+        return {"ok": True, "account_key": account_key, "imported": False, "source": "stored", "reason": "Bereits vorhanden."}
+
+    if _graph_mail_mode_enabled():
+        body_text, body_html = _latest_sent_message_content_from_graph()
+        source = "graph_sent"
+    else:
+        body_text, body_html = _latest_sent_message_content_from_imap()
+        source = "imap_sent"
+
+    if not body_text and not body_html:
+        return {"ok": False, "account_key": account_key, "imported": False, "source": source, "reason": "Keine gesendete Nachricht gefunden."}
+
+    text_signature = _extract_signature_from_text(body_text)
+    html_signature = _extract_signature_from_html(body_html) if body_html else ""
+
+    if not text_signature and not html_signature:
+        return {"ok": False, "account_key": account_key, "imported": False, "source": source, "reason": "Signatur in letzter Nachricht nicht erkannt."}
+
+    if not text_signature and html_signature:
+        text_signature = _html_to_text(html_signature)
+    if not html_signature and text_signature:
+        html_signature = "<br>".join(text_signature.split("\n"))
+
+    store.set_signature(
+        account_key=account_key,
+        sender_email=account_key,
+        html_signature=html_signature,
+        text_signature=text_signature,
+        source=source,
+    )
+    return {"ok": True, "account_key": account_key, "imported": True, "source": source, "reason": None}
+
+
+def _load_signature_bundle_for_account(account_key: str) -> dict:
+    store = _mail_signature_store()
+    stored = store.get_signature(account_key) if account_key else None
+    if stored:
+        return {
+            "account_key": account_key,
+            "html_signature": (stored.get("html_signature") or "").strip(),
+            "text_signature": (stored.get("text_signature") or "").strip(),
+            "source": str(stored.get("source") or "stored"),
+            "is_fallback": False,
+        }
+
+    imported = _import_signature_for_active_account(force=False)
+    if imported.get("ok") and imported.get("imported"):
+        stored2 = store.get_signature(account_key)
+        if stored2:
+            return {
+                "account_key": account_key,
+                "html_signature": (stored2.get("html_signature") or "").strip(),
+                "text_signature": (stored2.get("text_signature") or "").strip(),
+                "source": str(stored2.get("source") or "imported"),
+                "is_fallback": False,
+            }
+
+    return {
+        "account_key": account_key,
+        "html_signature": DEFAULT_SIGNATURE_HTML,
+        "text_signature": DEFAULT_SIGNATURE_TEXT,
+        "source": "backend_fallback",
+        "is_fallback": True,
+    }
+
+
 def _open_imap_client() -> imaplib.IMAP4_SSL:
     host = _imap_host()
     user = _imap_user()
@@ -710,7 +1036,7 @@ def _build_smtp_client() -> smtplib.SMTP:
         ) from exc
 
 
-def _build_email_html_with_signature(body: str) -> str:
+def _build_email_html_with_signature(body: str, signature_html: str) -> str:
     """
     Baut den HTML-Body inklusive Freiraum-Signatur.
     body: vom Frontend/Assistenten erzeugter reiner Text (mit \n).
@@ -718,32 +1044,6 @@ def _build_email_html_with_signature(body: str) -> str:
     # Benutzer-Text in HTML umbauen (Zeilenumbrüche -> <br>)
     safe_body = (body or "").replace("\r\n", "\n").replace("\r", "\n")
     safe_body = "<br>".join(line for line in safe_body.split("\n"))
-
-    signature_html = """
-<br><br>
-<strong style="font-family: Arial, sans-serif; font-size: 16px;">Mit freundlichen Grüßen</strong>
-<br><br>
-
-<strong style="font-family: Arial, sans-serif; font-size: 16px;">Denis Bytyqi</strong><br>
-<span style="font-family: Arial, sans-serif; font-size: 14px; font-style: italic;">Geschäftsführer</span>
-<br><br>
-
-<span style="font-family: Arial, sans-serif; font-size: 14px;">
-Digitale Ordnung & Optimierung<br>
-Digitale Architektur für Sauerland-Unternehmen<br>
-Effiziente Prozesse · Automatisierung · Überblick
-</span>
-<br><br>
-
-<span style="font-family: Arial, sans-serif; font-size: 14px;">
-<strong>E-Mail:</strong> <a href="mailto:info@freiraum-unternehmensberatung.de">info@freiraum-unternehmensberatung.de</a><br>
-<strong>Mobil:</strong> <a href="tel:015156538030">0151 56538030</a>
-</span>
-<br><br>
-
-<!-- LOGO IN OPTIMALER OUTLOOK-GRÖSSE -->
-<img src="cid:freiraum_logo" width="230" style="display:block; margin-top:10px;" alt="Freiraum Logo">
-""".strip()
 
     html = f"""
 <div style="font-family: Arial, sans-serif; font-size: 14px; color: #000000;">
@@ -755,23 +1055,15 @@ Effiziente Prozesse · Automatisierung · Überblick
     return html
 
 
-def _build_email_text_with_signature(body: str) -> str:
+def _build_email_text_with_signature(body: str, signature_text: str) -> str:
     """
     Baut die Plain-Text-Variante inkl. Signatur (ohne Logo).
     """
     base = body or ""
-    signature_text = (
-        "\n\n"
-        "Mit freundlichen Grüßen\n\n"
-        "Denis Bytyqi\n"
-        "Geschäftsführer\n\n"
-        "Digitale Ordnung & Optimierung\n"
-        "Digitale Architektur für Sauerland-Unternehmen\n"
-        "Effiziente Prozesse · Automatisierung · Überblick\n\n"
-        "E-Mail: info@freiraum-unternehmensberatung.de\n"
-        "Mobil: 0151 56538030\n"
-    )
-    return base.rstrip() + signature_text
+    suffix = (signature_text or "").strip()
+    if not suffix:
+        return base.rstrip()
+    return base.rstrip() + "\n\n" + suffix
 
 
 def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
@@ -783,10 +1075,12 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
     client = _build_smtp_client()
     # Sender aus Umgebungsvariablen holen
     sender = _smtp_user() or os.getenv("SMTP_FROM", "noreply@freiraum.de")
+    account_key = _normalize_account_key(sender) or _active_signature_account_key()
+    signature_bundle = _load_signature_bundle_for_account(account_key)
 
     # --- NEUER MIME-AUFBAU MIT SIGNATUR UND INLINE-LOGO ---
-    text_body = _build_email_text_with_signature(body)
-    html_body = _build_email_html_with_signature(body)
+    text_body = _build_email_text_with_signature(body, signature_bundle.get("text_signature") or "")
+    html_body = _build_email_html_with_signature(body, signature_bundle.get("html_signature") or "")
 
     # multipart/related -> damit Inline-Bilder (cid) funktionieren
     msg = MIMEMultipart("related")
@@ -802,7 +1096,7 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
 
     # E-Mail-Logo als inline Bild anhängen (wenn vorhanden)
     try:
-        if EMAIL_LOGO_PATH.is_file():
+        if "cid:freiraum_logo" in (html_body or "").lower() and EMAIL_LOGO_PATH.is_file():
             with open(EMAIL_LOGO_PATH, "rb") as f:
                 logo_data = f.read()
 
@@ -822,7 +1116,10 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
             extra={"error": str(e), "logo_path": str(EMAIL_LOGO_PATH)},
         )
 
-    logger.info("Sende E-Mail", extra={"to": to, "subject": subject})
+    logger.info(
+        "Sende E-Mail",
+        extra={"to": to, "subject": subject, "signature_source": signature_bundle.get("source"), "signature_account": account_key},
+    )
 
     try:
         # sendmail verwendet as_string() für MIMEMultipart
@@ -834,7 +1131,9 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
 
 
 def _send_email_via_graph(to: str, subject: str, body: str) -> str:
-    html_body = _build_email_html_with_signature(body)
+    account_key = _active_signature_account_key()
+    signature_bundle = _load_signature_bundle_for_account(account_key)
+    html_body = _build_email_html_with_signature(body, signature_bundle.get("html_signature") or "")
     response = _graph_request(
         "POST",
         "/me/sendMail",
@@ -962,6 +1261,18 @@ async def send_mail(req: MailSendRequest):
     except Exception as e:
         logger.exception("Mailversand fehlgeschlagen (allgemeiner Fehler)")
         raise HTTPException(status_code=500, detail="Mailversand fehlgeschlagen.")
+
+
+@router.post("/signature/import-last-sent", response_model=SignatureImportResponse)
+async def import_signature_from_last_sent(force: bool = False):
+    result = _import_signature_for_active_account(force=force)
+    return SignatureImportResponse(
+        ok=bool(result.get("ok")),
+        accountKey=str(result.get("account_key") or ""),
+        imported=bool(result.get("imported")),
+        source=str(result.get("source") or "none"),
+        reason=(str(result.get("reason")) if result.get("reason") else None),
+    )
 
 
 @router.get("/inbox", response_model=InboxListResponse)
