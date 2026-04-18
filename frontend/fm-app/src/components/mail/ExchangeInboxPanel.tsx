@@ -26,6 +26,19 @@ type InboxResponse = {
   items: InboxItem[];
 };
 
+type InboxMessageDetailResponse = {
+  ok: boolean;
+  uid: string;
+  messageId?: string | null;
+  subject: string;
+  fromName?: string | null;
+  fromEmail?: string | null;
+  to: string[];
+  receivedAt?: string | null;
+  bodyText: string;
+  bodyHtml?: string | null;
+};
+
 type MicrosoftAuthStatus = {
   ok: boolean;
   connected?: boolean;
@@ -83,10 +96,52 @@ function fmtDate(value?: string | null): string {
   });
 }
 
+function sanitizeHtmlForDetail(input?: string | null): string {
+  if (!input) return "";
+  if (typeof window === "undefined" || typeof DOMParser === "undefined") return input;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(input, "text/html");
+
+  doc.querySelectorAll("script,style,iframe,object,embed,base,meta,link,form,input,button,textarea,select").forEach((el) =>
+    el.remove()
+  );
+
+  doc.querySelectorAll("*").forEach((el) => {
+    Array.from(el.attributes).forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      const rawValue = (attr.value || "").trim();
+      const value = rawValue.toLowerCase();
+      if (name.startsWith("on")) {
+        el.removeAttribute(attr.name);
+        return;
+      }
+      if ((name === "href" || name === "src") && value) {
+        const allowed =
+          value.startsWith("http://") ||
+          value.startsWith("https://") ||
+          value.startsWith("mailto:") ||
+          value.startsWith("cid:") ||
+          value.startsWith("data:image/");
+        if (!allowed) {
+          el.removeAttribute(attr.name);
+        }
+      }
+    });
+  });
+
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noopener noreferrer nofollow");
+  });
+
+  return doc.body?.innerHTML || "";
+}
+
 export default function ExchangeInboxPanel() {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
@@ -107,6 +162,10 @@ export default function ExchangeInboxPanel() {
   const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
   const [msAuthLoading, setMsAuthLoading] = useState(false);
   const inboxLoadInFlightRef = useRef(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailData, setDetailData] = useState<InboxMessageDetailResponse | null>(null);
 
   const normalizedItems = useMemo(
     () =>
@@ -163,13 +222,20 @@ export default function ExchangeInboxPanel() {
     setActiveContext(context);
   }
 
-  const loadInbox = useCallback(async () => {
+  const loadInbox = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
     if (inboxLoadInFlightRef.current) {
       return;
     }
     inboxLoadInFlightRef.current = true;
-    setLoading(true);
-    setError(null);
+    const hasExistingItems = items.length > 0;
+    const showBlockingLoading = !silent && !hasExistingItems;
+    if (showBlockingLoading) {
+      setLoading(true);
+      setError(null);
+    } else {
+      setRefreshing(true);
+    }
     try {
       const inboxUrl = `${backendBase()}/api/mail/inbox?limit=50&offset=0`;
       let res = await fetch(inboxUrl);
@@ -183,6 +249,7 @@ export default function ExchangeInboxPanel() {
       const nextItems = data.items || [];
       setItems(nextItems);
       setTotal(data.total || 0);
+      setError(null);
       const persisted = getSelectedMailContext();
       const bySelectedUid = selectedUid ? nextItems.find((it) => it.uid === selectedUid) : null;
       const byPersistedUid = persisted?.uid ? nextItems.find((it) => it.uid === persisted.uid) : null;
@@ -191,9 +258,33 @@ export default function ExchangeInboxPanel() {
       setError(err instanceof Error ? err.message : "Inbox konnte nicht geladen werden.");
     } finally {
       inboxLoadInFlightRef.current = false;
-      setLoading(false);
+      if (showBlockingLoading) {
+        setLoading(false);
+      }
+      setRefreshing(false);
     }
-  }, [selectedUid]);
+  }, [items.length, selectedUid]);
+
+  const openMessageDetail = useCallback(async (item: InboxItem) => {
+    if (!item?.uid) return;
+    applySelection(item);
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetailError(null);
+    try {
+      const res = await fetch(`${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}`);
+      const data = (await res.json()) as InboxMessageDetailResponse;
+      if (!res.ok || !data?.ok) {
+        throw new Error("Nachricht konnte nicht geöffnet werden.");
+      }
+      setDetailData(data);
+    } catch (err) {
+      setDetailData(null);
+      setDetailError(err instanceof Error ? err.message : "Nachricht konnte nicht geöffnet werden.");
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
 
   const loadMicrosoftAuthStatus = async () => {
     try {
@@ -208,6 +299,7 @@ export default function ExchangeInboxPanel() {
       setMsAuth({ ok: false, connected: false, oauthConfigured: false });
     }
   };
+
 
   const connectMicrosoft = async () => {
     setMsAuthLoading(true);
@@ -276,10 +368,21 @@ export default function ExchangeInboxPanel() {
     if (typeof window === "undefined") return;
     const id = window.setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) return;
-      void loadInbox();
+      void loadInbox({ silent: true });
     }, INBOX_AUTO_REFRESH_MS);
     return () => {
       window.clearInterval(id);
+    };
+  }, [loadInbox]);
+
+  useEffect(() => {
+    const onSetupDone = () => {
+      void loadMicrosoftAuthStatus();
+      void loadInbox({ silent: true });
+    };
+    window.addEventListener("fm-mail-setup-complete", onSetupDone);
+    return () => {
+      window.removeEventListener("fm-mail-setup-complete", onSetupDone);
     };
   }, [loadInbox]);
 
@@ -380,9 +483,9 @@ export default function ExchangeInboxPanel() {
             cursor: msAuthLoading ? "wait" : "pointer",
             whiteSpace: "nowrap",
           }}
-          title={msAuth?.connected ? "Microsoft Konto trennen" : "Mit Microsoft verbinden"}
+          title={msAuth?.connected ? "Verbindung trennen" : "Verbinden"}
         >
-          {msAuth?.connected ? "Microsoft verbunden" : "Microsoft verbinden"}
+          {msAuth?.connected ? "Verbunden" : "Verbinden"}
         </button>
       </div>
 
@@ -436,23 +539,11 @@ export default function ExchangeInboxPanel() {
           Kontext lösen
         </button>
       </div>
-      {msAuth && (
-        <div
-          style={{
-            marginBottom: 8,
-            fontSize: 10,
-            color: msAuth.connected ? "rgba(142,243,181,0.88)" : "rgba(255,255,255,0.55)",
-            paddingLeft: 2,
-          }}
-        >
-          {msAuth.connected
-            ? `Microsoft OAuth aktiv${typeof msAuth.expiresInSec === "number" ? ` (${Math.max(0, Math.floor(msAuth.expiresInSec / 60))}m)` : ""}`
-            : msAuth.oauthConfigured === false
-            ? "Microsoft OAuth nicht konfiguriert (Backend ENV prüfen)"
-            : "Microsoft OAuth nicht verbunden"}
+      {refreshing && items.length > 0 && (
+        <div style={{ marginBottom: 8, fontSize: 10, color: "rgba(255,255,255,0.52)", paddingLeft: 2 }}>
+          Aktualisiert im Hintergrund...
         </div>
       )}
-
       <div
         style={{
           minHeight: 0,
@@ -466,13 +557,100 @@ export default function ExchangeInboxPanel() {
           gap: 8,
         }}
       >
-        {loading && <div style={{ color: "rgba(255,255,255,0.62)", fontSize: 12 }}>Inbox wird geladen...</div>}
+        {detailOpen && (
+          <div
+            style={{
+              borderRadius: 14,
+              border: "1px solid rgba(255,255,255,0.16)",
+              background: "rgba(9,12,16,0.82)",
+              padding: 12,
+              display: "grid",
+              gap: 8,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <button
+                onClick={() => setDetailOpen(false)}
+                style={{
+                  height: 24,
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  background: "rgba(255,255,255,0.08)",
+                  color: "rgba(255,255,255,0.9)",
+                  padding: "0 10px",
+                  fontSize: 11,
+                  cursor: "pointer",
+                }}
+              >
+                ← Zurück
+              </button>
+              {detailData?.receivedAt && (
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.52)" }}>{fmtDate(detailData.receivedAt)}</div>
+              )}
+            </div>
+            {detailLoading && <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 12 }}>Nachricht wird geladen...</div>}
+            {detailError && <div style={{ color: "rgba(255,170,170,0.92)", fontSize: 12 }}>{detailError}</div>}
+            {!detailLoading && !detailError && detailData && (
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "rgba(255,255,255,0.96)" }}>
+                  {detailData.subject || "(ohne Betreff)"}
+                </div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.72)" }}>
+                  Von: {detailData.fromName || detailData.fromEmail || "Unbekannt"}
+                </div>
+                {detailData.to?.length > 0 && (
+                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.6)" }}>
+                    An: {detailData.to.join(", ")}
+                  </div>
+                )}
+                {detailData.bodyHtml ? (
+                  <div
+                    style={{
+                      marginTop: 4,
+                      maxHeight: 300,
+                      overflowY: "auto",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: "rgba(255,255,255,0.03)",
+                      padding: "10px 11px",
+                      fontSize: 12,
+                      lineHeight: 1.45,
+                      color: "rgba(255,255,255,0.88)",
+                      wordBreak: "break-word",
+                    }}
+                    dangerouslySetInnerHTML={{ __html: sanitizeHtmlForDetail(detailData.bodyHtml) }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      marginTop: 4,
+                      maxHeight: 220,
+                      overflowY: "auto",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: "rgba(255,255,255,0.03)",
+                      padding: "10px 11px",
+                      whiteSpace: "pre-wrap",
+                      fontSize: 12,
+                      lineHeight: 1.45,
+                      color: "rgba(255,255,255,0.86)",
+                    }}
+                  >
+                    {detailData.bodyText || "(kein Textinhalt)"}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        {loading && items.length === 0 && (
+          <div style={{ color: "rgba(255,255,255,0.62)", fontSize: 12 }}>Inbox wird geladen...</div>
+        )}
         {error && <div style={{ color: "rgba(255,170,170,0.92)", fontSize: 12 }}>{error}</div>}
-        {!loading && !error && visible.length === 0 && (
+        {!loading && visible.length === 0 && (
           <div style={{ color: "rgba(255,255,255,0.58)", fontSize: 12 }}>Keine Nachrichten gefunden.</div>
         )}
         {!loading &&
-          !error &&
           visible.map((item) => {
             const selected = item.uid === selectedUid;
             const fromLabel = item.fromName || item.fromEmail || "Unbekannt";
@@ -526,7 +704,29 @@ export default function ExchangeInboxPanel() {
                       {item.subject}
                     </div>
                   </div>
-                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.52)", flexShrink: 0 }}>{fmtDate(item.receivedAt)}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                    <div style={{ fontSize: 10, color: "rgba(255,255,255,0.52)" }}>{fmtDate(item.receivedAt)}</div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void openMessageDetail(item);
+                      }}
+                      style={{
+                        cursor: "pointer",
+                        height: 18,
+                        borderRadius: 999,
+                        border: "1px solid rgba(255,255,255,0.2)",
+                        background: "rgba(255,255,255,0.08)",
+                        color: "rgba(255,255,255,0.82)",
+                        fontSize: 10,
+                        padding: "0 8px",
+                        display: "inline-flex",
+                        alignItems: "center",
+                      }}
+                    >
+                      Öffnen
+                    </button>
+                  </div>
                 </div>
                 <div style={{ marginTop: 3, fontSize: 11, color: "rgba(255,255,255,0.66)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {fromLabel}
@@ -540,7 +740,7 @@ export default function ExchangeInboxPanel() {
             );
           })}
 
-        {!loading && !error && (
+        {!loading && (
           <div style={{ paddingTop: 2, fontSize: 10, color: "rgba(255,255,255,0.42)" }}>
             {unreadVisible} ungelesen · {visible.length} sichtbar / {filtered.length} gefiltert / {total} gesamt
           </div>

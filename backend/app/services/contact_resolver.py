@@ -108,18 +108,54 @@ class ContactResolver:
 
     @staticmethod
     def _imap_host() -> str:
+        try:
+            from .mail_setup_store import get_mail_setup_store
+
+            state = get_mail_setup_store().get_state() or {}
+            imap = state.get("imap") or {}
+            if isinstance(imap, dict) and imap.get("host"):
+                return str(imap.get("host")).strip()
+        except Exception:
+            pass
         return os.getenv("IMAP_HOST", "")
 
     @staticmethod
     def _imap_port() -> int:
+        try:
+            from .mail_setup_store import get_mail_setup_store
+
+            state = get_mail_setup_store().get_state() or {}
+            imap = state.get("imap") or {}
+            if isinstance(imap, dict) and imap.get("port"):
+                return int(imap.get("port"))
+        except Exception:
+            pass
         return int(os.getenv("IMAP_PORT", "993"))
 
     @staticmethod
     def _imap_user() -> str:
+        try:
+            from .mail_setup_store import get_mail_setup_store
+
+            state = get_mail_setup_store().get_state() or {}
+            imap = state.get("imap") or {}
+            if isinstance(imap, dict) and imap.get("user"):
+                return str(imap.get("user")).strip()
+        except Exception:
+            pass
         return os.getenv("IMAP_USER") or os.getenv("IMAP_USERNAME") or ""
 
     @staticmethod
     def _imap_pass() -> str:
+        try:
+            from .mail_setup_store import get_mail_setup_store
+
+            state = get_mail_setup_store().get_state() or {}
+            imap = state.get("imap") or {}
+            if isinstance(imap, dict) and imap.get("password"):
+                return str(imap.get("password"))
+        except Exception:
+            pass
         return os.getenv("IMAP_PASS") or os.getenv("IMAP_PASSWORD") or ""
 
     @classmethod

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import base64
 import smtplib
 import ssl
 import imaplib
@@ -82,25 +83,103 @@ class InboxMessageDetailResponse(BaseModel):
     to: list[str]
     receivedAt: str | None = None
     bodyText: str
+    bodyHtml: str | None = None
 
 
 def _imap_host() -> str:
-    return os.getenv("IMAP_HOST", "")
+    setup = _mail_setup_state()
+    imap = setup.get("imap") if isinstance(setup, dict) else {}
+    value = (imap.get("host") if isinstance(imap, dict) else "") or os.getenv("IMAP_HOST", "")
+    return str(value).strip()
 
 
 def _imap_port() -> int:
-    return int(os.getenv("IMAP_PORT", "993"))
+    setup = _mail_setup_state()
+    imap = setup.get("imap") if isinstance(setup, dict) else {}
+    value = (imap.get("port") if isinstance(imap, dict) else None) or os.getenv("IMAP_PORT", "993")
+    try:
+        return int(value)
+    except Exception:
+        return 993
 
 
 def _imap_user() -> str:
-    return os.getenv("IMAP_USER") or os.getenv("IMAP_USERNAME") or ""
+    setup = _mail_setup_state()
+    imap = setup.get("imap") if isinstance(setup, dict) else {}
+    value = (imap.get("user") if isinstance(imap, dict) else None) or os.getenv("IMAP_USER") or os.getenv("IMAP_USERNAME") or ""
+    return str(value).strip()
 
 
 def _imap_pass() -> str:
-    return os.getenv("IMAP_PASS") or os.getenv("IMAP_PASSWORD") or ""
+    setup = _mail_setup_state()
+    imap = setup.get("imap") if isinstance(setup, dict) else {}
+    value = (imap.get("password") if isinstance(imap, dict) else None) or os.getenv("IMAP_PASS") or os.getenv("IMAP_PASSWORD") or ""
+    return str(value)
+
+
+def _smtp_host() -> str:
+    setup = _mail_setup_state()
+    smtp = setup.get("smtp") if isinstance(setup, dict) else {}
+    value = (smtp.get("host") if isinstance(smtp, dict) else None) or os.getenv("SMTP_HOST") or ""
+    return str(value).strip()
+
+
+def _smtp_port() -> int:
+    setup = _mail_setup_state()
+    smtp = setup.get("smtp") if isinstance(setup, dict) else {}
+    value = (smtp.get("port") if isinstance(smtp, dict) else None) or os.getenv("SMTP_PORT", "465")
+    try:
+        return int(value)
+    except Exception:
+        return 465
+
+
+def _smtp_user() -> str:
+    setup = _mail_setup_state()
+    smtp = setup.get("smtp") if isinstance(setup, dict) else {}
+    value = (smtp.get("user") if isinstance(smtp, dict) else None) or os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or ""
+    return str(value).strip()
+
+
+def _smtp_pass() -> str:
+    setup = _mail_setup_state()
+    smtp = setup.get("smtp") if isinstance(setup, dict) else {}
+    value = (smtp.get("password") if isinstance(smtp, dict) else None) or os.getenv("SMTP_PASSWORD") or os.getenv("SMTP_PASS") or ""
+    return str(value)
+
+
+def _smtp_use_tls() -> bool:
+    setup = _mail_setup_state()
+    smtp = setup.get("smtp") if isinstance(setup, dict) else {}
+    if isinstance(smtp, dict) and "use_tls" in smtp:
+        return bool(smtp.get("use_tls"))
+    return (os.getenv("SMTP_USE_TLS", "false").lower() in ("1", "true", "yes"))
+
+
+def _smtp_use_ssl() -> bool:
+    setup = _mail_setup_state()
+    smtp = setup.get("smtp") if isinstance(setup, dict) else {}
+    if isinstance(smtp, dict) and "use_ssl" in smtp:
+        return bool(smtp.get("use_ssl"))
+    return (os.getenv("SMTP_USE_SSL", "false").lower() in ("1", "true", "yes"))
+
+
+def _mail_setup_state() -> dict:
+    try:
+        from ..services.mail_setup_store import get_mail_setup_store
+
+        return get_mail_setup_store().get_state() or {}
+    except Exception:
+        return {}
 
 
 def _graph_mail_mode_enabled() -> bool:
+    setup = _mail_setup_state()
+    provider = str(setup.get("provider") or "").strip().lower()
+    if provider == "imap_smtp":
+        return False
+    if provider == "graph":
+        return True
     # Produktmodus: Mail transportiert über Graph statt IMAP/SMTP.
     value = (os.getenv("GRAPH_MAIL_MODE", "true") or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
@@ -117,9 +196,9 @@ def _imap_config_available() -> bool:
 
 
 def _smtp_config_available() -> bool:
-    host = (os.getenv("SMTP_HOST") or "").strip()
-    username = (os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or "").strip()
-    password = (os.getenv("SMTP_PASSWORD") or os.getenv("SMTP_PASS") or "").strip()
+    host = _smtp_host()
+    username = _smtp_user()
+    password = _smtp_pass()
     return bool(host and username and password)
 
 
@@ -273,12 +352,80 @@ def _probe_graph_mailbox_capability() -> tuple[bool, str | None]:
 
 
 def _html_to_text(value: str) -> str:
-    compact = re.sub(r"<style[\s\S]*?</style>", " ", value or "", flags=re.IGNORECASE)
+    compact = value or ""
+    compact = re.sub(r"<style[\s\S]*?</style>", " ", compact, flags=re.IGNORECASE)
     compact = re.sub(r"<script[\s\S]*?</script>", " ", compact, flags=re.IGNORECASE)
+    # Block-level HTML tags into line breaks for readability.
+    compact = re.sub(r"(?i)</?(br|p|div|li|tr|h[1-6]|section|article|table|ul|ol)>", "\n", compact)
     compact = re.sub(r"<[^>]+>", " ", compact)
     compact = html_lib.unescape(compact)
-    compact = re.sub(r"\s+", " ", compact).strip()
-    return compact
+    # Remove very long tracking URLs that destroy readability.
+    compact = re.sub(r"https?://\S{70,}", " ", compact, flags=re.IGNORECASE)
+    compact = re.sub(r"[ \t]+", " ", compact)
+    compact = re.sub(r"\n{3,}", "\n\n", compact)
+    compact = "\n".join(line.strip() for line in compact.splitlines() if line.strip())
+    # Drop lines that are mostly URL/query noise.
+    cleaned_lines: list[str] = []
+    for line in compact.splitlines():
+        if len(line) > 140 and ("utm_" in line.lower() or "trk=" in line.lower() or "?" in line and "&" in line):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
+def _sanitize_html_for_render(value: str) -> str:
+    safe = value or ""
+    safe = re.sub(r"<script[\s\S]*?</script>", "", safe, flags=re.IGNORECASE)
+    safe = re.sub(r"<style[\s\S]*?</style>", "", safe, flags=re.IGNORECASE)
+    safe = re.sub(r"<(iframe|object|embed|meta|base|link|form|input|button|textarea|select)[\s\S]*?>[\s\S]*?</\1>", "", safe, flags=re.IGNORECASE)
+    safe = re.sub(r"<(iframe|object|embed|meta|base|link|form|input|button|textarea|select)\b[^>]*?/?>", "", safe, flags=re.IGNORECASE)
+    safe = re.sub(r"\son[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", safe, flags=re.IGNORECASE)
+    safe = re.sub(
+        r"\s(href|src)\s*=\s*([\"'])\s*(javascript:|vbscript:|data:text/html)[^\"']*\2",
+        r' \1="#"',
+        safe,
+        flags=re.IGNORECASE,
+    )
+    return safe.strip()
+
+
+def _collect_inline_image_data_uris(msg: email.message.Message) -> dict[str, str]:
+    inline_map: dict[str, str] = {}
+    if not msg.is_multipart():
+        return inline_map
+    for part in msg.walk():
+        if part.get_content_maintype() == "multipart":
+            continue
+        content_type = (part.get_content_type() or "").lower()
+        if not content_type.startswith("image/"):
+            continue
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        # Sicherheits-/Performance-Grenze für data-uri Rendering.
+        if len(payload) > 1_500_000:
+            continue
+        encoded = base64.b64encode(payload).decode("ascii")
+        data_uri = f"data:{content_type};base64,{encoded}"
+        content_id = (part.get("Content-ID") or "").strip().strip("<>").lower()
+        content_location = (part.get("Content-Location") or "").strip().strip("<>").lower()
+        if content_id:
+            inline_map[content_id] = data_uri
+        if content_location:
+            inline_map[content_location] = data_uri
+    return inline_map
+
+
+def _replace_cid_sources_with_data_uris(html_value: str, inline_map: dict[str, str]) -> str:
+    output = html_value or ""
+    if not output or not inline_map:
+        return output
+    for cid_key, data_uri in inline_map.items():
+        if not cid_key:
+            continue
+        pattern = rf"cid:\s*<?{re.escape(cid_key)}>?"
+        output = re.sub(pattern, data_uri, output, flags=re.IGNORECASE)
+    return output
 
 
 def _learn_contacts_from_inbox_items(items: list[InboxMessageItem]) -> None:
@@ -333,32 +480,108 @@ def _normalize_preview(text: str, max_len: int = 180) -> str:
     return compact[: max_len - 1].rstrip() + "…"
 
 
+def _decode_part_payload(part: email.message.Message) -> str:
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        return ""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except Exception:
+        return payload.decode("utf-8", errors="replace")
+
+
+def _looks_machine_like_plain(text: str) -> bool:
+    sample = (text or "").strip()
+    if not sample:
+        return True
+    # Viele Tracking-/URL-Fragmente -> unleserliche Plain-Alternative.
+    url_hits = len(re.findall(r"https?://", sample, flags=re.IGNORECASE))
+    angle_hits = len(re.findall(r"<[^>]{2,}>", sample))
+    if (url_hits >= 3 and len(sample) > 180) or (angle_hits >= 3):
+        return True
+    return False
+
+
 def _extract_text_from_message(msg: email.message.Message) -> str:
     text_chunks: list[str] = []
+    html_chunks: list[str] = []
     if msg.is_multipart():
         for part in msg.walk():
             if part.get_content_maintype() == "multipart":
                 continue
+            content_disposition = (part.get("Content-Disposition") or "").lower()
+            if "attachment" in content_disposition:
+                continue
             content_type = part.get_content_type()
-            if content_type != "text/plain":
+            decoded = _decode_part_payload(part)
+            if not decoded.strip():
                 continue
-            payload = part.get_payload(decode=True)
-            if payload is None:
-                continue
-            charset = part.get_content_charset() or "utf-8"
-            try:
-                text_chunks.append(payload.decode(charset, errors="replace"))
-            except Exception:
-                text_chunks.append(payload.decode("utf-8", errors="replace"))
+            if content_type == "text/plain":
+                text_chunks.append(decoded)
+            elif content_type == "text/html":
+                html_chunks.append(decoded)
     else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            charset = msg.get_content_charset() or "utf-8"
-            try:
-                text_chunks.append(payload.decode(charset, errors="replace"))
-            except Exception:
-                text_chunks.append(payload.decode("utf-8", errors="replace"))
-    return "\n".join(chunk.strip() for chunk in text_chunks if chunk and chunk.strip()).strip()
+        content_type = msg.get_content_type()
+        decoded = _decode_part_payload(msg)
+        if decoded.strip():
+            if content_type == "text/html":
+                html_chunks.append(decoded)
+            else:
+                text_chunks.append(decoded)
+
+    plain_text = "\n".join(chunk.strip() for chunk in text_chunks if chunk and chunk.strip()).strip()
+    html_text_raw = "\n".join(chunk.strip() for chunk in html_chunks if chunk and chunk.strip()).strip()
+    html_text = _html_to_text(html_text_raw) if html_text_raw else ""
+
+    if plain_text and not _looks_machine_like_plain(plain_text):
+        return plain_text
+    if html_text:
+        return html_text
+    return plain_text
+
+
+def _extract_message_content(msg: email.message.Message) -> tuple[str, str]:
+    text_chunks: list[str] = []
+    html_chunks: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            content_disposition = (part.get("Content-Disposition") or "").lower()
+            if "attachment" in content_disposition:
+                continue
+            content_type = part.get_content_type()
+            decoded = _decode_part_payload(part)
+            if not decoded.strip():
+                continue
+            if content_type == "text/plain":
+                text_chunks.append(decoded)
+            elif content_type == "text/html":
+                html_chunks.append(decoded)
+    else:
+        content_type = msg.get_content_type()
+        decoded = _decode_part_payload(msg)
+        if decoded.strip():
+            if content_type == "text/html":
+                html_chunks.append(decoded)
+            else:
+                text_chunks.append(decoded)
+
+    plain_text = "\n".join(chunk.strip() for chunk in text_chunks if chunk and chunk.strip()).strip()
+    html_raw = "\n".join(chunk.strip() for chunk in html_chunks if chunk and chunk.strip()).strip()
+    if html_raw:
+        inline_map = _collect_inline_image_data_uris(msg)
+        if inline_map:
+            html_raw = _replace_cid_sources_with_data_uris(html_raw, inline_map)
+    html_text = _html_to_text(html_raw) if html_raw else ""
+    safe_html = _sanitize_html_for_render(html_raw) if html_raw else ""
+
+    if plain_text and not _looks_machine_like_plain(plain_text):
+        return plain_text, safe_html
+    if html_text:
+        return html_text, safe_html
+    return plain_text, safe_html
 
 
 def _open_imap_client() -> imaplib.IMAP4_SSL:
@@ -406,16 +629,12 @@ def _build_smtp_client() -> smtplib.SMTP:
       * Für Port 587 wird STARTTLS erzwungen (sofern kein reines SSL benutzt wird),
         weil viele Provider AUTH erst nach STARTTLS anbieten.
     """
-    host = os.getenv("SMTP_HOST")
-    # Fallback: Nutze SMTP_USERNAME/PASSWORD falls vorhanden, sonst SMTP_USER/SMTP_PASS
-    username = os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER")
-    password = os.getenv("SMTP_PASSWORD") or os.getenv("SMTP_PASS")
-    # Port: Standard 465 für SSL, 587 für TLS, oder aus Env
-    port = int(os.getenv("SMTP_PORT", "465"))
-    # TLS: Standard False (da Port 465 SSL nutzt), oder aus Env
-    use_tls = os.getenv("SMTP_USE_TLS", "false").lower() in ("1", "true", "yes")
-    # SSL: Direkter SSL-Modus (z.B. für Port 465)
-    use_ssl = os.getenv("SMTP_USE_SSL", "false").lower() in ("1", "true", "yes")
+    host = _smtp_host()
+    username = _smtp_user()
+    password = _smtp_pass()
+    port = _smtp_port()
+    use_tls = _smtp_use_tls()
+    use_ssl = _smtp_use_ssl()
 
     # Heuristik: Port 587 -> typischer Submission-Port mit STARTTLS
     # Wenn kein reines SSL aktiv ist, erzwingen wir hier TLS.
@@ -563,7 +782,7 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
     """
     client = _build_smtp_client()
     # Sender aus Umgebungsvariablen holen
-    sender = os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or os.getenv("SMTP_FROM", "noreply@freiraum.de")
+    sender = _smtp_user() or os.getenv("SMTP_FROM", "noreply@freiraum.de")
 
     # --- NEUER MIME-AUFBAU MIT SIGNATUR UND INLINE-LOGO ---
     text_body = _build_email_text_with_signature(body)
@@ -895,8 +1114,10 @@ async def get_inbox_message(uid: str):
             body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
             body_content = (body.get("content") or "") if isinstance(body, dict) else ""
             body_type = ((body.get("contentType") or "") if isinstance(body, dict) else "").strip().lower()
+            body_html: str | None = None
             if body_type == "html":
                 body_text = _html_to_text(body_content)
+                body_html = _sanitize_html_for_render(body_content) or None
             else:
                 body_text = re.sub(r"\s+", " ", (body_content or "").strip())
             if not body_text:
@@ -912,6 +1133,7 @@ async def get_inbox_message(uid: str):
                 to=to_addresses,
                 receivedAt=(payload.get("receivedDateTime") or None),
                 bodyText=body_text,
+                bodyHtml=body_html,
             )
         except HTTPException as exc:
             if (
@@ -948,7 +1170,9 @@ async def get_inbox_message(uid: str):
         to_addresses = [addr for _, addr in [email.utils.parseaddr(v) for v in to_headers] if addr]
         message_id = (msg.get("Message-ID") or "").strip() or None
         received_at = (msg.get("Date") or "").strip() or None
-        body_text = _extract_text_from_message(msg) or "(kein Textinhalt)"
+        body_text, body_html = _extract_message_content(msg)
+        if not body_text:
+            body_text = "(kein Textinhalt)"
 
         return InboxMessageDetailResponse(
             ok=True,
@@ -960,6 +1184,7 @@ async def get_inbox_message(uid: str):
             to=to_addresses,
             receivedAt=received_at,
             bodyText=body_text,
+            bodyHtml=(body_html or None),
         )
     finally:
         try:

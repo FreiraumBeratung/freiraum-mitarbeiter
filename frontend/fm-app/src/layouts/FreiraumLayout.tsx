@@ -33,7 +33,6 @@ export default function FreiraumLayout({ robot, composer, ptt, exchange }: Props
                   <div className="text-white/95 text-xl font-semibold tracking-[0.01em] leading-normal">Ihre persönliche Outlook-Inbox</div>
                   <div className="text-white/60 text-xs mt-1 leading-normal">Zentraler Arbeitsbereich für E-Mail-Eingänge, Kontexte und schnelle Antworten</div>
                 </div>
-                <div className="ml-3 mr-1 shrink-0 text-[11px] text-white/70 rounded-full px-2.5 py-1 bg-emerald-400/15 border border-emerald-300/25">Verbunden</div>
               </div>
             </div>
             {exchange ? (

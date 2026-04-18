@@ -13,6 +13,14 @@ Prüfbare Abnahme für V1 in beiden Mail-Welten:
 - [ ] Mailversand klappt im Graph-Modus.
 - [ ] Mailversand klappt im IMAP/SMTP-Fallback.
 
+## A2. Onboarding & Setup-Flow
+
+- [ ] Erststart fragt nach Provider (`Graph` oder `IMAP/SMTP`).
+- [ ] Graph-Flow: OAuth Connect + Setup-Abschluss möglich.
+- [ ] IMAP-Flow: Nur E-Mail+Passwort reicht bei bekannten Providern (Auto-Discovery).
+- [ ] IMAP-Flow: Bei fehlgeschlagener Discovery führt "Erweiterte Einstellungen" zum Erfolg.
+- [ ] Setup-Zustand bleibt nach Backend-Neustart erhalten.
+
 ## B. OAuth & Session
 
 - [ ] OAuth Connect erzeugt `connected=true`.

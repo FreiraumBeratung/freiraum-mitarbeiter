@@ -9,6 +9,7 @@ body,
 #root {
   background: #0b0b0b;
   color: var(--fr-text);
+  overflow: hidden;
 }
 
 .fr-glass {
@@ -36,6 +37,32 @@ body,
 
 .fr-btn:active {
   transform: translateY(1px);
+}
+
+/* Global scrollbar styling (Chrome/Edge/Safari + Firefox) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #ff9a2a rgba(255, 255, 255, 0.12);
+}
+
+*::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+*::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #ffad47 0%, #ff8f1f 100%);
+  border-radius: 999px;
+  border: 2px solid rgba(14, 16, 20, 0.85);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #ffbe66 0%, #ffa035 100%);
 }
 
 

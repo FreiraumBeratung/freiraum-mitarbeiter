@@ -21,6 +21,7 @@ import FreiraumLayout from "./layouts/FreiraumLayout";
 import RobotAvatar from "./components/robot/RobotAvatar";
 import MailComposeForm from "./components/mail/MailComposeForm";
 import ExchangeInboxPanel from "./components/mail/ExchangeInboxPanel";
+import MailOnboardingOverlay from "./components/onboarding/MailOnboardingOverlay";
 
 import Backdrop from "./components/layout/Backdrop";
 import TopFeatureBar from "./components/TopFeatureBar";
@@ -167,6 +168,7 @@ function Shell() {
         </div>
       )}
       {/* <PartnerBot /> */}
+      <MailOnboardingOverlay />
     </>
   );
 }
