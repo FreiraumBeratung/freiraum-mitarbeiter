@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import secrets
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +93,7 @@ _state_inflight: Dict[str, float] = {}
 _state_completed: Dict[str, float] = {}
 _token_bundle: TokenBundle | None = None
 _token_loaded_from_disk = False
+_token_lock = threading.RLock()
 
 
 def _now() -> float:
@@ -118,7 +121,20 @@ def _save_token_bundle_to_disk(bundle: TokenBundle) -> None:
             "user_hint": bundle.user_hint,
             "redirect_uri": bundle.redirect_uri,
         }
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        encoded = json.dumps(payload)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as tmp:
+            tmp.write(encoded)
+            tmp_path = Path(tmp.name)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except Exception:
+            # Best effort: chmod ist plattform-/filesystem-abhängig.
+            pass
+        tmp_path.replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
     except Exception:
         # Persistenz ist Best-Effort, Laufzeitbetrieb darf nicht scheitern.
         pass
@@ -160,12 +176,13 @@ def _load_token_bundle_from_disk() -> TokenBundle | None:
 
 def _ensure_token_loaded() -> None:
     global _token_bundle, _token_loaded_from_disk
-    if _token_bundle is not None or _token_loaded_from_disk:
-        return
-    _token_loaded_from_disk = True
-    persisted = _load_token_bundle_from_disk()
-    if persisted is not None:
-        _token_bundle = persisted
+    with _token_lock:
+        if _token_bundle is not None or _token_loaded_from_disk:
+            return
+        _token_loaded_from_disk = True
+        persisted = _load_token_bundle_from_disk()
+        if persisted is not None:
+            _token_bundle = persisted
 
 
 def _cleanup_state_store(ttl_seconds: int = 600) -> None:
@@ -223,21 +240,22 @@ def _token_endpoint() -> str:
 
 def _store_token_payload(payload: Dict[str, Any], redirect_uri: str) -> TokenBundle:
     global _token_bundle
-    expires_in = int(payload.get("expires_in") or 0)
-    expires_at = _now() + max(60, expires_in)
-    bundle = TokenBundle(
-        access_token=str(payload.get("access_token") or ""),
-        refresh_token=(str(payload.get("refresh_token")) if payload.get("refresh_token") else None),
-        expires_at=expires_at,
-        scope=str(payload.get("scope") or ""),
-        token_type=str(payload.get("token_type") or "Bearer"),
-        id_token=(str(payload.get("id_token")) if payload.get("id_token") else None),
-        user_hint=None,
-        redirect_uri=redirect_uri,
-    )
-    _token_bundle = bundle
-    _save_token_bundle_to_disk(bundle)
-    return bundle
+    with _token_lock:
+        expires_in = int(payload.get("expires_in") or 0)
+        expires_at = _now() + max(60, expires_in)
+        bundle = TokenBundle(
+            access_token=str(payload.get("access_token") or ""),
+            refresh_token=(str(payload.get("refresh_token")) if payload.get("refresh_token") else None),
+            expires_at=expires_at,
+            scope=str(payload.get("scope") or ""),
+            token_type=str(payload.get("token_type") or "Bearer"),
+            id_token=(str(payload.get("id_token")) if payload.get("id_token") else None),
+            user_hint=None,
+            redirect_uri=redirect_uri,
+        )
+        _token_bundle = bundle
+        _save_token_bundle_to_disk(bundle)
+        return bundle
 
 
 def exchange_code_for_token(code: str, state: str) -> TokenBundle:
@@ -245,19 +263,20 @@ def exchange_code_for_token(code: str, state: str) -> TokenBundle:
         raise RuntimeError("OAuth Konfiguration unvollständig.")
     if not code or not state:
         raise RuntimeError("Fehlender OAuth code/state.")
-    _cleanup_state_store()
-    state_entry = _state_store.get(state)
-    if state_entry is None:
-        # Idempotenz: Doppelte Callback-Aufrufe nach erfolgreichem Abschluss tolerieren.
-        if state in _state_completed and _token_bundle is not None and bool(_token_bundle.access_token):
-            return _token_bundle
-        raise RuntimeError("Ungültiger oder abgelaufener OAuth state.")
-    if state in _state_inflight:
-        if _token_bundle is not None and bool(_token_bundle.access_token):
-            return _token_bundle
-        raise RuntimeError("OAuth state wird bereits verarbeitet.")
+    with _token_lock:
+        _cleanup_state_store()
+        state_entry = _state_store.get(state)
+        if state_entry is None:
+            # Idempotenz: Doppelte Callback-Aufrufe nach erfolgreichem Abschluss tolerieren.
+            if state in _state_completed and _token_bundle is not None and bool(_token_bundle.access_token):
+                return _token_bundle
+            raise RuntimeError("Ungültiger oder abgelaufener OAuth state.")
+        if state in _state_inflight:
+            if _token_bundle is not None and bool(_token_bundle.access_token):
+                return _token_bundle
+            raise RuntimeError("OAuth state wird bereits verarbeitet.")
 
-    _state_inflight[state] = _now()
+        _state_inflight[state] = _now()
 
     try:
         response = requests.post(
@@ -278,55 +297,61 @@ def exchange_code_for_token(code: str, state: str) -> TokenBundle:
         bundle = _store_token_payload(payload, redirect_uri=state_entry.redirect_uri)
         if not bundle.access_token:
             raise RuntimeError("OAuth Token-Antwort enthält kein access_token.")
-        _state_store.pop(state, None)
-        _state_completed[state] = _now()
+        with _token_lock:
+            _state_store.pop(state, None)
+            _state_completed[state] = _now()
         return bundle
     finally:
-        _state_inflight.pop(state, None)
+        with _token_lock:
+            _state_inflight.pop(state, None)
 
 
 def refresh_access_token() -> TokenBundle:
     global _token_bundle
-    if not oauth_config_valid():
-        raise RuntimeError("OAuth Konfiguration unvollständig.")
-    if _token_bundle is None or not _token_bundle.refresh_token:
-        raise RuntimeError("Kein refresh_token vorhanden.")
-    response = requests.post(
-        _token_endpoint(),
-        data={
-            "client_id": _client_id(),
-            "grant_type": "refresh_token",
-            "refresh_token": _token_bundle.refresh_token,
-            "redirect_uri": _token_bundle.redirect_uri or _authorization_redirect_uri(),
-            "scope": _scopes(),
-            **({"client_secret": _client_secret()} if (not _public_client_mode() and _client_secret()) else {}),
-        },
-        timeout=15,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"OAuth Token-Refresh fehlgeschlagen ({response.status_code}): {response.text[:220]}")
-    payload = response.json() if response.content else {}
-    bundle = _store_token_payload(payload, redirect_uri=_token_bundle.redirect_uri or _authorization_redirect_uri())
-    if not bundle.access_token:
-        raise RuntimeError("OAuth Refresh-Antwort enthält kein access_token.")
-    return bundle
+    with _token_lock:
+        if not oauth_config_valid():
+            raise RuntimeError("OAuth Konfiguration unvollständig.")
+        if _token_bundle is None or not _token_bundle.refresh_token:
+            raise RuntimeError("Kein refresh_token vorhanden.")
+        redirect_uri = _token_bundle.redirect_uri or _authorization_redirect_uri()
+        refresh_token = _token_bundle.refresh_token
+        response = requests.post(
+            _token_endpoint(),
+            data={
+                "client_id": _client_id(),
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "redirect_uri": redirect_uri,
+                "scope": _scopes(),
+                **({"client_secret": _client_secret()} if (not _public_client_mode() and _client_secret()) else {}),
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"OAuth Token-Refresh fehlgeschlagen ({response.status_code}): {response.text[:220]}")
+        payload = response.json() if response.content else {}
+        bundle = _store_token_payload(payload, redirect_uri=redirect_uri)
+        if not bundle.access_token:
+            raise RuntimeError("OAuth Refresh-Antwort enthält kein access_token.")
+        return bundle
 
 
 def get_valid_access_token(refresh_if_needed: bool = True) -> str | None:
     global _token_bundle
     _ensure_token_loaded()
-    if _token_bundle is None or not _token_bundle.access_token:
-        return None
-    # 60s Puffer
-    if _token_bundle.expires_at > (_now() + 60):
-        return _token_bundle.access_token
-    if not refresh_if_needed:
-        return None
-    try:
-        refreshed = refresh_access_token()
-        return refreshed.access_token
-    except Exception:
-        return None
+    with _token_lock:
+        if _token_bundle is None or not _token_bundle.access_token:
+            return None
+        # 60s Puffer
+        if _token_bundle.expires_at > (_now() + 60):
+            return _token_bundle.access_token
+        if not refresh_if_needed:
+            return None
+        try:
+            refreshed = refresh_access_token()
+            return refreshed.access_token
+        except Exception:
+            return None
 
 
 def get_auth_status() -> Dict[str, Any]:
@@ -354,8 +379,9 @@ def get_auth_status() -> Dict[str, Any]:
 
 def clear_auth_session() -> None:
     global _token_bundle
-    _token_bundle = None
-    _state_store.clear()
-    _state_inflight.clear()
-    _state_completed.clear()
-    _clear_token_bundle_from_disk()
+    with _token_lock:
+        _token_bundle = None
+        _state_store.clear()
+        _state_inflight.clear()
+        _state_completed.clear()
+        _clear_token_bundle_from_disk()

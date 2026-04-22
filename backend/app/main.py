@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,9 +16,9 @@ try:
 except Exception:
     pass
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 from .core.config import get_settings
 from .core.logging import configure_logging
@@ -48,13 +49,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+LOCALHOST_ONLY = os.getenv("FM_LOCALHOST_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
+_LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+@app.middleware("http")
+async def localhost_only_guard(request: Request, call_next):
+    if not LOCALHOST_ONLY:
+        return await call_next(request)
+    client_host = (request.client.host if request.client else "") or ""
+    normalized = client_host.lower()
+    if normalized in _LOCALHOST_HOSTS or normalized.startswith("::ffff:127.0.0.1"):
+        return await call_next(request)
+    return JSONResponse(
+        status_code=403,
+        content={"ok": False, "detail": "Backend ist auf localhost-Zugriffe beschränkt."},
+    )
+
 app.include_router(metrics_router)
 try:
     from .routers.ai import router as ai_router
 
     app.include_router(ai_router, prefix="/api/ai", tags=["ai"])
     # Verifikation: Prüfe OPENAI_API_KEY beim Startup
-    import os
     print("[fm-ai] Backend gestartet – prüfe OPENAI_API_KEY...")
     if not os.getenv("OPENAI_API_KEY"):
         print("[fm-ai] FEHLER: OPENAI_API_KEY NICHT GEFUNDEN")
@@ -126,30 +143,24 @@ except Exception as e:
     print(f"[fm-auth] FEHLER beim Laden des Microsoft OAuth Routers: {e}")
     pass
 # lead_hunter_osm will be loaded by router_loader
-load_and_include_routers(app)
+load_and_include_routers(
+    app,
+    exclude_modules={
+        "app.routers.ai",
+        "app.routers.auth_microsoft",
+        "app.routers.contacts",
+        "app.routers.exports",
+        "app.routers.lead_radar",
+        "app.routers.system_features",
+        "app.routers.stt_local",
+        "app.routers.tts_local",
+        "app.routers.ui_smoke",
+        "app.routers.metrics",
+    },
+)
 
 
-# DEBUG-ENDPOINT für E-Mail-Versand (ohne SMTP)
-class MailSendRequest(BaseModel):
-    to: str
-    subject: str | None = None
-    body: str
-
-
-@app.post("/api/mail/send")
-async def debug_send_mail(req: MailSendRequest):
-    """
-    DEBUG-ENDPOINT für den Freiraum-Mitarbeiter:
-    - Nimmt {to, subject, body} entgegen.
-    - Schreibt Logs in die Konsole.
-    - Gibt die Daten 1:1 wieder zurück.
-    - KEIN SMTP-Versand.
-    """
-    print("[fm-backend] /api/mail/send aufgerufen", req.dict())
-    return {
-        "status": "ok",
-        "echo": req.dict(),
-    }
+# /api/mail/send wird ausschließlich durch app/routers/mail.py bereitgestellt.
 
 
 

@@ -3,13 +3,53 @@ API-Router für Contact Resolution
 """
 
 from fastapi import APIRouter, Query, HTTPException
-from typing import Optional
+from pydantic import BaseModel, EmailStr
 import logging
 
 from ..services.contact_resolver import get_contact_resolver
+from ..services.contact_store import get_contact_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/contacts", tags=["contacts"])
+
+
+class ManualContactCreateRequest(BaseModel):
+    email: EmailStr
+    displayName: str
+    aliases: list[str] = []
+
+
+def _looks_like_real_person_contact(contact: dict) -> bool:
+    email_value = str(contact.get("email") or "").strip().lower()
+    display_name = str(contact.get("display_name") or "").strip().lower()
+    source = str(contact.get("source") or "").strip().lower()
+    if "@" not in email_value:
+        return False
+    local = email_value.split("@", 1)[0]
+    blocked_tokens = [
+        "noreply",
+        "no-reply",
+        "donotreply",
+        "do-not-reply",
+        "newsletter",
+        "notification",
+        "notifications",
+        "support",
+        "service",
+        "system",
+        "mailer",
+        "info",
+    ]
+    if any(tok in local for tok in blocked_tokens):
+        return False
+    if any(tok in display_name for tok in blocked_tokens):
+        return False
+    if source in {"send", "manual"}:
+        return True
+    person_hints = [" ", ",", "dr.", "herr", "frau"]
+    if any(h in display_name for h in person_hints):
+        return True
+    return False
 
 
 @router.get("/resolve")
@@ -72,6 +112,41 @@ def contacts_status():
         "ok": True,
         "sources": resolver.get_status_snapshot(),
     }
+
+
+@router.get("/learned")
+def learned_contacts(
+    personOnly: bool = Query(True, description="Nur wahrscheinliche Personenkontakte liefern"),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    store = get_contact_store()
+    rows = store.get_contacts()
+    if personOnly:
+        rows = [row for row in rows if _looks_like_real_person_contact(row)]
+    return {"ok": True, "total": len(rows), "items": rows[:limit]}
+
+
+@router.post("/manual")
+def create_manual_contact(req: ManualContactCreateRequest):
+    display = (req.displayName or "").strip()
+    if not display:
+        raise HTTPException(status_code=400, detail="displayName darf nicht leer sein.")
+    store = get_contact_store()
+    aliases = [a.strip() for a in (req.aliases or []) if isinstance(a, str) and a.strip()]
+    store.upsert_contact(
+        email=str(req.email).strip().lower(),
+        display_name=display,
+        aliases=aliases,
+        source="manual",
+    )
+    return {"ok": True}
+
+
+@router.delete("/learned")
+def delete_learned_contact(email: EmailStr = Query(...)):
+    store = get_contact_store()
+    deleted = store.delete_contact(str(email))
+    return {"ok": True, "deleted": bool(deleted)}
 
 
 

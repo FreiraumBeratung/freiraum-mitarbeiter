@@ -133,6 +133,15 @@ class ContactStore:
             )
         return result
 
+    def delete_contact(self, email: str) -> bool:
+        normalized_email = (email or "").strip().lower()
+        if not normalized_email:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM learned_contacts WHERE email = ?", (normalized_email,))
+            conn.commit()
+            return (cur.rowcount or 0) > 0
+
     def remember_resolution(self, *, query_norm: str, email: str, display_name: str) -> None:
         q = (query_norm or "").strip().lower()
         e = (email or "").strip().lower()

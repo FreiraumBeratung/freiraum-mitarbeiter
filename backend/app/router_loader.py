@@ -27,8 +27,11 @@ def load_router(module_name: str) -> APIRouter | None:
     return None
 
 
-def load_and_include_routers(app: FastAPI) -> None:
+def load_and_include_routers(app: FastAPI, *, exclude_modules: set[str] | None = None) -> None:
+    excluded = exclude_modules or set()
     for module_name in iter_router_modules():
+        if module_name in excluded:
+            continue
         if module_name.endswith(".metrics") or module_name.endswith(".tts") or module_name.endswith(".tts_local") or module_name.endswith(".stt_local"):
             continue
         try:

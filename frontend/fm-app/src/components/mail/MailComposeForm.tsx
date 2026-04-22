@@ -21,9 +21,11 @@ export default function MailComposeForm() {
   const [to, setTo] = useState(sp.get("to") || "");
   const [subject, setSubject] = useState(sp.get("subject") || "");
   const [body, setBody] = useState(sp.get("body") || "");
+  const [sending, setSending] = useState(false);
   const toRef = useRef(to);
   const subjectRef = useRef(subject);
   const bodyRef = useRef(body);
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     toRef.current = to;
@@ -42,9 +44,15 @@ export default function MailComposeForm() {
   }, []);
 
   const handleSendNow = useCallback(async () => {
+    if (sendingRef.current) {
+      return;
+    }
     const safeTo = toRef.current.trim();
     const safeBody = bodyRef.current.trim();
-    if (!safeTo || !safeBody) return;
+    if (!safeTo || !safeBody) {
+      PartnerBotBus.say("Zum Senden fehlen Empfänger oder Inhalt. Ich bleibe in der Vorschau.");
+      return;
+    }
 
     const API_BASE =
       (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
@@ -54,6 +62,8 @@ export default function MailComposeForm() {
     const url = `${API_BASE.replace(/\/+$/, "")}/api/mail/send`;
 
     try {
+      sendingRef.current = true;
+      setSending(true);
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -72,6 +82,9 @@ export default function MailComposeForm() {
       PartnerBotBus.say("Die E-Mail wurde versendet.");
     } catch {
       PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
   }, []);
 
@@ -208,6 +221,7 @@ export default function MailComposeForm() {
         </button>
         <button
           data-fm-mail="send-now"
+          disabled={sending}
           onClick={() => {
             void handleSendNow();
           }}
@@ -218,11 +232,12 @@ export default function MailComposeForm() {
             color: "#111",
             fontWeight: 700,
             padding: "6px 14px",
-            cursor: "pointer",
+            cursor: sending ? "wait" : "pointer",
             boxShadow: "0 8px 18px rgba(255,140,0,0.35)",
+            opacity: sending ? 0.78 : 1,
           }}
         >
-          Senden
+          {sending ? "Senden..." : "Senden"}
         </button>
       </div>
     </div>

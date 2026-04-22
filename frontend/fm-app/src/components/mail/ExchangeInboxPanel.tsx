@@ -46,6 +46,13 @@ type MicrosoftAuthStatus = {
   expiresInSec?: number;
 };
 
+type LearnedContactItem = {
+  email: string;
+  display_name: string;
+  aliases: string[];
+  source: string;
+};
+
 function backendBase(): string {
   return (
     (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
@@ -144,6 +151,7 @@ export default function ExchangeInboxPanel() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [mailboxMode, setMailboxMode] = useState<"inbox" | "sent">("inbox");
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [activeContext, setActiveContext] = useState<SelectedMailContext | null>(null);
   const [openedUids, setOpenedUids] = useState<Set<string>>(() => {
@@ -162,10 +170,17 @@ export default function ExchangeInboxPanel() {
   const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
   const [msAuthLoading, setMsAuthLoading] = useState(false);
   const inboxLoadInFlightRef = useRef(false);
+  const loadInboxRef = useRef<((options?: { silent?: boolean }) => Promise<void>) | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailData, setDetailData] = useState<InboxMessageDetailResponse | null>(null);
+  const [contactsOpen, setContactsOpen] = useState(false);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [contactsError, setContactsError] = useState<string | null>(null);
+  const [contacts, setContacts] = useState<LearnedContactItem[]>([]);
+  const [manualName, setManualName] = useState("");
+  const [manualEmail, setManualEmail] = useState("");
 
   const normalizedItems = useMemo(
     () =>
@@ -187,7 +202,7 @@ export default function ExchangeInboxPanel() {
     );
   }, [normalizedItems, query]);
 
-  const visible = useMemo(() => filtered.slice(0, 20), [filtered]);
+  const visible = useMemo(() => filtered.slice(0, 50), [filtered]);
   const unreadVisible = useMemo(
     () => visible.filter((item) => item.isRead === false && !openedUids.has(item.uid)).length,
     [visible, openedUids]
@@ -237,7 +252,7 @@ export default function ExchangeInboxPanel() {
       setRefreshing(true);
     }
     try {
-      const inboxUrl = `${backendBase()}/api/mail/inbox?limit=50&offset=0`;
+      const inboxUrl = `${backendBase()}/api/mail/inbox?limit=50&offset=0&mailbox=${mailboxMode}`;
       let res = await fetch(inboxUrl);
       if (res.status === 503) {
         // Initiale IMAP-Anmeldung kann kurz verzögert sein -> stiller Einmal-Retry.
@@ -263,7 +278,11 @@ export default function ExchangeInboxPanel() {
       }
       setRefreshing(false);
     }
-  }, [items.length, selectedUid]);
+  }, [items.length, selectedUid, mailboxMode]);
+
+  useEffect(() => {
+    loadInboxRef.current = loadInbox;
+  }, [loadInbox]);
 
   const openMessageDetail = useCallback(async (item: InboxItem) => {
     if (!item?.uid) return;
@@ -272,7 +291,9 @@ export default function ExchangeInboxPanel() {
     setDetailLoading(true);
     setDetailError(null);
     try {
-      const res = await fetch(`${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}`);
+      const res = await fetch(
+        `${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}?mailbox=${mailboxMode}`
+      );
       const data = (await res.json()) as InboxMessageDetailResponse;
       if (!res.ok || !data?.ok) {
         throw new Error("Nachricht konnte nicht geöffnet werden.");
@@ -284,7 +305,7 @@ export default function ExchangeInboxPanel() {
     } finally {
       setDetailLoading(false);
     }
-  }, []);
+  }, [mailboxMode]);
 
   const loadMicrosoftAuthStatus = async () => {
     try {
@@ -333,6 +354,100 @@ export default function ExchangeInboxPanel() {
       setMsAuthLoading(false);
     }
   };
+
+  const logoutAndResetSetup = async () => {
+    setMsAuthLoading(true);
+    try {
+      if (msAuth?.connected) {
+        try {
+          await fetch(`${backendBase()}/api/auth/microsoft/logout`, { method: "POST" });
+        } catch {
+          // no-op
+        }
+      }
+
+      const resetRes = await fetch(`${backendBase()}/api/setup/mail/reset`, { method: "POST" });
+      if (!resetRes.ok) {
+        throw new Error("Ausloggen fehlgeschlagen.");
+      }
+
+      try {
+        window.localStorage.setItem("fm_mail_onboarding_complete", "0");
+      } catch {
+        // ignore localStorage errors
+      }
+      window.location.reload();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Ausloggen fehlgeschlagen.";
+      setError(msg);
+    } finally {
+      setMsAuthLoading(false);
+    }
+  };
+
+  const loadLearnedContacts = useCallback(async () => {
+    setContactsLoading(true);
+    setContactsError(null);
+    try {
+      const res = await fetch(`${backendBase()}/api/contacts/learned?personOnly=true&limit=250`);
+      const data = (await res.json()) as { ok?: boolean; items?: LearnedContactItem[] };
+      if (!res.ok || !data?.ok) {
+        throw new Error("Kontakte konnten nicht geladen werden.");
+      }
+      setContacts(Array.isArray(data.items) ? data.items : []);
+    } catch (err) {
+      setContactsError(err instanceof Error ? err.message : "Kontakte konnten nicht geladen werden.");
+    } finally {
+      setContactsLoading(false);
+    }
+  }, []);
+
+  const addManualContact = useCallback(async () => {
+    const name = manualName.trim();
+    const email = manualEmail.trim();
+    if (!name || !email) {
+      setContactsError("Bitte Name und E-Mail ausfüllen.");
+      return;
+    }
+    setContactsLoading(true);
+    setContactsError(null);
+    try {
+      const res = await fetch(`${backendBase()}/api/contacts/manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: name, email, aliases: [name] }),
+      });
+      if (!res.ok) {
+        throw new Error("Kontakt konnte nicht gespeichert werden.");
+      }
+      setManualName("");
+      setManualEmail("");
+      await loadLearnedContacts();
+    } catch (err) {
+      setContactsError(err instanceof Error ? err.message : "Kontakt konnte nicht gespeichert werden.");
+    } finally {
+      setContactsLoading(false);
+    }
+  }, [manualName, manualEmail, loadLearnedContacts]);
+
+  const deleteContact = useCallback(async (email: string) => {
+    if (!email) return;
+    setContactsLoading(true);
+    setContactsError(null);
+    try {
+      const res = await fetch(`${backendBase()}/api/contacts/learned?email=${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        throw new Error("Kontakt konnte nicht gelöscht werden.");
+      }
+      await loadLearnedContacts();
+    } catch (err) {
+      setContactsError(err instanceof Error ? err.message : "Kontakt konnte nicht gelöscht werden.");
+    } finally {
+      setContactsLoading(false);
+    }
+  }, [loadLearnedContacts]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -408,6 +523,21 @@ export default function ExchangeInboxPanel() {
     }
   }, [openedUids]);
 
+  useEffect(() => {
+    setSelectedUid(null);
+    setDetailOpen(false);
+    setDetailData(null);
+    setDetailError(null);
+    clearSelectedMailContext();
+    setActiveContext(null);
+    void loadInboxRef.current?.({ silent: true });
+  }, [mailboxMode]);
+
+  useEffect(() => {
+    if (!contactsOpen) return;
+    void loadLearnedContacts();
+  }, [contactsOpen, loadLearnedContacts]);
+
   return (
     <div
       style={{
@@ -445,6 +575,38 @@ export default function ExchangeInboxPanel() {
             fontSize: 12,
           }}
         />
+        <button
+          onClick={() => setMailboxMode("inbox")}
+          style={{
+            height: 26,
+            borderRadius: 999,
+            border: mailboxMode === "inbox" ? "1px solid rgba(255,170,95,0.62)" : "1px solid rgba(255,255,255,0.18)",
+            background: mailboxMode === "inbox" ? "rgba(255,152,55,0.18)" : "rgba(255,255,255,0.10)",
+            color: "rgba(255,255,255,0.9)",
+            padding: "0 10px",
+            fontSize: 11,
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Inbox
+        </button>
+        <button
+          onClick={() => setMailboxMode("sent")}
+          style={{
+            height: 26,
+            borderRadius: 999,
+            border: mailboxMode === "sent" ? "1px solid rgba(255,170,95,0.62)" : "1px solid rgba(255,255,255,0.18)",
+            background: mailboxMode === "sent" ? "rgba(255,152,55,0.18)" : "rgba(255,255,255,0.10)",
+            color: "rgba(255,255,255,0.9)",
+            padding: "0 10px",
+            fontSize: 11,
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Gesendet
+        </button>
         <button
           onClick={() => void loadInbox()}
           style={{
@@ -487,7 +649,162 @@ export default function ExchangeInboxPanel() {
         >
           {msAuth?.connected ? "Verbunden" : "Verbinden"}
         </button>
+        <button
+          onClick={() => {
+            void logoutAndResetSetup();
+          }}
+          disabled={msAuthLoading}
+          style={{
+            height: 26,
+            borderRadius: 999,
+            border: "1px solid rgba(255,255,255,0.18)",
+            background: "rgba(255,255,255,0.10)",
+            color: "rgba(255,255,255,0.85)",
+            padding: "0 10px",
+            fontSize: 11,
+            cursor: msAuthLoading ? "wait" : "pointer",
+            whiteSpace: "nowrap",
+          }}
+          title="Ausloggen und Konto wechseln"
+        >
+          Ausloggen
+        </button>
+        <button
+          onClick={() => setContactsOpen((v) => !v)}
+          style={{
+            height: 26,
+            borderRadius: 999,
+            border: contactsOpen ? "1px solid rgba(255,165,92,0.55)" : "1px solid rgba(255,255,255,0.18)",
+            background: contactsOpen ? "rgba(255,145,43,0.18)" : "rgba(255,255,255,0.10)",
+            color: "rgba(255,255,255,0.88)",
+            padding: "0 10px",
+            fontSize: 11,
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+          title="Kontakte anzeigen und verwalten"
+        >
+          Kontakte
+        </button>
       </div>
+
+      {contactsOpen && (
+        <div
+          style={{
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.14)",
+            background: "rgba(255,255,255,0.04)",
+            marginBottom: 10,
+            padding: 10,
+            display: "grid",
+            gap: 8,
+          }}
+        >
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={manualName}
+              onChange={(e) => setManualName(e.target.value)}
+              placeholder="Name"
+              style={{
+                height: 30,
+                borderRadius: 8,
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(0,0,0,0.25)",
+                color: "#fff",
+                padding: "0 10px",
+                fontSize: 12,
+                flex: 1,
+              }}
+            />
+            <input
+              value={manualEmail}
+              onChange={(e) => setManualEmail(e.target.value)}
+              placeholder="E-Mail"
+              style={{
+                height: 30,
+                borderRadius: 8,
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(0,0,0,0.25)",
+                color: "#fff",
+                padding: "0 10px",
+                fontSize: 12,
+                flex: 1.3,
+              }}
+            />
+            <button
+              onClick={() => {
+                void addManualContact();
+              }}
+              disabled={contactsLoading}
+              style={{
+                height: 30,
+                borderRadius: 999,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "rgba(255,255,255,0.12)",
+                color: "rgba(255,255,255,0.9)",
+                padding: "0 12px",
+                fontSize: 11,
+                cursor: contactsLoading ? "wait" : "pointer",
+              }}
+            >
+              Kontakt hinzufügen
+            </button>
+          </div>
+
+          {contactsLoading && <div style={{ fontSize: 11, color: "rgba(255,255,255,0.62)" }}>Kontakte werden geladen...</div>}
+          {contactsError && <div style={{ fontSize: 11, color: "rgba(255,170,170,0.92)" }}>{contactsError}</div>}
+          {!contactsLoading && contacts.length === 0 && (
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.56)" }}>Keine Personenkontakte gespeichert.</div>
+          )}
+          {!contactsLoading && contacts.length > 0 && (
+            <div style={{ maxHeight: 150, overflowY: "auto", display: "grid", gap: 6 }}>
+              {contacts.map((c) => (
+                <div
+                  key={c.email}
+                  style={{
+                    borderRadius: 8,
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    background: "rgba(255,255,255,0.03)",
+                    padding: "6px 8px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.93)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {c.display_name}
+                    </div>
+                    <div style={{ fontSize: 10, color: "rgba(255,255,255,0.62)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {c.email}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      void deleteContact(c.email);
+                    }}
+                    disabled={contactsLoading}
+                    style={{
+                      height: 24,
+                      borderRadius: 999,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      background: "rgba(255,255,255,0.08)",
+                      color: "rgba(255,255,255,0.85)",
+                      padding: "0 10px",
+                      fontSize: 10,
+                      cursor: contactsLoading ? "wait" : "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Löschen
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div
         style={{
@@ -648,7 +965,9 @@ export default function ExchangeInboxPanel() {
         )}
         {error && <div style={{ color: "rgba(255,170,170,0.92)", fontSize: 12 }}>{error}</div>}
         {!loading && visible.length === 0 && (
-          <div style={{ color: "rgba(255,255,255,0.58)", fontSize: 12 }}>Keine Nachrichten gefunden.</div>
+          <div style={{ color: "rgba(255,255,255,0.58)", fontSize: 12 }}>
+            {mailboxMode === "sent" ? "Keine gesendeten Nachrichten gefunden." : "Keine Nachrichten gefunden."}
+          </div>
         )}
         {!loading &&
           visible.map((item) => {

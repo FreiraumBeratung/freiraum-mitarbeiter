@@ -67,6 +67,7 @@ console.log('[fm-voice] Wizard4Email builder global registriert.');
 
 // AutoSend 4.0 – globales Flag
 const WIZARD4_AUTOSEND_ENABLED = true;
+let pendingEmailSendConfirmationUntil = 0;
 
 const BACKEND = "http://127.0.0.1:30521";
 
@@ -660,6 +661,17 @@ function isExplicitSendNowCommand(text: string): boolean {
 function shouldSendNowFromSourceText(sourceText?: string): boolean {
   if (!sourceText) return false;
   return isExplicitSendNowCommand(sourceText);
+}
+
+function isHardSendConfirmationPhrase(sourceText?: string): boolean {
+  if (!sourceText) return false;
+  const normalized = sourceText.trim().toLowerCase();
+  const patterns = [
+    /\b(jetzt|sofort|direkt)\b.*\b(senden|abschicken|rausschicken|raus|ab)\b/i,
+    /\b(senden|abschicken|rausschicken)\b.*\b(jetzt|sofort|direkt)\b/i,
+    /\b(wirklich|final)\b.*\b(senden|abschicken)\b/i,
+  ];
+  return patterns.some((re) => re.test(normalized));
 }
 
 /**
@@ -2439,14 +2451,13 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // FIX: Stelle sicher, dass bodyForUi IMMER ein String ist (defensive programming)
       bodyForUi = (bodyForUi ?? "").toString();
       
-      // Default-Body für sendNow wenn leer (damit AutoSend nicht wegen leerem Text scheitert)
-      let body: string | null = bodyForUi;
+      // Sicherheitsregel: kein Placeholder-Body für sendNow.
+      // Bei leerem Body immer previewOnly statt Versand.
+      let body: string | null = bodyForUi || null;
       if (wizard4Draft?.sendMode === 'sendNow' && (!body || body.trim().length === 0)) {
-        body = 'Moin, kurze Info.';
-        wizard4Draft.body = body;
-        console.log('[fm-voice][wizard4] Default-Body gesetzt (sendNow, body leer)');
-      } else {
-        body = bodyForUi || null;
+        wizard4Draft.sendMode = 'previewOnly';
+        (wizard4Draft as any).forcePreviewOnlyReason = 'missing_body';
+        console.warn('[fm-voice][wizard4] sendNow blockiert: body leer -> previewOnly');
       }
       
       // ============================================================
@@ -2794,7 +2805,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             wizard4Draft &&
             wizard4Draft.sendMode === 'sendNow' &&
             typeof w.__fm_send_mail_now === 'function' &&
-            safeAutoSendEmail !== null;
+            safeAutoSendEmail !== null &&
+            finalBodyForUi.trim().length > 0;
           
           if (canAutoSend) {
             console.log('[fm-voice][wizard4] AutoSend: starte Retry-Logik (NACH Polish).', {
@@ -3570,6 +3582,24 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     (async () => {
       const w = typeof window !== "undefined" ? (window as any) : null;
       if (isUiDraftAvailable() && w) {
+        const safeTo = typeof w.__fm_get_mail_to === "function" ? String(w.__fm_get_mail_to() || "").trim() : "";
+        const safeBody = typeof w.__fm_get_mail_body === "function" ? String(w.__fm_get_mail_body() || "").trim() : "";
+        if (!safeTo || !safeBody) {
+          PartnerBotBus.say("Zum Senden fehlen Empfänger oder Text. Ich bleibe in der Vorschau.");
+          return;
+        }
+
+        const now = Date.now();
+        const sendSourceText =
+          ((intent as any)?.sourceText ?? (intent as any)?.rawText ?? (intent as any)?.originalText ?? "").toString();
+        const hardConfirmation = isHardSendConfirmationPhrase(sendSourceText);
+        if (!hardConfirmation && pendingEmailSendConfirmationUntil < now) {
+          pendingEmailSendConfirmationUntil = now + 10000;
+          PartnerBotBus.say("Sicherheitscheck: Bitte bestätige mit 'jetzt senden' oder 'sofort senden'.");
+          return;
+        }
+        pendingEmailSendConfirmationUntil = 0;
+
         try {
           w.__fm_send_mail_now();
           setLastAction({ kind: "email-compose", description: "E-Mail gesendet." });

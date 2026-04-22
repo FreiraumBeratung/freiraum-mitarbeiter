@@ -2,6 +2,7 @@
  * KI-Polishing für E-Mail-Bodies: Korrigiert nur Rechtschreibung, Satzzeichen, Groß/Klein, Kommas.
  * KEINE inhaltlichen Änderungen, KEINE neuen Fakten, KEIN Umschreiben.
  */
+import { normalizeEmailBodyAfterPolish as normalizeEmailBodyAfterPolishShared } from "./normalizeEmailBodyAfterPolish";
 
 // Falls es bereits eine zentrale API-Base gibt, diese nutzen.
 // Ansonsten hier hart auf localhost:30521 verweisen.
@@ -117,7 +118,7 @@ Gib NUR den korrigierten E-Mail-Body zurück, ohne Erklärungen, ohne Labels, oh
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {
     abortController.abort();
-  }, opts.timeoutMs);
+  }, timeoutMs);
 
   try {
     console.log('[email-polish] Request an /api/ai/chat gesendet', {
@@ -290,52 +291,7 @@ function stripLeadingCommandArtifact(text: string): string {
  * @returns Normalisierter Body-Text
  */
 export function normalizeEmailBodyAfterPolish(text: string): string {
-  if (!text || typeof text !== 'string') {
-    return text || '';
-  }
-
-  let t = text.trimStart();
-
-  // STEP 1: Remove simple leading commands (wie bisher)
-  t = stripLeadingCommandArtifact(t);
-
-  // STEP 2: Greeting-Anker-Strip
-  // Suche erste Begrüßung im Text
-  // Pattern: (^|[\n\r\s]) erlaubt Zeilenanfang oder Whitespace davor
-  const greetingRegex = /(^|[\n\r\s])((hi|hallo|hey|guten\s+tag|guten\s+morgen|guten\s+abend|moin|servus)\b)/i;
-  const greetingMatch = t.match(greetingRegex);
-
-  if (greetingMatch && greetingMatch.index !== undefined) {
-    // greetingMatch.index zeigt auf den Start von (^|[\n\r\s])
-    // greetingMatch[2] ist das eigentliche Greeting ("hi", "hallo", etc.)
-    // Finde den Start des Greetings (nach optionalem Whitespace)
-    let greetingIndex = greetingMatch.index;
-    // Wenn das Match mit Whitespace beginnt, startet das Greeting direkt danach
-    if (greetingMatch[1] && greetingMatch[1].trim() === '') {
-      // Whitespace gefunden, Greeting startet direkt danach
-      greetingIndex = greetingMatch.index + greetingMatch[1].length;
-    }
-    
-    if (greetingIndex > 0) {
-      const prefix = t.slice(0, greetingIndex).trim();
-      const bodyFromGreeting = t.slice(greetingIndex).trimStart();
-
-      // Bedingung zum Abschneiden:
-      // - prefix.length <= 160 (wie in Anforderung)
-      // - und prefix enthält Command-Wörter (inkl. "zukommen")
-      const cmdRe = /\b(schreib(?:e|en)?|schreibe|mail|e-?mail|email|nachricht|sende(?:n)?|send|versende(?:n)?|schick(?:e|en|t)?|verschick(?:en)?|los|direkt|sofort|zukommen|zukommen\s+lassen)\b/i;
-      
-      if (prefix.length > 0 && prefix.length <= 160 && cmdRe.test(prefix)) {
-        // Entferne alles vor dem Greeting
-        let cleaned = bodyFromGreeting;
-        // Zusätzlich leading punctuation entfernen:
-        cleaned = cleaned.replace(/^[,.\-–—:;]+\s*/g, "");
-        return cleaned.trim();
-      }
-    }
-  }
-
-  return t.trim();
+  return normalizeEmailBodyAfterPolishShared(text);
 }
 
 /**

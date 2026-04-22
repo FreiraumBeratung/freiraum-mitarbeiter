@@ -19,7 +19,7 @@ from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, EmailStr
 
 logger = logging.getLogger(__name__)
@@ -402,6 +402,24 @@ def _graph_to_inbox_item(row: dict) -> InboxMessageItem:
         receivedAt=(received_at or None),
         preview=preview,
         isRead=bool(row.get("isRead", False)),
+    )
+
+
+def _graph_to_sent_item(row: dict) -> InboxMessageItem:
+    recipients = row.get("toRecipients") or []
+    primary = recipients[0] if isinstance(recipients, list) and recipients else {}
+    addr = (primary.get("emailAddress") or {}) if isinstance(primary, dict) else {}
+    received_at = row.get("receivedDateTime")
+    preview = _normalize_preview((row.get("bodyPreview") or "").strip()) if row.get("bodyPreview") else None
+    return InboxMessageItem(
+        uid=(row.get("id") or "").strip(),
+        messageId=(row.get("internetMessageId") or None),
+        subject=(row.get("subject") or "(ohne Betreff)").strip() or "(ohne Betreff)",
+        fromName=(addr.get("name") or None),
+        fromEmail=(addr.get("address") or None),
+        receivedAt=(received_at or None),
+        preview=preview,
+        isRead=True,
     )
 
 
@@ -947,6 +965,24 @@ def _open_imap_client_with_retry(max_attempts: int = 2, delay_seconds: float = 0
     raise HTTPException(status_code=503, detail="IMAP Verbindung fehlgeschlagen.")
 
 
+def _resolve_imap_mailbox(client: imaplib.IMAP4_SSL, mailbox: str) -> str:
+    wanted = (mailbox or "inbox").strip().lower()
+    candidates = ["INBOX"] if wanted != "sent" else _imap_sent_folder_candidates()
+    for folder_name in candidates:
+        try:
+            status, _ = client.select(folder_name, readonly=True)
+            if status == "OK":
+                return folder_name
+            status, _ = client.select(f'"{folder_name}"', readonly=True)
+            if status == "OK":
+                return folder_name
+        except Exception:
+            continue
+    if wanted == "sent":
+        raise HTTPException(status_code=503, detail="Gesendet-Ordner konnte nicht geöffnet werden.")
+    raise HTTPException(status_code=503, detail="INBOX konnte nicht geöffnet werden.")
+
+
 def _build_smtp_client() -> smtplib.SMTP:
     """
     Baut und konfiguriert einen SMTP-Client.
@@ -1276,29 +1312,34 @@ async def import_signature_from_last_sent(force: bool = False):
 
 
 @router.get("/inbox", response_model=InboxListResponse)
-async def get_inbox(limit: int = 25, offset: int = 0):
+async def get_inbox(limit: int = 25, offset: int = 0, mailbox: str = Query("inbox", pattern="^(inbox|sent)$")):
     safe_limit = max(1, min(limit, 60))
     safe_offset = max(0, offset)
+    mailbox_kind = (mailbox or "inbox").strip().lower()
 
     if _graph_mail_mode_enabled():
         try:
+            graph_path = "/me/messages" if mailbox_kind != "sent" else "/me/mailFolders/sentitems/messages"
             response = _graph_request(
                 "GET",
-                "/me/messages",
+                graph_path,
                 params={
                     "$top": safe_limit,
                     "$skip": safe_offset,
                     "$orderby": "receivedDateTime desc",
-                    "$select": "id,internetMessageId,subject,from,receivedDateTime,bodyPreview,isRead",
+                    "$select": "id,internetMessageId,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead",
                     "$count": "true",
                 },
             )
-            _graph_raise_for_status(response, "Inbox-Liste konnte nicht über Graph geladen werden")
+            _graph_raise_for_status(response, "Mail-Liste konnte nicht über Graph geladen werden")
             payload = response.json() if response.content else {}
             values = payload.get("value", []) if isinstance(payload, dict) else []
             if not isinstance(values, list):
                 values = []
-            items = [_graph_to_inbox_item(row) for row in values if isinstance(row, dict) and row.get("id")]
+            if mailbox_kind == "sent":
+                items = [_graph_to_sent_item(row) for row in values if isinstance(row, dict) and row.get("id")]
+            else:
+                items = [_graph_to_inbox_item(row) for row in values if isinstance(row, dict) and row.get("id")]
             _learn_contacts_from_inbox_items(items)
             total = payload.get("@odata.count") if isinstance(payload, dict) else None
             try:
@@ -1319,9 +1360,7 @@ async def get_inbox(limit: int = 25, offset: int = 0):
 
     client = _open_imap_client_with_retry()
     try:
-        status, _ = client.select("INBOX", readonly=True)
-        if status != "OK":
-            raise HTTPException(status_code=503, detail="INBOX konnte nicht geöffnet werden.")
+        selected_mailbox = _resolve_imap_mailbox(client, mailbox_kind)
 
         status, data = client.uid("SEARCH", None, "ALL")
         if status != "OK":
@@ -1354,7 +1393,11 @@ async def get_inbox(limit: int = 25, offset: int = 0):
 
             msg = email.message_from_bytes(raw_email)
             subject = _decode_mime_header(msg.get("Subject")) or "(ohne Betreff)"
-            from_name, from_email = _extract_email_parts(msg.get("From"))
+            if mailbox_kind == "sent":
+                recipient_name, recipient_email = _extract_email_parts(msg.get("To"))
+                from_name, from_email = recipient_name, recipient_email
+            else:
+                from_name, from_email = _extract_email_parts(msg.get("From"))
             message_id = (msg.get("Message-ID") or "").strip() or None
             received_at = (msg.get("Date") or "").strip() or None
             body_text = _extract_text_from_message(msg)
@@ -1383,10 +1426,11 @@ async def get_inbox(limit: int = 25, offset: int = 0):
 
 
 @router.get("/inbox/{uid}", response_model=InboxMessageDetailResponse)
-async def get_inbox_message(uid: str):
+async def get_inbox_message(uid: str, mailbox: str = Query("inbox", pattern="^(inbox|sent)$")):
     safe_uid = (uid or "").strip()
     if not safe_uid:
         raise HTTPException(status_code=400, detail="uid ist erforderlich.")
+    mailbox_kind = (mailbox or "inbox").strip().lower()
 
     if _graph_mail_mode_enabled():
         try:
@@ -1458,9 +1502,7 @@ async def get_inbox_message(uid: str):
 
     client = _open_imap_client_with_retry()
     try:
-        status, _ = client.select("INBOX", readonly=True)
-        if status != "OK":
-            raise HTTPException(status_code=503, detail="INBOX konnte nicht geöffnet werden.")
+        _resolve_imap_mailbox(client, mailbox_kind)
 
         fetch_status, fetch_data = client.uid("FETCH", safe_uid, "(RFC822)")
         if fetch_status != "OK" or not fetch_data:
