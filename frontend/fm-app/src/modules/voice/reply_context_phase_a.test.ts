@@ -89,6 +89,33 @@ describe("reply_context_phase_a", () => {
     }
   });
 
+  it("supports context write command 'Schreibe bitte ...' and keeps dictated body", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Schreibe bitte sei selber ruhig.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.to).toBe("thomas@example.com");
+      expect(intent.subjectHint).toBe("AW: Projektupdate Q4");
+      expect(intent.bodyHint).toBe("sei selber ruhig.");
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
+    }
+  });
+
+  it("supports context write command with recipient phrase and keeps only message body", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Schreibe folgende Mail an Bruder. Hallo Bruder.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.to).toBe("thomas@example.com");
+      expect(intent.subjectHint).toBe("AW: Projektupdate Q4");
+      expect(intent.bodyHint).toBe("Hallo Bruder.");
+    }
+  });
+
   it("supports compact short command 'Antwort: ...' in active context", () => {
     const intent = buildReplyIntentFromSelectedMailContext(
       "Antwort: Ich melde mich bis 15 Uhr.",

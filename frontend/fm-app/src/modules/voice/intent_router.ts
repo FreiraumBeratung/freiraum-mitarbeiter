@@ -931,6 +931,21 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
     return { toNameRaw: null, statusText: null };
   }
 
+  // Nutzerfall: "Schreibe Hallo." -> "Hallo" ist Body, nicht Empfänger.
+  // Greift nur ohne expliziten Empfänger-Marker ("an <name>", "dem <name>", ...).
+  const hasExplicitRecipientMarker =
+    /\ban\s+[a-z0-9äöüß]+/i.test(text) ||
+    /^\s*(?:an|für)\s+[a-z0-9äöüß]+/i.test(text) ||
+    /\b(?:dem|den|der|die|das)\s+[a-z0-9äöüß]+/i.test(text);
+  const greetingLikeStarter = new Set(["hallo", "hi", "hey", "moin", "servus", "guten"]);
+  if (!hasExplicitRecipientMarker && (tokens.length === 1 || greetingLikeStarter.has(tokens[0].toLowerCase()))) {
+    const withoutPrefix = origText.replace(/^\s*schreib(?:e)?(?:\s+mal)?\s+/i, "").trim();
+    const cleanedBody = cleanEmailBodyFromCommand(withoutPrefix || tokens.join(" "), null);
+    if (cleanedBody && cleanedBody.trim().length > 0) {
+      return { toNameRaw: null, statusText: cleanedBody.trim() };
+    }
+  }
+
   const articles = new Set(["dem", "den", "der", "die", "das"]);
 
   let idx = 0;
@@ -1015,6 +1030,46 @@ function parseColloquialStatusEmailCommand(normalized: string, original?: string
   }
 
   return { toNameRaw: cleanName, statusText };
+}
+
+type GuidedMailContext = {
+  stage: "need_recipient" | "recipient_set_choice" | "awaiting_new_text";
+  bodyText: string;
+  subjectHint?: string;
+  recipientName?: string;
+  recipientEmail?: string;
+  ts: number;
+};
+
+function getGuidedMailContext(): GuidedMailContext | null {
+  const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+  const ctx = w?.__fm_guided_mail_context;
+  if (!ctx || typeof ctx !== "object") return null;
+  const stage = String(ctx.stage || "");
+  if (stage !== "need_recipient" && stage !== "recipient_set_choice" && stage !== "awaiting_new_text") return null;
+  const ts = Number(ctx.ts || 0);
+  if (!Number.isFinite(ts) || Date.now() - ts > 10 * 60 * 1000) {
+    try {
+      if (w) w.__fm_guided_mail_context = null;
+    } catch {}
+    return null;
+  }
+  const bodyText = String(ctx.bodyText || "").trim();
+  if (!bodyText) return null;
+  return {
+    stage: stage as GuidedMailContext["stage"],
+    bodyText,
+    subjectHint: typeof ctx.subjectHint === "string" ? ctx.subjectHint : undefined,
+    recipientName: typeof ctx.recipientName === "string" ? ctx.recipientName : undefined,
+    recipientEmail: typeof ctx.recipientEmail === "string" ? ctx.recipientEmail : undefined,
+    ts,
+  };
+}
+
+function setGuidedMailContext(next: GuidedMailContext | null): void {
+  const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+  if (!w) return;
+  w.__fm_guided_mail_context = next;
 }
 
 /**
@@ -5280,6 +5335,165 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     return { type: "unknown" };
   }
 
+  // Globaler Fallback für den Guided-Flow:
+  // "Neuer Text" soll bei offenem/aktivem Compose-Kontext immer in den Replace-Flow gehen,
+  // auch wenn der Guided-Kontext unerwartet fehlt.
+  {
+    const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+    const composerOpen =
+      !!w &&
+      typeof w.__fm_get_mail_body === "function" &&
+      typeof w.__fm_set_mail_body === "function";
+    const lastAction = getLastAction();
+    const hasDraftContext = !!(lastAction && lastAction.kind === "email-compose");
+    const newTextGlobalMatch = original.match(
+      /^\s*(?:neuer|neuen?|anderen?)\s+text(?:\s+(?:ja|bitte|ist|nun|jetzt))?[\s:.,-]*(.*)$/i
+    );
+    if (newTextGlobalMatch && (composerOpen || hasDraftContext)) {
+      const inlineText = (newTextGlobalMatch[1] || "").trim();
+      if (!inlineText && w) {
+        const currentBody = (typeof w.__fm_get_mail_body === "function" ? (w.__fm_get_mail_body?.() ?? "") : "").toString().trim();
+        const currentSubject = (typeof w.__fm_get_mail_subject === "function" ? (w.__fm_get_mail_subject?.() ?? "") : "").toString().trim();
+        const currentTo = (typeof w.__fm_get_mail_to === "function" ? (w.__fm_get_mail_to?.() ?? "") : "").toString().trim();
+        setGuidedMailContext({
+          stage: "awaiting_new_text",
+          bodyText: currentBody || "Hallo.",
+          subjectHint: currentSubject || "Kurze Info",
+          recipientEmail: currentTo.includes("@") ? currentTo : undefined,
+          ts: Date.now(),
+        });
+      }
+      return { type: "email-body-replace-all", payload: { text: inlineText } };
+    }
+  }
+
+  const guidedContext = getGuidedMailContext();
+  if (guidedContext?.stage === "awaiting_new_text") {
+    const hasReplacementText =
+      text.length > 0 &&
+      !/^(?:abbrechen|stop|stopp|doch\s+nicht|lieber\s+doch\s+nicht)\b/i.test(text);
+    if (hasReplacementText) {
+      setGuidedMailContext({
+        ...guidedContext,
+        stage: "recipient_set_choice",
+        ts: Date.now(),
+      });
+      return { type: "email-body-replace-all", payload: { text: original } };
+    }
+  }
+
+  if (guidedContext?.stage === "need_recipient") {
+    const keepOrSendWithoutRecipient = /\b(?:behalt(?:en)?|senden|schicken|los\s+senden|jetzt\s+senden)\b/i.test(text);
+    if (keepOrSendWithoutRecipient) {
+      return {
+        type: "email-compose",
+        subjectHint: guidedContext.subjectHint,
+        bodyHint: guidedContext.bodyText,
+        meta: {
+          source: "guided-missing-recipient-reminder",
+          autoSend: false,
+          uiHint: "Ich brauche zuerst den Empfänger. Nenne mir bitte den Namen oder die E-Mail-Adresse.",
+          forcePreviewOnly: true,
+        },
+      };
+    }
+    const newTextDecision = /(?:\b(?:neuer|neuen?|anderen?)\s+text\b|\btext\s+(?:aendern|ändern)\b)/i.test(text);
+    if (newTextDecision) {
+      setGuidedMailContext({
+        ...guidedContext,
+        stage: "awaiting_new_text",
+        ts: Date.now(),
+      });
+      return { type: "email-body-replace-all", payload: { text: "" } };
+    }
+    const forcedName = extractForcedToNameAfterAn(original);
+    const plainNameMatch = original.match(/^\s*([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-]{1,})(?:[.!?])?\s*$/);
+    const recipientCandidate = (forcedName || plainNameMatch?.[1] || "").trim();
+    if (recipientCandidate) {
+      const bodyPreview = guidedContext.bodyText.length > 70
+        ? `${guidedContext.bodyText.slice(0, 69).trimEnd()}…`
+        : guidedContext.bodyText;
+      setGuidedMailContext({
+        ...guidedContext,
+        stage: "recipient_set_choice",
+        recipientName: recipientCandidate,
+        ts: Date.now(),
+      });
+      return {
+        type: "email-compose",
+        toRaw: recipientCandidate,
+        subjectHint: guidedContext.subjectHint,
+        bodyHint: guidedContext.bodyText,
+        meta: {
+          source: "guided-recipient-followup",
+          autoSend: false,
+          uiHint: `Empfänger gesetzt. Soll ich den Text "${bodyPreview}" behalten und senden, oder möchtest du neuen Text sagen?`,
+        },
+      };
+    }
+  }
+
+  if (guidedContext?.stage === "recipient_set_choice") {
+    const keepAndSend = /\b(?:behalt(?:en)?(?:\s+und)?\s+senden|behalten\s+und\s+schicken|jetzt\s+senden|direkt\s+senden)\b/i.test(text);
+    if (keepAndSend) {
+      return {
+        type: "email-compose",
+        toRaw: guidedContext.recipientName,
+        to: guidedContext.recipientEmail,
+        subjectHint: guidedContext.subjectHint,
+        bodyHint: guidedContext.bodyText,
+        meta: {
+          source: "guided-keep-send",
+          autoSend: true,
+          uiHint: "Alles klar, ich behalte den Text und sende jetzt.",
+        },
+      };
+    }
+
+    const wantsNewText = /(?:\b(?:neuer|neuen?|anderen?)\s+text\b|\btext\s+(?:aendern|ändern)\b)/i.test(text);
+    if (wantsNewText) {
+      const inlineTextMatch = original.match(/(?:neuer|neuen?|anderen?)\s+text(?:\s+(?:ja|bitte|ist|nun|jetzt))?[\s:.,-]*(.+)$/i);
+      const inlineText = (inlineTextMatch?.[1] || "").trim();
+      if (inlineText) {
+        setGuidedMailContext({
+          ...guidedContext,
+          stage: "recipient_set_choice",
+          bodyText: inlineText,
+          ts: Date.now(),
+        });
+        return {
+          type: "email-compose",
+          toRaw: guidedContext.recipientName,
+          to: guidedContext.recipientEmail,
+          subjectHint: guidedContext.subjectHint,
+          bodyHint: inlineText,
+          meta: {
+            source: "guided-new-text-inline",
+            autoSend: false,
+            uiHint: "Neuer Text übernommen. Soll ich senden oder möchtest du noch etwas ändern?",
+          },
+        };
+      }
+      setGuidedMailContext({
+        ...guidedContext,
+        stage: "awaiting_new_text",
+        ts: Date.now(),
+      });
+      return { type: "email-body-replace-all", payload: { text: "" } };
+    }
+    const keepText = /\b(?:behalt(?:en)?|so\s+lassen|text\s+behalten)\b/i.test(text);
+    if (keepText) {
+      const keepHint = "Text bleibt wie er ist. Wenn ich senden soll, sag bitte 'jetzt senden'.";
+      return {
+        type: "email-compose",
+        toRaw: guidedContext.recipientName,
+        subjectHint: guidedContext.subjectHint,
+        bodyHint: guidedContext.bodyText,
+        meta: { source: "guided-keep-text", autoSend: false, uiHint: keepHint },
+      };
+    }
+  }
+
   // ============================================================
   // SUBJECT-EDIT: Betreff setzen/anhaengen/loeschen/ersetzen (hoechste Prioritaet)
   // Vor whatsapp-style-preview-smart; niemals email-compose auslösen.
@@ -6405,11 +6619,15 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
       },
     };
 
+    const isRecipientOnlyCompose =
+      !!(toNameRaw && toNameRaw.trim().length > 0) &&
+      (!cleanedStatusText || cleanedStatusText.trim().length === 0);
+
     const intent: VoiceIntent = {
       type: "email-compose",
       toRaw: toNameRaw || undefined,
       subjectHint: undefined,
-      bodyHint: cleanedStatusText || undefined,
+      bodyHint: isRecipientOnlyCompose ? "" : cleanedStatusText || undefined,
       meta,
     };
 

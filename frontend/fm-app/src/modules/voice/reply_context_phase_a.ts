@@ -60,6 +60,12 @@ function hasLeadingReplyCommand(text: string): boolean {
   );
 }
 
+function hasContextWriteCommand(text: string): boolean {
+  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:schreib(?:e)?(?!\s+zur(?:ue|[üu])ck)|verfass(?:e)?|formulier(?:e)?)\b/i.test(
+    text
+  );
+}
+
 function hasContextualReplyShortcut(text: string): boolean {
   return (
     /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:sag\s+(?:ihm|ihr|denen)(?:\s+bitte)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s+wie\s+folgt|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:)/i.test(
@@ -147,6 +153,10 @@ export function extractReplyBodyHint(
   }
 
   rest = rest.replace(
+    /^\s*(?:bitte\s+)?(?:schreib(?:e)?(?!\s+zur(?:ue|[üu])ck)|verfass(?:e)?|formulier(?:e)?)\s+(?:bitte\s+)?(?:(?:folgend(?:e|es)\s+)?(?:mail|e-?mail|email|nachricht)(?:\s+an\s+[^,.:;!?]+)?\s*)?(?:folgendes?|wie\s+folgt)?\s*[:.,\-]?\s*/i,
+    ""
+  );
+  rest = rest.replace(
     /^\s*(?:bitte\s+)?(?:sag\s+(?:ihm|ihr|denen)(?:\s+bitte)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s+wie\s+folgt|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:)[\s,:\-]*/i,
     ""
   );
@@ -204,6 +214,7 @@ export function buildReplyIntentFromSelectedMailContext(
   const directRequested = hasDirectReplyTrigger(normalized);
   const hasStrongReply =
     hasLeadingReplyCommand(normalized) ||
+    hasContextWriteCommand(normalized) ||
     (hasReplyVerb(normalized) &&
       (hasMailTargetHint(normalized) || /\bwie\s+folgt\b/i.test(normalized) || directRequested));
   const hasShortcut = hasContextualReplyShortcut(normalized);

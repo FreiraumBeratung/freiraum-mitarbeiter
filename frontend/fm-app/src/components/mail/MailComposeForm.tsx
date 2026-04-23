@@ -12,6 +12,7 @@ declare global {
     __fm_get_mail_to?: () => string | null;
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
+    __fm_reset_mail_flow?: () => void;
     __fm_pending_body_replace?: string | null;
   }
 }
@@ -86,6 +87,36 @@ export default function MailComposeForm() {
       sendingRef.current = false;
       setSending(false);
     }
+  }, []);
+
+  const handleResetDraft = useCallback(() => {
+    toRef.current = "";
+    subjectRef.current = "";
+    bodyRef.current = "";
+    setTo("");
+    setSubject("");
+    setBody("");
+    sendingRef.current = false;
+    setSending(false);
+
+    const w = (typeof window !== "undefined" ? (window as any) : null);
+    if (w && typeof w.__fm_reset_mail_flow === "function") {
+      w.__fm_reset_mail_flow();
+    } else if (w) {
+      w.__fm_pending_body_replace = null;
+      w.__fm_guided_mail_context = null;
+      w.__fm_wizard4_last_draft = null;
+      w.__fm_subject_locked = false;
+      w.__fm_subject_locked_value = null;
+      if (typeof w.__fm_clear_selected_mail_context === "function") {
+        try { w.__fm_clear_selected_mail_context(); } catch {}
+      }
+      if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      }
+    }
+
+    PartnerBotBus.say("Entwurf zurückgesetzt.");
   }, []);
 
   useEffect(() => {
@@ -205,20 +236,36 @@ export default function MailComposeForm() {
       />
 
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
-        <button
-          onClick={handlePreview}
-          style={{
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.15)",
-            background: "rgba(255,255,255,0.08)",
-            color: "#fff",
-            padding: "6px 12px",
-            cursor: "pointer",
-            fontWeight: 600,
-          }}
-        >
-          Vorschau
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={handlePreview}
+            style={{
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.15)",
+              background: "rgba(255,255,255,0.08)",
+              color: "#fff",
+              padding: "6px 12px",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            Vorschau
+          </button>
+          <button
+            onClick={handleResetDraft}
+            style={{
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.15)",
+              background: "rgba(255,255,255,0.08)",
+              color: "#fff",
+              padding: "6px 12px",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            Zurücksetzen
+          </button>
+        </div>
         <button
           data-fm-mail="send-now"
           disabled={sending}

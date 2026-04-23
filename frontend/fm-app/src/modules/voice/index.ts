@@ -52,6 +52,15 @@ declare global {
     __fm_subject_locked?: boolean;
     __fm_subject_locked_value?: string | null;
     __fm_wizard4_last_draft?: any;
+    __fm_reset_mail_flow?: () => void;
+    __fm_guided_mail_context?: {
+      stage: "need_recipient" | "recipient_set_choice" | "awaiting_new_text";
+      bodyText: string;
+      subjectHint?: string;
+      recipientName?: string;
+      recipientEmail?: string;
+      ts: number;
+    } | null;
   }
 }
 
@@ -64,12 +73,43 @@ console.log('[fm-voice] Wizard4Subject global registriert.');
 console.log('[fm-voice] Wizard4Body global registriert.');
 (window as any).buildWizard4EmailFromInput = buildWizard4EmailFromInput;
 console.log('[fm-voice] Wizard4Email builder global registriert.');
+(window as any).__fm_reset_mail_flow = resetMailVoiceFlowState;
+console.log('[fm-voice] Mail-Flow reset global registriert.');
 
 // AutoSend 4.0 – globales Flag
 const WIZARD4_AUTOSEND_ENABLED = true;
 let pendingEmailSendConfirmationUntil = 0;
 
 const BACKEND = "http://127.0.0.1:30521";
+
+function resetMailVoiceFlowState() {
+  if (typeof window === "undefined") return;
+  const w = window as any;
+  pendingEmailSendConfirmationUntil = 0;
+  w.__fm_pending_body_replace = null;
+  w.__fm_guided_mail_context = null;
+  w.__fm_wizard4_last_draft = null;
+  w.__fm_subject_locked = false;
+  w.__fm_subject_locked_value = null;
+  w.__fm_subject_manually_edited = false;
+  w.__fm_last_hint = {
+    kind: "draft_reset",
+    message: "Entwurf zurückgesetzt.",
+    ts: Date.now(),
+  };
+  if (typeof w.__fm_clear_selected_mail_context === "function") {
+    try {
+      w.__fm_clear_selected_mail_context();
+    } catch {
+      // ignore context clear failure
+    }
+  }
+  if (typeof window.dispatchEvent === "function") {
+    window.dispatchEvent(new CustomEvent("fm-hint-update"));
+  }
+  setLastAction({ kind: "other", description: "Mail-Entwurf zurückgesetzt." });
+  console.log("[fm-voice][reset] mail + guided flow reset");
+}
 
 /**
  * Wartet bis __fm_send_mail_now am window verfügbar ist (Compose-UI gemountet).
@@ -1470,6 +1510,44 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         }
         return;
       }
+
+      // Safety-Guard: Reine Sendebestätigung darf niemals den Draft neu aufbauen/überschreiben.
+      // Stattdessen immer den aktuellen UI-Entwurf senden.
+      const normalizedSendText = String(rawTextForFollowUp || "")
+        .toLowerCase()
+        .replace(/[.,!?;:]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      const isPureSendConfirmation =
+        !!(intent as any)?.meta?.autoSend &&
+        /^(?:jetzt|sofort)\s+senden$/.test(normalizedSendText);
+      if (isPureSendConfirmation && isUiDraftAvailable() && w) {
+        const safeTo = typeof w.__fm_get_mail_to === "function" ? String(w.__fm_get_mail_to() || "").trim() : "";
+        const safeBody = typeof w.__fm_get_mail_body === "function" ? String(w.__fm_get_mail_body() || "").trim() : "";
+        if (!safeTo || !safeBody) {
+          PartnerBotBus.say("Zum Senden fehlen Empfänger oder Text. Ich bleibe in der Vorschau.");
+          return;
+        }
+        const now = Date.now();
+        const hardConfirmation = isHardSendConfirmationPhrase(rawTextForFollowUp);
+        if (!hardConfirmation && pendingEmailSendConfirmationUntil < now) {
+          pendingEmailSendConfirmationUntil = now + 10000;
+          PartnerBotBus.say("Sicherheitscheck: Bitte bestätige mit 'jetzt senden' oder 'sofort senden'.");
+          return;
+        }
+        pendingEmailSendConfirmationUntil = 0;
+        try {
+          w.__fm_send_mail_now();
+          if (typeof w !== "undefined") {
+            w.__fm_guided_mail_context = null;
+          }
+          setLastAction({ kind: "email-compose", description: "E-Mail gesendet." });
+          console.log("[wizard4][safety-send-confirm] sent current UI draft without overwrite");
+        } catch (err) {
+          console.error("[wizard4][safety-send-confirm] send error:", err);
+        }
+        return;
+      }
       
       // ============================================================
       // PHASE 1: Basis-Draft aus Intent erstellen (OHNE finalen Body-Style)
@@ -1809,6 +1887,9 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // ============================================================
       let finalToEmail: string | null = null;
       let safeAutoSendEmail: string | null = null;
+      let recipientResolutionState: "not_attempted" | "resolved" | "ambiguous" | "no_match" | "api_error" = "not_attempted";
+      let recipientAmbiguityChoices: string[] = [];
+      let recipientResolutionInputRaw = "";
       
       try {
         // Kandidaten aus intent + draft extrahieren
@@ -1850,6 +1931,13 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         const finalNameForResolver = !isResolverPlaceholderName(cleanedForResolver)
           ? cleanedForResolver
           : fallbackFromSourceText;
+        recipientResolutionInputRaw = (
+          fromIntentToRaw ||
+          fromIntentTo ||
+          fromDraftName ||
+          finalNameForResolver ||
+          ""
+        ).toString().trim();
 
         if (wizard4Draft && finalNameForResolver && finalNameForResolver.trim()) {
           const existingName = (wizard4Draft.toName || "").toString().trim();
@@ -1880,6 +1968,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                 
                 if (resolveData.ok && resolveData.email && isStrictValidEmail(resolveData.email)) {
                   finalToEmail = resolveData.email;
+                  recipientResolutionState = "resolved";
                   console.log('[fm-voice][wizard4][contact-resolver] Kontakt aufgelöst:', finalNameForResolver, '->', finalToEmail);
                   
                   // Draft-Felder setzen, damit AutoSend-Guard die E-Mail erkennt
@@ -1924,9 +2013,17 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                       return label && email ? `${label} (${email})` : (label || email);
                     })
                     .filter(Boolean);
+                  recipientResolutionState = "ambiguous";
+                  recipientAmbiguityChoices = choices;
                   if (choices.length > 0) {
                     const choiceText = choices.join(" oder ");
                     const hintMessage = `Mehrdeutiger Kontakt: ${choiceText}. Nenne bitte den genauen Namen.`;
+                    (intent as any).meta = {
+                      ...((intent as any).meta ?? {}),
+                      forcePreviewOnly: true,
+                      forcePreviewOnlyReason: "missing_recipient",
+                      uiHint: `Ich habe mehrere Kontakte gefunden: ${choiceText}. Wen meinst du genau?`,
+                    };
                     (window as any).__fm_last_hint = {
                       kind: "contact_ambiguous",
                       message: hintMessage,
@@ -1935,18 +2032,19 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                     if (typeof window?.dispatchEvent === "function") {
                       window.dispatchEvent(new CustomEvent("fm-hint-update"));
                     }
-                    PartnerBotBus.say(`Ich habe mehrere Kontakte gefunden: ${choiceText}. Wen meinst du genau?`);
                     console.log("[fm-voice][wizard4][contact-resolver] ambiguity detected", {
                       input: finalNameForResolver,
                       choices,
                     });
                   }
                 } else {
+                  recipientResolutionState = "no_match";
                   console.log('[fm-voice][wizard4][contact-resolver] Kein Match gefunden für:', finalNameForResolver, resolveData.debug?.result);
                 }
               }
             } else {
               console.warn('[fm-voice][wizard4][contact-resolver] API-Fehler:', resolveResponse.status);
+              recipientResolutionState = "api_error";
               if (resolveResponse.status >= 500) {
                 (window as any).__fm_last_hint = {
                   kind: "contact_resolver_unavailable",
@@ -1959,6 +2057,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               }
             }
           } catch (err) {
+            recipientResolutionState = "api_error";
             console.error('[fm-voice][wizard4][contact-resolver] Fehler beim Auflösen:', err);
             // Fehler nicht blockierend, wir versuchen es einfach nicht
           }
@@ -1979,6 +2078,70 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           resolvedInput: finalNameForResolver,
           resolvedViaContactResolver: finalToEmail && wizard4Draft && finalNameForResolver && !fromIntentTo && !fromDraftToEmail,
         });
+
+        if (finalToEmail) {
+          const guided = (window as any).__fm_guided_mail_context;
+          if (guided && typeof guided === "object") {
+            (window as any).__fm_guided_mail_context = {
+              ...guided,
+              stage: "recipient_set_choice",
+              recipientName: (wizard4Draft?.toName || fromIntentToRaw || "").toString().trim() || guided.recipientName,
+              recipientEmail: finalToEmail,
+              ts: Date.now(),
+            };
+          }
+        }
+
+        const draftBodyCandidate = ((wizard4Draft?.body ?? "") as string).toString().trim();
+        const intentBodyCandidate = (((intent as any)?.bodyHint ?? "") as string).toString().trim();
+        const hasBodyForGuidedRecipient = (intentBodyCandidate || draftBodyCandidate).length > 0;
+        const unresolvedRecipient =
+          !finalToEmail &&
+          hasBodyForGuidedRecipient &&
+          (!finalNameForResolver || !isStrictValidEmail(finalNameForResolver));
+        if (unresolvedRecipient) {
+          const guidedBodyText = intentBodyCandidate || draftBodyCandidate;
+          const recipientInputLabel = recipientResolutionInputRaw || finalNameForResolver || "den Empfänger";
+          const recipientHint = recipientResolutionState === "ambiguous" && recipientAmbiguityChoices.length > 0
+            ? `Ich habe mehrere Kontakte gefunden: ${recipientAmbiguityChoices.join(" oder ")}. Wen meinst du genau?`
+            : recipientResolutionState === "no_match" && !!finalNameForResolver
+              ? `Ich finde keinen Kontakt zu "${recipientInputLabel}". Nenne bitte den vollen Namen oder die E-Mail-Adresse.`
+              : !finalNameForResolver
+                ? "Entschuldigung, den Empfänger habe ich nicht sicher verstanden. Nenne bitte nur den Empfänger oder die E-Mail-Adresse."
+                : intentBodyCandidate.length > 0
+                  ? "Kein Empfänger erkannt. Nenne mir bitte den Empfänger oder die E-Mail-Adresse."
+                  : "Kein Empfänger erkannt. Nenne mir bitte den Empfänger. Danach diktiere ich den Text.";
+          const hintKind = recipientResolutionState === "ambiguous"
+            ? "contact_ambiguous"
+            : recipientResolutionState === "no_match"
+              ? "contact_not_found"
+              : "missing_to";
+          (intent as any).meta = {
+            ...((intent as any).meta ?? {}),
+            forcePreviewOnly: true,
+            forcePreviewOnlyReason: "missing_recipient",
+            uiHint: recipientHint,
+          };
+          (window as any).__fm_last_hint = {
+            kind: hintKind,
+            message: recipientHint,
+            ts: Date.now(),
+          };
+          if (typeof window?.dispatchEvent === "function") {
+            window.dispatchEvent(new CustomEvent("fm-hint-update"));
+          }
+          try {
+            (window as any).__fm_guided_mail_context = {
+              stage: "need_recipient",
+              bodyText: guidedBodyText,
+              subjectHint: (wizard4Draft?.subject ?? "Kurze Info").toString(),
+              ts: Date.now(),
+            };
+          } catch {
+            // ignore guided context storage errors
+          }
+          console.log("[wizard4][ui-hint] missing_recipient -> hint set");
+        }
       } catch (err) {
         console.error('[fm-voice][wizard4][debug] to-resolver error', err);
       }
@@ -2336,6 +2499,9 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         const uiSubject = ((w as any).__fm_get_mail_subject() ?? '').toString().trim();
         subject = uiSubject || 'Kurze Info';
         console.log('[wizard4][subject] keeping manual-edit, skip override:', subject);
+      } else if (hasExplicitSubject || draftSubjectTrimmed) {
+        subject = (wizard4Draft!.subject ?? '').trim();
+        console.log('[wizard4][subject] keeping explicitSubject/draft, skip override:', subject);
       } else if (intentExplicitSubjectTrimmed) {
         subject = intentExplicitSubjectTrimmed;
         forceSetExplicitCurrentCompose = true;
@@ -2350,9 +2516,6 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
         console.log('[wizard4][subject-lock] keep existing subject because locked');
         console.log('[wizard4][subject-lock] skip heuristic override because locked');
-      } else if (hasExplicitSubject || draftSubjectTrimmed) {
-        subject = (wizard4Draft!.subject ?? '').trim();
-        console.log('[wizard4][subject] keeping explicitSubject/draft, skip override:', subject);
       } else if (intentSubjectTrimmed) {
         subject = intentSubjectTrimmed;
         console.log('[wizard4][subject] using intent subject:', subject);
@@ -2944,11 +3107,16 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
 
     if (!cleaned) {
       const w = typeof window !== "undefined" ? (window as any) : null;
+      const guidedStage = w?.__fm_guided_mail_context?.stage;
+      const guidedPrompt = guidedStage === "awaiting_new_text";
+      const message = guidedPrompt
+        ? "Okay, wie lautet der Text?"
+        : "Kein Text erkannt. Sag den neuen Mailtext bitte nochmal.";
       if (w) {
-        w.__fm_last_hint = { kind: "missing_body", message: "Kein Text erkannt. Sag den neuen Mailtext bitte nochmal.", ts: Date.now() };
+        w.__fm_last_hint = { kind: "missing_body", message, ts: Date.now() };
       }
       if (typeof window?.dispatchEvent === "function") window.dispatchEvent(new CustomEvent("fm-hint-update"));
-      PartnerBotBus.say("Kein Text erkannt. Sag den neuen Mailtext bitte nochmal.");
+      PartnerBotBus.say(message);
       return;
     }
 
@@ -2984,6 +3152,14 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           console.log("[body-replace] applied ok");
         } else {
           console.warn("[body-replace] mismatch detected");
+        }
+        if (w?.__fm_guided_mail_context?.stage === "awaiting_new_text") {
+          w.__fm_guided_mail_context = {
+            ...w.__fm_guided_mail_context,
+            stage: "recipient_set_choice",
+            bodyText: cleaned,
+            ts: Date.now(),
+          };
         }
       } else if (w) {
         w.__fm_pending_body_replace = cleaned;
@@ -4249,6 +4425,13 @@ function handleWizard2EditSubject(newSubject: string) {
 }
 
 export function processVoiceCommand(transcript: string, navigate: NavigateFunction) {
+  const normalizeContextReplySubject = (rawSubject: string | null | undefined): string => {
+    const cleaned = (rawSubject ?? "").trim();
+    if (!cleaned) return "AW: Ihre Nachricht";
+    if (/^(aw|re)\s*:/i.test(cleaned)) return cleaned;
+    return `AW: ${cleaned}`;
+  };
+
   lastTranscript = transcript; // Für Wizard4Intent-Parsing speichern
   const selectedContext = getSelectedMailContext();
   if (selectedContext && isExplicitContextSendConfirmation(transcript)) {
@@ -4290,6 +4473,37 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
       hasBodyHint: "bodyHint" in replyIntent && !!replyIntent.bodyHint,
     });
   }
-  const intent = replyIntent ?? routeVoiceIntent(transcript);
+  const routedIntent = routeVoiceIntent(transcript);
+  let intent = replyIntent ?? routedIntent;
+
+  // Kontext-Fallback: Wenn eine Mail ausgewählt ist und ein allgemeiner Compose-Intent erkannt wurde,
+  // antworte standardmäßig auf den ausgewählten Kontext (Empfänger + Betreff aus Kontext).
+  if (
+    !replyIntent &&
+    selectedContext?.uid &&
+    selectedContext?.fromEmail &&
+    intent.type === "email-compose"
+  ) {
+    const normalizedSubject = normalizeContextReplySubject(selectedContext.subject);
+    intent = {
+      ...intent,
+      to: selectedContext.fromEmail,
+      toRaw: selectedContext.fromName || selectedContext.fromEmail,
+      subjectHint: normalizedSubject,
+      meta: {
+        ...(intent.meta ?? {}),
+        source: "exchange-context-compose-fallback",
+        forcePreviewOnly: true,
+        forcePreviewOnlyReason: "context_reply_default",
+        uiHint: intent.meta?.uiHint || "Mail-Kontext aktiv. Ich antworte auf die ausgewählte Nachricht.",
+      },
+    };
+    console.log("[fm-voice][exchange-context] compose fallback applied", {
+      contextUid: selectedContext.uid,
+      to: selectedContext.fromEmail,
+      subjectHint: normalizedSubject,
+    });
+  }
+
   applyVoiceIntent(intent, navigate);
 }
