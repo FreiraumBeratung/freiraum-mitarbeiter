@@ -12,6 +12,7 @@ declare global {
     __fm_get_mail_to?: () => string | null;
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
+    __fm_reset_mail_draft?: () => void;
     __fm_reset_mail_flow?: () => void;
     __fm_pending_body_replace?: string | null;
   }
@@ -142,6 +143,9 @@ export default function MailComposeForm() {
     w.__fm_send_mail_now = () => {
       void handleSendNow();
     };
+    w.__fm_reset_mail_draft = () => {
+      handleResetDraft();
+    };
 
     const pending = w.__fm_pending_body_replace;
     if (typeof pending === "string") {
@@ -160,8 +164,9 @@ export default function MailComposeForm() {
       delete w.__fm_get_mail_to;
       delete w.__fm_preview_mail;
       delete w.__fm_send_mail_now;
+      delete w.__fm_reset_mail_draft;
     };
-  }, [handlePreview, handleSendNow]);
+  }, [handlePreview, handleSendNow, handleResetDraft]);
 
   return (
     <div

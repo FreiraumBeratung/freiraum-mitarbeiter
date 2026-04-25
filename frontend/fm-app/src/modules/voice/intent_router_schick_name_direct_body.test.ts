@@ -100,6 +100,21 @@ describe('Schick-Name-Direct-Body Pattern', () => {
     });
   });
 
+  describe('Stutter safety', () => {
+    it('should force previewOnly for leading stutter "Schick, schick an Thomas. Hallo."', () => {
+      const input = "Schick, schick an Thomas. Hallo.";
+      const intent = routeVoiceIntent(input);
+
+      expect(intent.type).toBe('email-compose');
+      if (intent.type === 'email-compose') {
+        expect(intent.toRaw?.toLowerCase()).toBe('thomas');
+        expect(intent.bodyHint?.toLowerCase()).toContain('hallo');
+        expect(intent.meta?.source).toBe('schick-name-direct-body');
+        expect(intent.meta?.autoSend).toBe(false);
+      }
+    });
+  });
+
   describe('Pronoun blocking', () => {
     it('should NOT match "Schick mir direkt ruf mich zurück" (Pronomen block)', () => {
       const input = "Schick mir direkt ruf mich zurück";

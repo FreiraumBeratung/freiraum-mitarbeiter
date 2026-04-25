@@ -37,6 +37,30 @@ import {
   replaceFirstNSentences,
 } from "../../utils/sentence_utils";
 
+type BrowserSpeechRecognition = {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  continuous: boolean;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type BrowserSpeechRecognitionCtor = new () => BrowserSpeechRecognition;
+declare const speak: ((text: string) => Promise<void>) | undefined;
+
+const VOICE_DEBUG_ENABLED =
+  ((typeof import.meta !== "undefined" && Boolean((import.meta as any)?.env?.DEV)) ||
+    (typeof window !== "undefined" && (window as any).__FM_VOICE_DEBUG__ === true));
+
+function debugLog(...args: unknown[]) {
+  if (!VOICE_DEBUG_ENABLED) return;
+  console.log(...args);
+}
+
 declare global {
   interface Window {
     __fm_set_mail_body?: (text: string) => void;
@@ -47,6 +71,7 @@ declare global {
     __fm_get_mail_to?: () => string | null;
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
+    __fm_reset_mail_draft?: () => void;
     __fm_subject_manually_edited?: boolean;
     __fm_pending_body_replace?: string | null;
     __fm_subject_locked?: boolean;
@@ -66,15 +91,15 @@ declare global {
 
 // Wizard4Intent global registrieren für Konsolen-Tests
 (window as any).parseWizard4Intent = parseWizard4Intent;
-console.log('[fm-voice] Wizard4Intent global registriert.');
+debugLog('[fm-voice] Wizard4Intent global registriert.');
 (window as any).generateWizard4Subject = generateWizard4Subject;
-console.log('[fm-voice] Wizard4Subject global registriert.');
+debugLog('[fm-voice] Wizard4Subject global registriert.');
 (window as any).generateWizard4Body = generateWizard4Body;
-console.log('[fm-voice] Wizard4Body global registriert.');
+debugLog('[fm-voice] Wizard4Body global registriert.');
 (window as any).buildWizard4EmailFromInput = buildWizard4EmailFromInput;
-console.log('[fm-voice] Wizard4Email builder global registriert.');
+debugLog('[fm-voice] Wizard4Email builder global registriert.');
 (window as any).__fm_reset_mail_flow = resetMailVoiceFlowState;
-console.log('[fm-voice] Mail-Flow reset global registriert.');
+debugLog('[fm-voice] Mail-Flow reset global registriert.');
 
 // AutoSend 4.0 – globales Flag
 const WIZARD4_AUTOSEND_ENABLED = true;
@@ -108,7 +133,7 @@ function resetMailVoiceFlowState() {
     window.dispatchEvent(new CustomEvent("fm-hint-update"));
   }
   setLastAction({ kind: "other", description: "Mail-Entwurf zurückgesetzt." });
-  console.log("[fm-voice][reset] mail + guided flow reset");
+  debugLog("[fm-voice][reset] mail + guided flow reset");
 }
 
 /**
@@ -997,12 +1022,14 @@ function dispatchState(s: VoiceState) {
   document.dispatchEvent(new CustomEvent("voice-state", { detail: { state: s } }));
 }
 
-let recognition: SpeechRecognition | null = null;
+let recognition: BrowserSpeechRecognition | null = null;
 let lastTranscript: string = ""; // Für Wizard4Intent-Parsing
 
-function getRecognition(): SpeechRecognition | null {
+function getRecognition(): BrowserSpeechRecognition | null {
   if (typeof window === "undefined") return null;
-  const ctor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  const ctor = ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) as
+    | BrowserSpeechRecognitionCtor
+    | undefined;
   if (!ctor) return null;
   if (!recognition) {
     recognition = new ctor();
@@ -1018,6 +1045,8 @@ export class VoiceController {
   state: VoiceState = "idle";
   lastText = "";
   private listening = false;
+  private starting = false;
+  private cancelStart = false;
 
   setState(s: VoiceState) {
     this.state = s;
@@ -1048,14 +1077,28 @@ export class VoiceController {
       return;
     }
 
-    if (this.listening) {
+    if (this.listening || this.starting) {
       return;
     }
 
+    this.starting = true;
+    this.cancelStart = false;
+
+    let probeStream: MediaStream | null = null;
     try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
+      probeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
       // Ignore – Browser kann trotzdem aufnehmen
+    } finally {
+      if (probeStream) {
+        probeStream.getTracks().forEach((track) => track.stop());
+      }
+    }
+
+    if (this.cancelStart) {
+      this.starting = false;
+      this.setState("idle");
+      return;
     }
 
     this.listening = true;
@@ -1065,16 +1108,24 @@ export class VoiceController {
 
     try {
       rec.start();
+      this.starting = false;
       this.setState("listening");
-      console.log("[fm-voice] recognition started");
+      debugLog("[fm-voice] recognition started");
     } catch (err) {
       console.warn("[fm-voice] recognition start failed:", err);
+      this.starting = false;
       this.listening = false;
       this.setState("error");
     }
   }
 
   async stop() {
+    if (this.starting && !this.listening) {
+      this.cancelStart = true;
+      this.setState("idle");
+      return;
+    }
+
     const rec = getRecognition();
     if (!rec || !this.listening) {
       this.setState("idle");
@@ -1083,16 +1134,17 @@ export class VoiceController {
     this.listening = false;
     try {
       rec.stop();
-      console.log("[fm-voice] recognition stop requested");
+      debugLog("[fm-voice] recognition stop requested");
     } catch (err) {
       console.warn("[fm-voice] recognition stop failed:", err);
     }
   }
 
-  private handleResult = (event: SpeechRecognitionEvent | any) => {
+  private handleResult = (event: any) => {
     const results = event.results;
     const last = results[results.length - 1];
     const transcript = last?.[0]?.transcript?.trim() || "";
+    this.starting = false;
     this.listening = false;
     if (!transcript) {
       this.setState("idle");
@@ -1102,12 +1154,43 @@ export class VoiceController {
   };
 
   private handleError = (event: any) => {
-    console.warn("[fm-voice] recognition error:", event);
+    const errorCode = String(event?.error || "unknown");
+    const errorMessage = String(event?.message || "");
+    const normalizedError = errorCode.toLowerCase();
+    const isBenign =
+      normalizedError === "aborted" ||
+      normalizedError === "no-speech" ||
+      normalizedError === "network" ||
+      normalizedError === "unknown";
+    if (isBenign) {
+      debugLog("[fm-voice] recognition transient error", {
+        error: errorCode,
+        message: errorMessage,
+        raw: event,
+      });
+    } else {
+      console.warn(
+        `[fm-voice] recognition error code=${errorCode} message=${errorMessage || "-"}`,
+        event
+      );
+    }
+    this.starting = false;
     this.listening = false;
+    if (normalizedError === "aborted" || normalizedError === "no-speech") {
+      this.setState("idle");
+      return;
+    }
+    if (normalizedError === "network" || normalizedError === "unknown") {
+      recognition = null;
+      this.setState("idle");
+      return;
+    }
+    recognition = null;
     this.setState("error");
   };
 
   private handleEnd = () => {
+    this.starting = false;
     if (this.listening) return;
     if (this.state === "listening") {
       this.setState("idle");
@@ -1116,7 +1199,7 @@ export class VoiceController {
 
   private async handleTranscript(text: string) {
     this.lastText = text;
-    console.log("[fm-voice] Final transcript:", text);
+    debugLog("[fm-voice] Final transcript:", text);
     document.dispatchEvent(new CustomEvent("voice:final", { detail: { text } }));
     this.setState("transcribing");
     await this.route(text);
@@ -1338,7 +1421,7 @@ function applyEmailToComposeUI(params: {
 }
 
 function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
-  console.log("[fm-voice] intent result:", intent);
+  debugLog("[fm-voice] intent result:", intent);
 
   if (intent.type === "navigate") {
     switch (intent.target) {
@@ -1626,6 +1709,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           // bodyHint === "" oder fehlt -> draft.body = "", kein Generator/Template
           if (hasExplicitBody && !isStatusBrain) {
             let bodyHint = (intent.bodyHint ?? '').trim();
+          const originalBodyHintForLog = bodyHint;
             
             // FIX: Rewrite führende "dass"-Klausel für autoSend-Intents
             // Wird VOR polish und VOR __fm_set_mail_body angewendet
@@ -1636,7 +1720,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                 // Aktualisiere auch intent.bodyHint für spätere Verwendung
                 (intent as any).bodyHint = rewritten;
                 console.log('[wizard4][dass-rewrite] Rewrote leading "dass" clause', {
-                  original: intent.bodyHint.substring(0, 80),
+                  original: originalBodyHintForLog.substring(0, 80),
                   rewritten: rewritten.substring(0, 80)
                 });
                 // Pronoun-Fix: "Ich ... ihn/ihm" -> "dich/dir" wenn Empfänger gesetzt (Mail an jemanden)
@@ -2541,6 +2625,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       } else {
         // EXPLICIT BODY WINS: Prüfe zuerst, ob ein expliziter bodyHint vorhanden ist (nur bei Nicht-Status-Brain)
         let explicitBodyHint = intent.bodyHint && intent.bodyHint.trim().length > 0 ? intent.bodyHint.trim() : null;
+        const explicitBodyHintForLog = explicitBodyHint || "";
         
         // FIX: Rewrite führende "dass"-Klausel für autoSend-Intents
         // Wird VOR polish und VOR __fm_set_mail_body angewendet
@@ -2551,7 +2636,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             // Aktualisiere auch intent.bodyHint für spätere Verwendung
             (intent as any).bodyHint = rewritten;
             console.log('[wizard4][dass-rewrite] Rewrote leading "dass" clause', {
-              original: intent.bodyHint.substring(0, 80),
+              original: explicitBodyHintForLog.substring(0, 80),
               rewritten: rewritten.substring(0, 80)
             });
             // Pronoun-Fix: "Ich ... ihn/ihm" -> "dich/dir" wenn Empfänger gesetzt (Mail an jemanden)
@@ -2729,14 +2814,21 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             
             let polishResult = await polishPromise;
             
-            // Optionaler Retry bei sendNow + timeout
+            // Optionaler Retry bei sendNow + timeout (nur für kurze Bodies, um Lastspitzen zu vermeiden)
             if (!polishResult.ok && polishResult.reason === 'timeout' && isSendNow) {
-              console.log('[wizard4][ai-polish] Timeout bei sendNow, versuche Retry mit kürzerem Prompt', { bodyLength: rawBodyForUi.length });
-              try {
-                polishResult = await polishEmailBody(rawBodyForUi, { mode: 'sendNow', timeoutMs: 6000, shortPrompt: true });
-              } catch (retryErr) {
-                console.warn('[wizard4][ai-polish] Retry fehlgeschlagen, verwende Original', retryErr);
-                // polishResult bleibt beim ursprünglichen Ergebnis (ok: false)
+              const shouldRetryPolish = rawBodyForUi.length <= 180;
+              if (shouldRetryPolish) {
+                console.log('[wizard4][ai-polish] Timeout bei sendNow, versuche Retry mit kürzerem Prompt', { bodyLength: rawBodyForUi.length });
+                try {
+                  polishResult = await polishEmailBody(rawBodyForUi, { mode: 'sendNow', timeoutMs: 2200, shortPrompt: true });
+                } catch (retryErr) {
+                  console.warn('[wizard4][ai-polish] Retry fehlgeschlagen, verwende Original', retryErr);
+                  // polishResult bleibt beim ursprünglichen Ergebnis (ok: false)
+                }
+              } else {
+                console.log('[wizard4][ai-polish] timeout fallback without retry (body too long for safe retry)', {
+                  bodyLength: rawBodyForUi.length,
+                });
               }
             }
             
@@ -3123,6 +3215,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     const w = typeof window !== "undefined" ? (window as any) : null;
     const hadSetterBefore = !!w?.__fm_set_mail_body && typeof w.__fm_set_mail_body === "function";
     (async () => {
+      const wasGuidedNewTextFlow = w?.__fm_guided_mail_context?.stage === "awaiting_new_text";
       let totalWaitMs = 0;
       let waitResult = await waitForMailBodySetter(1500, 30);
       totalWaitMs += waitResult.waitedMs;
@@ -3153,7 +3246,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         } else {
           console.warn("[body-replace] mismatch detected");
         }
-        if (w?.__fm_guided_mail_context?.stage === "awaiting_new_text") {
+        if (wasGuidedNewTextFlow && w?.__fm_guided_mail_context?.stage === "awaiting_new_text") {
           w.__fm_guided_mail_context = {
             ...w.__fm_guided_mail_context,
             stage: "recipient_set_choice",
@@ -3167,7 +3260,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
 
       triggerEmotion("success");
-      PartnerBotBus.say("Text ersetzt.");
+      PartnerBotBus.say(
+        wasGuidedNewTextFlow
+          ? "Okay, Text gesetzt. Soll ich senden oder möchtest du noch etwas ändern?"
+          : "Text ersetzt."
+      );
     })().catch((err) => {
       console.error("[body-replace] apply failed", err);
       if (w) w.__fm_pending_body_replace = cleaned;
@@ -3794,6 +3891,59 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       console.log("[wizard4][email-send] no UI draft available - ignored");
       return;
     })();
+    return;
+  }
+
+  if (intent.type === "mail-draft-reset") {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    try {
+      if (w && typeof w.__fm_reset_mail_draft === "function") {
+        w.__fm_reset_mail_draft();
+      } else {
+        w?.__fm_set_mail_to?.("");
+        w?.__fm_set_mail_subject?.("");
+        w?.__fm_set_mail_body?.("");
+        resetMailVoiceFlowState();
+        PartnerBotBus.say("Entwurf zurückgesetzt.");
+      }
+    } catch (err) {
+      console.error("[fm-voice][reset] failed:", err);
+      PartnerBotBus.say("Zurücksetzen fehlgeschlagen.");
+    }
+    return;
+  }
+
+  if (intent.type === "mail-body-clear") {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    try {
+      w?.__fm_set_mail_body?.("");
+      if (w?.__fm_guided_mail_context && typeof w.__fm_guided_mail_context === "object") {
+        w.__fm_guided_mail_context = {
+          ...w.__fm_guided_mail_context,
+          bodyText: "",
+          stage: "awaiting_new_text",
+          ts: Date.now(),
+        };
+      }
+      w.__fm_pending_body_replace = null;
+      w.__fm_last_hint = {
+        kind: "body_cleared",
+        message: "Text gelöscht. Diktiere mir den neuen Text.",
+        ts: Date.now(),
+      };
+      if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      }
+      PartnerBotBus.say("Text gelöscht. Diktiere mir den neuen Text.");
+    } catch (err) {
+      console.error("[fm-voice][body-clear] failed:", err);
+      PartnerBotBus.say("Text konnte nicht gelöscht werden.");
+    }
+    return;
+  }
+
+  if (intent.type === "mail-delete-clarify") {
+    PartnerBotBus.say("Soll ich nur den Text löschen oder den kompletten Entwurf zurücksetzen?");
     return;
   }
 

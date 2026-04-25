@@ -103,6 +103,32 @@ describe("reply_context_phase_a", () => {
     }
   });
 
+  it("supports colloquial context write 'Erstelle auf diese Mail einen Entwurf ...'", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Erstelle auf diese Mail einen Entwurf Hallo Thomas, passt fuer mich.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.to).toBe("thomas@example.com");
+      expect(intent.subjectHint).toBe("AW: Projektupdate Q4");
+      expect(intent.bodyHint).toBe("Hallo Thomas, passt fuer mich.");
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
+    }
+  });
+
+  it("supports colloquial context write 'Mach eine Antwort ...'", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Mach eine Antwort Hallo, wir liefern morgen.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.bodyHint).toBe("Hallo, wir liefern morgen.");
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
+    }
+  });
+
   it("supports context write command with recipient phrase and keeps only message body", () => {
     const intent = buildReplyIntentFromSelectedMailContext(
       "Schreibe folgende Mail an Bruder. Hallo Bruder.",
@@ -113,6 +139,21 @@ describe("reply_context_phase_a", () => {
       expect(intent.to).toBe("thomas@example.com");
       expect(intent.subjectHint).toBe("AW: Projektupdate Q4");
       expect(intent.bodyHint).toBe("Hallo Bruder.");
+    }
+  });
+
+  it("strips duplicated reply command in context and keeps only dictated body", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Antworte, antworte bitte auf diese Mail. Hallo.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.to).toBe("thomas@example.com");
+      expect(intent.subjectHint).toBe("AW: Projektupdate Q4");
+      expect(intent.bodyHint).toBe("Hallo.");
+      expect(intent.meta?.autoSend).toBe(false);
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
     }
   });
 
@@ -189,15 +230,30 @@ describe("reply_context_phase_a", () => {
     }
   });
 
-  it("sets autosend for 'Antworte bitte ...' when body is present", () => {
+  it("handles ASR variant 'Antwortet direkt. ...' without body leak", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Antwortet direkt. Ich komme übermorgen.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.source).toBe("exchange-context-reply-direct");
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.bodyHint).toBe("Ich komme übermorgen.");
+    }
+  });
+
+  it("keeps preview for 'Antworte bitte ...' without direkt/sofort", () => {
     const intent = buildReplyIntentFromSelectedMailContext(
       "Antworte bitte, mir geht es gut.",
       baseContext
     );
     expect(intent?.type).toBe("email-compose");
     if (intent?.type === "email-compose") {
-      expect(intent.meta?.autoSend).toBe(true);
-      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.meta?.source).toBe("exchange-context-reply-phase-a");
+      expect(intent.meta?.autoSend).toBe(false);
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
       expect(intent.bodyHint).toBe("mir geht es gut.");
     }
   });
@@ -306,6 +362,20 @@ describe("reply_context_phase_a", () => {
     }
   });
 
+  it("supports pronoun shortcut 'Sag ihm ...' and keeps only dictated body", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Sag ihm Hallo Thomas, ich habe es gesehen.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.to).toBe("thomas@example.com");
+      expect(intent.bodyHint).toBe("Hallo Thomas, ich habe es gesehen.");
+      expect(intent.meta?.autoSend).toBe(false);
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
+    }
+  });
+
   it("keeps preview mode when direct reply requested without body", () => {
     const intent = buildReplyIntentFromSelectedMailContext(
       "Bitte direkt antworten auf diese Mail",
@@ -315,6 +385,7 @@ describe("reply_context_phase_a", () => {
     if (intent?.type === "email-compose") {
       expect(intent.meta?.autoSend).toBe(false);
       expect(intent.meta?.forcePreviewOnly).toBe(true);
+      expect(intent.meta?.forcePreviewOnlyReason).toBe("missing_body");
       expect(intent.bodyHint).toBeUndefined();
     }
   });

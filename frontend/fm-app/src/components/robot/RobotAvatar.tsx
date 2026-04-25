@@ -317,6 +317,7 @@ export default function RobotAvatar() {
 
   useEffect(() => {
     const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       setMicroPhase((p) => p + 1);
     }, 340);
     return () => window.clearInterval(id);
@@ -326,6 +327,10 @@ export default function RobotAvatar() {
     const loop = () => {
       const next = 3200 + Math.random() * 2500;
       pulseTimerRef.current = window.setTimeout(() => {
+        if (typeof document !== "undefined" && document.hidden) {
+          loop();
+          return;
+        }
         setBlinkClosed(true);
         window.setTimeout(() => setBlinkClosed(false), 120);
         loop();
@@ -344,6 +349,7 @@ export default function RobotAvatar() {
     }
     setShowThinkingPulse(true);
     const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       setShowThinkingPulse((v) => !v);
     }, 560);
     return () => window.clearInterval(id);

@@ -2,10 +2,21 @@ export async function recordAndTranscribe(
   maxMs = 6000,
   signal?: AbortSignal
 ): Promise<string | null> {
+  const fetchWithTimeout = async (url: string, init: RequestInit = {}, timeoutMs = 3000) => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const mergedSignal = init.signal ?? controller.signal;
+      return await fetch(url, { ...init, signal: mergedSignal });
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
   if (signal?.aborted) return null;
   // Prefer backend STT first
   try {
-    const health = await fetch("http://127.0.0.1:30521/api/stt/health").then((r) =>
+    const health = await fetchWithTimeout("http://127.0.0.1:30521/api/stt/health", {}, 1200).then((r) =>
       r.json()
     );
     if (health?.provider === "local" && health?.ok) {
@@ -38,10 +49,14 @@ export async function recordAndTranscribe(
 
       const form = new FormData();
       form.append("file", audioBlob, "voice.webm");
-      const resp = await fetch("http://127.0.0.1:30521/api/stt/transcribe", {
-        method: "POST",
-        body: form,
-      });
+      const resp = await fetchWithTimeout(
+        "http://127.0.0.1:30521/api/stt/transcribe",
+        {
+          method: "POST",
+          body: form,
+        },
+        8000
+      );
       if (resp.ok) {
         const j = await resp.json();
         const text = (j?.text || "").trim();

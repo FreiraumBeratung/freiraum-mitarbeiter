@@ -20,6 +20,15 @@ import { hasCancelPhrase, stripCancelPhraseFromBody } from "../../logic/wizard4/
 import { parseSubjectEditIntent } from "../../logic/subject_edit";
 import { getLastAction } from "./voice_action_store";
 
+const VOICE_DEBUG_ENABLED =
+  ((typeof import.meta !== "undefined" && Boolean((import.meta as any)?.env?.DEV)) ||
+    (typeof window !== "undefined" && (window as any).__FM_VOICE_DEBUG__ === true));
+
+function debugLog(...args: unknown[]) {
+  if (!VOICE_DEBUG_ENABLED) return;
+  console.log(...args);
+}
+
 export type Wizard3OneShotPayload = {
   rawText: string; // komplette Original-Sprachnachricht
 };
@@ -35,6 +44,9 @@ export type VoiceIntent =
   | { type: "wizard2-edit-anrede-and-rewrite"; newAnrede: string; instruction: string }
   | { type: "email-send" }
   | { type: "email-preview" }
+  | { type: "mail-body-clear" }
+  | { type: "mail-draft-reset" }
+  | { type: "mail-delete-clarify" }
   | { type: "email-subject-set"; payload: { subject: string; rawCommand?: string } }
   | { type: "email-subject-append"; payload: { append: string; rawCommand?: string } }
   | { type: "email-subject-clear"; payload: { rawCommand?: string } }
@@ -2912,6 +2924,10 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
     console.log('[intent-router][schick-name-direct][stt-verb-alias] after:', normalizedForMatch.slice(0, 80));
   }
 
+  const hasLeadingVerbStutter =
+    /^(?:schick(?:e|s)?\s*[,.;:!?-]?\s*){2,}/i.test(textForMatch) ||
+    /^(?:schick(?:e)?\s*){2,}/i.test(normalizedForMatch);
+
   // Führendes "raus " nach "schick" strippen, damit "schick raus an thomas ..." nicht "raus" als Empfänger nimmt
   const beforeRaus = normalizedForMatch;
   textForMatch = textForMatch.replace(/^(schick(?:e|s)?\s+)raus\s+/i, '$1');
@@ -3122,11 +3138,15 @@ function matchSchickNameDirectBody(original: string, normalized: string): {
       return null;
     }
 
+    if (hasLeadingVerbStutter) {
+      console.log("[intent-router][schick-name-direct][stutter-guard] leading verb repetition detected -> force previewOnly");
+    }
+
     return {
       toRaw: toNameRaw.toLowerCase(),
       bodyHint: bodyHint,
       bodyHintRaw: bodyHintRaw,
-      hasAutoSendTrigger: hasDirectTrigger || true, // "schick" allein ist auch AutoSend-Hinweis, "direkt" ist extra Signal
+      hasAutoSendTrigger: !hasLeadingVerbStutter && (hasDirectTrigger || true), // Stotter-Guard blockiert AutoSend bei doppeltem "schick ..."
       ...(multiRecipientDetected && { multiRecipientDetected: true }),
     };
   }
@@ -5328,8 +5348,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     }
   }
 
-  console.log("[fm-voice] routeVoiceIntent raw:", original);
-  console.log("[fm-voice] routeVoiceIntent normalized:", text);
+  debugLog("[fm-voice] routeVoiceIntent raw:", original);
+  debugLog("[fm-voice] routeVoiceIntent normalized:", text);
 
   if (!text) {
     return { type: "unknown" };
@@ -6032,6 +6052,30 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
   }
 
   // ============================================================
+  // DELETE/RESET-GUARD: Lösch-/Reset-Befehle bei offenem Composer
+  // ============================================================
+  const isBodyClearCommand =
+    /^(?:text|inhalt|nachricht|geschriebene(?:n|r)?\s+text)\s+(?:loesch(?:e|en)?|losch(?:e|en)?|loschen|lösch(?:e|en)?|entfern(?:e)?)$/i.test(t) ||
+    /^(?:loesch(?:e|en)?|losch(?:e|en)?|loschen|lösch(?:e|en)?|entfern(?:e)?)\s+(?:nur\s+)?(?:den\s+)?(?:text|inhalt|nachricht)$/i.test(t);
+  const isDraftResetCommand =
+    /^(?:alles|entwurf)\s+(?:loesch(?:e|en)?|losch(?:e|en)?|loschen|lösch(?:e|en)?|zuruecksetzen|zurucksetzen|zurücksetzen|resetten)$/i.test(t) ||
+    /^(?:entwurf\s+)?(?:zuruecksetzen|zurucksetzen|zurücksetzen|reset)$/i.test(t);
+  const isAmbiguousDeleteCommand =
+    /^(?:loesch(?:e|en)?|losch(?:e|en)?|loschen|lösch(?:e|en)?|entfern(?:e)?|reset(?:te|ten)?|zuruecksetzen|zurucksetzen|zurücksetzen)$/i.test(t);
+  if (hasComposer && isBodyClearCommand) {
+    console.log('[intent-router][draft-reset-guard] matched -> mail-body-clear (composer open)', { t });
+    return { type: 'mail-body-clear' };
+  }
+  if (hasComposer && isDraftResetCommand) {
+    console.log('[intent-router][draft-reset-guard] matched -> mail-draft-reset (composer open)', { t });
+    return { type: 'mail-draft-reset' };
+  }
+  if (hasComposer && isAmbiguousDeleteCommand) {
+    console.log('[intent-router][draft-reset-guard] matched -> mail-delete-clarify (composer open)', { t });
+    return { type: 'mail-delete-clarify' };
+  }
+
+  // ============================================================
   // SENTENCE INSERT BEFORE (Hauptrouter, vor append-guard)
   // Dedizierter Routing-Pfad für ASR "vorsatz" / "vor satz"
   // ============================================================
@@ -6061,7 +6105,8 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
 
     const beforeMainNoText =
       text.match(/^(?:erganze)\s+(?:vorsatz|vor\s+satz)\s+(\d{1,2})[\.,:]?\s*$/i) ||
-      text.match(/^(?:fuge|fuege)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s*(?:ein)?\s*$/i);
+      text.match(/^(?:fuge|fuege)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s*(?:ein)?\s*$/i) ||
+      text.match(/^(?:fuge|fuege)\s+vorsatz\s+(\d{1,2})[\.,:]?\s*(?:ein|hinzu)?\s*$/i);
     if (beforeMainNoText && hasSentenceEditContext) {
       console.log("[sentence] synonym-insert-before no-op (empty text)");
       return { type: "unknown" };
@@ -6070,12 +6115,16 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     const beforeMain =
       text.match(/^(?:erganze)\s+vorsatz\s+(\d{1,2})[\.,:]?\s+(.+)$/i) ||
       text.match(/^(?:erganze)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s+(.+)$/i) ||
-      text.match(/^(?:fuge|fuege)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s+(.+?)\s*(?:ein)?[.!?]*$/i);
+      text.match(/^(?:fuge|fuege)\s+vor\s+satz\s+(\d{1,2})[\.,:]?\s+(.+?)\s*(?:ein)?[.!?]*$/i) ||
+      text.match(/^(?:fuge|fuege)\s+vorsatz\s+(\d{1,2})[\.,:]?\s+hinzu[\.,:]?\s+(.+?)\s*$/i) ||
+      text.match(/^(?:fuge|fuege)\s+vorsatz\s+(\d{1,2})[\.,:]?\s+(.+?)\s*(?:ein)?[.!?]*$/i);
     if (beforeMain && hasSentenceEditContext) {
       const n = parseN(beforeMain[1] ?? "");
-      let parsedText = (beforeMain[2] ?? "")
+      const parsedTextRaw = (beforeMain[2] ?? beforeMain[3] ?? "");
+      let parsedText = parsedTextRaw
         .replace(/^(?:folgendes|noch|bitte)\b[\s:,-]*/i, "")
         .replace(/\b(?:ein)\b[.!?]*$/i, "")
+        .replace(/^(?:hinzu)\b[\s:,-]*/i, "")
         .replace(/[.!?]+$/g, "")
         .trim();
       parsedText = capitalizeFirstAlpha(parsedText);

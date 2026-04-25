@@ -51,6 +51,7 @@ export default function MailOnboardingOverlay() {
 
   const [imapEmail, setImapEmail] = useState("");
   const [imapPassword, setImapPassword] = useState("");
+  const [showImapPassword, setShowImapPassword] = useState(false);
   const [useAdvanced, setUseAdvanced] = useState(false);
   const [imapHost, setImapHost] = useState("");
   const [imapPort, setImapPort] = useState("993");
@@ -385,13 +386,24 @@ export default function MailOnboardingOverlay() {
                   placeholder="E-Mail-Adresse"
                   style={styles.input}
                 />
-                <input
-                  type="password"
-                  value={imapPassword}
-                  onChange={(e) => setImapPassword(e.target.value)}
-                  placeholder="Passwort / App-Passwort"
-                  style={styles.input}
-                />
+                <div style={styles.passwordWrap}>
+                  <input
+                    type={showImapPassword ? "text" : "password"}
+                    value={imapPassword}
+                    onChange={(e) => setImapPassword(e.target.value)}
+                    placeholder="Passwort / App-Passwort"
+                    style={{ ...styles.input, ...styles.inputWithIcon }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowImapPassword((prev) => !prev)}
+                    aria-label={showImapPassword ? "Passwort ausblenden" : "Passwort anzeigen"}
+                    title={showImapPassword ? "Passwort ausblenden" : "Passwort anzeigen"}
+                    style={styles.passwordToggle}
+                  >
+                    {showImapPassword ? "🙈" : "👁"}
+                  </button>
+                </div>
                 <label style={styles.checkboxRow}>
                   <input type="checkbox" checked={useAdvanced} onChange={(e) => setUseAdvanced(e.target.checked)} />
                   Erweiterte Einstellungen
@@ -435,7 +447,7 @@ export default function MailOnboardingOverlay() {
                       ...(submitting ? styles.btnDisabled : {}),
                     }}
                   >
-                    IMAP/SMTP einrichten
+                    Anmelden
                   </button>
                   <button
                     onClick={() => {
@@ -644,6 +656,29 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "0 12px",
     fontSize: 14,
     outline: "none",
+  },
+  inputWithIcon: {
+    paddingRight: 44,
+  },
+  passwordWrap: {
+    position: "relative",
+  },
+  passwordToggle: {
+    position: "absolute",
+    right: 10,
+    top: "50%",
+    transform: "translateY(-50%)",
+    width: 28,
+    height: 28,
+    border: "none",
+    background: "transparent",
+    color: "rgba(255,255,255,0.78)",
+    fontSize: 16,
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
   },
   inputSmall: {
     height: 40,

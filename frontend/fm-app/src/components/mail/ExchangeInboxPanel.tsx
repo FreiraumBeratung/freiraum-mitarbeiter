@@ -170,6 +170,9 @@ export default function ExchangeInboxPanel() {
   const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
   const [msAuthLoading, setMsAuthLoading] = useState(false);
   const inboxLoadInFlightRef = useRef(false);
+  const hasLoadedInboxSuccessfullyRef = useRef(false);
+  const itemsRef = useRef<InboxItem[]>([]);
+  const selectedUidRef = useRef<string | null>(null);
   const loadInboxRef = useRef<((options?: { silent?: boolean }) => Promise<void>) | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -207,6 +210,10 @@ export default function ExchangeInboxPanel() {
     () => visible.filter((item) => item.isRead === false && !openedUids.has(item.uid)).length,
     [visible, openedUids]
   );
+  const sanitizedDetailHtml = useMemo(
+    () => (detailData?.bodyHtml ? sanitizeHtmlForDetail(detailData.bodyHtml) : ""),
+    [detailData?.bodyHtml]
+  );
 
   function buildContext(item: InboxItem): SelectedMailContext {
     return {
@@ -237,13 +244,21 @@ export default function ExchangeInboxPanel() {
     setActiveContext(context);
   }
 
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  useEffect(() => {
+    selectedUidRef.current = selectedUid;
+  }, [selectedUid]);
+
   const loadInbox = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent === true;
     if (inboxLoadInFlightRef.current) {
       return;
     }
     inboxLoadInFlightRef.current = true;
-    const hasExistingItems = items.length > 0;
+    const hasExistingItems = itemsRef.current.length > 0;
     const showBlockingLoading = !silent && !hasExistingItems;
     if (showBlockingLoading) {
       setLoading(true);
@@ -265,12 +280,19 @@ export default function ExchangeInboxPanel() {
       setItems(nextItems);
       setTotal(data.total || 0);
       setError(null);
+      hasLoadedInboxSuccessfullyRef.current = true;
       const persisted = getSelectedMailContext();
-      const bySelectedUid = selectedUid ? nextItems.find((it) => it.uid === selectedUid) : null;
+      const currentSelectedUid = selectedUidRef.current;
+      const bySelectedUid = currentSelectedUid ? nextItems.find((it) => it.uid === currentSelectedUid) : null;
       const byPersistedUid = persisted?.uid ? nextItems.find((it) => it.uid === persisted.uid) : null;
       applySelection(bySelectedUid || byPersistedUid || null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Inbox konnte nicht geladen werden.");
+      const message = err instanceof Error ? err.message : "Inbox konnte nicht geladen werden.";
+      const isBootstrapFetchFailure =
+        !hasLoadedInboxSuccessfullyRef.current &&
+        itemsRef.current.length === 0 &&
+        message === "Inbox konnte nicht geladen werden.";
+      setError(isBootstrapFetchFailure ? "Verbindung wird aufgebaut..." : message);
     } finally {
       inboxLoadInFlightRef.current = false;
       if (showBlockingLoading) {
@@ -278,7 +300,7 @@ export default function ExchangeInboxPanel() {
       }
       setRefreshing(false);
     }
-  }, [items.length, selectedUid, mailboxMode]);
+  }, [mailboxMode]);
 
   useEffect(() => {
     loadInboxRef.current = loadInbox;
@@ -935,7 +957,7 @@ export default function ExchangeInboxPanel() {
                       color: "rgba(255,255,255,0.88)",
                       wordBreak: "break-word",
                     }}
-                    dangerouslySetInnerHTML={{ __html: sanitizeHtmlForDetail(detailData.bodyHtml) }}
+                    dangerouslySetInnerHTML={{ __html: sanitizedDetailHtml }}
                   />
                 ) : (
                   <div
@@ -963,7 +985,16 @@ export default function ExchangeInboxPanel() {
         {loading && items.length === 0 && (
           <div style={{ color: "rgba(255,255,255,0.62)", fontSize: 12 }}>Inbox wird geladen...</div>
         )}
-        {error && <div style={{ color: "rgba(255,170,170,0.92)", fontSize: 12 }}>{error}</div>}
+        {error && (
+          <div
+            style={{
+              color: error === "Verbindung wird aufgebaut..." ? "rgba(255,255,255,0.62)" : "rgba(255,170,170,0.92)",
+              fontSize: 12,
+            }}
+          >
+            {error}
+          </div>
+        )}
         {!loading && visible.length === 0 && (
           <div style={{ color: "rgba(255,255,255,0.58)", fontSize: 12 }}>
             {mailboxMode === "sent" ? "Keine gesendeten Nachrichten gefunden." : "Keine Nachrichten gefunden."}

@@ -58,6 +58,23 @@ describe("intent_router sentence-insert-nth", () => {
     expect(intent.type).not.toBe("email-compose");
   });
 
+  it("ASR alias: 'Füge Vorsatz 3 hinzu. Hallo.' -> sentence-insert-nth before n=3", () => {
+    const intent = routeVoiceIntent("Füge Vorsatz 3 hinzu. Hallo.");
+    expect(intent.type).toBe("sentence-insert-nth");
+    if (intent.type === "sentence-insert-nth") {
+      expect(intent.payload.position).toBe("before");
+      expect(intent.payload.n).toBe(3);
+      expect(intent.payload.text).toBe("Hallo");
+    }
+    expect(intent.type).not.toBe("email-compose");
+  });
+
+  it("ASR alias no-op: 'Füge Vorsatz 3 hinzu' -> unknown", () => {
+    const intent = routeVoiceIntent("Füge Vorsatz 3 hinzu");
+    expect(intent.type).toBe("unknown");
+    expect(intent.type).not.toBe("email-compose");
+  });
+
   it("Synonym: Ergänze nach Satz 2 ... -> sentence-insert-nth after", () => {
     const intent = routeVoiceIntent("Ergänze nach Satz 2 Danke dir");
     expect(intent.type).toBe("sentence-insert-nth");

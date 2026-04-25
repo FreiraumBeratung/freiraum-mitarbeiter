@@ -51,24 +51,24 @@ function hasAddressedSenderDirective(text: string, context: SelectedMailContext 
 }
 
 function hasReplyVerb(text: string): boolean {
-  return /\b(antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?)\b/i.test(text);
+  return /\b(antwort(?:e|en|et)|beantwort(?:e|en|et)|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?)\b/i.test(text);
 }
 
 function hasLeadingReplyCommand(text: string): boolean {
-  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+|bitte\s+)*(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:|direkt(?:e)?\s+antwort(?:\s*:)?|kurze?\s+antwort(?:\s*:)?)/i.test(
+  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+|bitte\s+)*(?:antwort(?:e|en|et)\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b|informier(?:e|en)?\b|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:|direkt(?:e)?\s+antwort(?:\s*:)?|kurze?\s+antwort(?:\s*:)?)/i.test(
     text
   );
 }
 
 function hasContextWriteCommand(text: string): boolean {
-  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:schreib(?:e)?(?!\s+zur(?:ue|[üu])ck)|verfass(?:e)?|formulier(?:e)?)\b/i.test(
+  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:schreib(?:e)?(?!\s+zur(?:ue|[üu])ck)|verfass(?:e)?|formulier(?:e)?|erstell(?:e)?|erstelle|mach(?:e)?)\b/i.test(
     text
   );
 }
 
 function hasContextualReplyShortcut(text: string): boolean {
   return (
-    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:sag\s+(?:ihm|ihr|denen)(?:\s+bitte)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s+wie\s+folgt|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:)/i.test(
+    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:sag\s+(?:ihm|ihr|denen)(?:\s+bitte)?|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s+wie\s+folgt|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:|(?:mach(?:e)?|erstell(?:e)?|erstelle)\s+(?:eine|nen|einen)?\s*antwort|(?:mach(?:e)?|erstell(?:e)?|erstelle)\s+(?:auf|zu)\s+(?:diese|die)\s+(?:mail|e-?mail|email|nachricht)\s+(?:einen\s+)?entwurf)/i.test(
       text
     ) ||
     /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:direkt(?:e)?\s+antwort|kurze?\s+antwort|antwort\s+direkt|direkt(?:e)?\s+r[üu]ckmeldung)\b/i.test(
@@ -81,6 +81,10 @@ function hasContextualReplyShortcut(text: string): boolean {
   );
 }
 
+function hasContextPronounDirective(text: string): boolean {
+  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:sag|gib|lass)\s+(?:ihm|ihr|denen)\b/i.test(text);
+}
+
 function hasMailTargetHint(text: string): boolean {
   return (
     /\b(darauf|hierauf)\b/i.test(text) ||
@@ -91,10 +95,8 @@ function hasMailTargetHint(text: string): boolean {
 
 function hasDirectReplyTrigger(text: string): boolean {
   return (
-    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?)\s+bitte\b/i.test(text) ||
-    /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*bitte\s+(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?)\b/i.test(text) ||
-    /\b(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|schreib\s+zur(?:ue|[üu])ck)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
-    /\b(?:direkt|sofort)\s+(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|zurück)\b/i.test(text) ||
+    /\b(?:antwort(?:e|en|et)|beantwort(?:e|en|et)|zurückschreib(?:en)?|schreib\s+zur(?:ue|[üu])ck)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
+    /\b(?:direkt|sofort)\s+(?:antwort(?:e|en|et)|beantwort(?:e|en|et)|zurückschreib(?:en)?|zurück)\b/i.test(text) ||
     /\b(?:sende|schick(?:e)?)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
     /\bdirekt(?:e)?\s+antwort\b/i.test(text) ||
     /\b(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+)?)?(?:direkt|sofort)\s+wissen\b/i.test(text) ||
@@ -153,7 +155,7 @@ export function extractReplyBodyHint(
   }
 
   rest = rest.replace(
-    /^\s*(?:bitte\s+)?(?:schreib(?:e)?(?!\s+zur(?:ue|[üu])ck)|verfass(?:e)?|formulier(?:e)?)\s+(?:bitte\s+)?(?:(?:folgend(?:e|es)\s+)?(?:mail|e-?mail|email|nachricht)(?:\s+an\s+[^,.:;!?]+)?\s*)?(?:folgendes?|wie\s+folgt)?\s*[:.,\-]?\s*/i,
+    /^\s*(?:bitte\s+)?(?:schreib(?:e)?(?!\s+zur(?:ue|[üu])ck)|verfass(?:e)?|formulier(?:e)?|erstell(?:e)?|erstelle|mach(?:e)?)\s+(?:bitte\s+)?(?:(?:eine|nen|einen)?\s*antwort\s*(?:auf\s+(?:diese|die)\s+(?:mail|e-?mail|email|nachricht))?|(?:(?:folgend(?:e|es)\s+)?(?:mail|e-?mail|email|nachricht)(?:\s+an\s+[^,.:;!?]+)?\s*)|(?:auf\s+(?:diese|die)\s+(?:mail|e-?mail|email|nachricht)\s+(?:einen\s+)?entwurf\s*))?(?:folgendes?|wie\s+folgt)?\s*[:.,\-]?\s*/i,
     ""
   );
   rest = rest.replace(
@@ -168,15 +170,26 @@ export function extractReplyBodyHint(
     /^\s*(?:bitte\s+)?(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?wissen|gib\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?durch|sag\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?bescheid)\s*[:\-]?\s*/i,
     ""
   );
+  rest = rest.replace(
+    /^\s*(?:bitte\s+)?(?:sag|gib|lass)\s+(?:ihm|ihr|denen)(?:\s+bitte)?\s*(?:folgendes?|wie\s+folgt)?\s*[:.,\-]?\s*/i,
+    ""
+  );
   rest = rest.replace(/^\s*(?:direkt|sofort)\s+bescheid\b[\s,:\-]*/i, "");
-  rest = rest.replace(
-    /^\s*(?:bitte\s+)?(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?)(?:\s+bitte)?\s+(?:direkt|sofort)\s*/i,
-    ""
-  );
-  rest = rest.replace(
-    /^\s*(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?)\s*/i,
-    ""
-  );
+  const stripLeadingReplyCommands = (value: string): string => {
+    let out = value;
+    out = out.replace(
+      /^\s*(?:bitte\s+)?(?:antwort(?:e|en|et)\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b)(?:\s+bitte)?\s+(?:direkt|sofort)\s*/i,
+      ""
+    );
+    out = out.replace(
+      /^\s*(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?(?:antwort(?:e|en|et)\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b)(?:\s*[,:-]\s*)?\s*/i,
+      ""
+    );
+    return out;
+  };
+  // Versprecher/ASR-Dopplungen wie "Antworte, antworte bitte ..." robust entfernen.
+  rest = stripLeadingReplyCommands(rest);
+  rest = stripLeadingReplyCommands(rest);
   rest = rest.replace(
     /^\s*(?:sende|schick(?:e)?)\s+(?:bitte\s+)?(?:direkt|sofort)?\s*(?:zu|an)?\s*/i,
     ""
@@ -190,6 +203,11 @@ export function extractReplyBodyHint(
     ""
   );
   rest = rest.replace(/^\s*(?:bitte)\b[\s,:\-]*/i, "");
+  // Nach erneutem Strip kann "auf diese Mail ..." vorne stehen (z.B. bei Doppelkommando).
+  rest = rest.replace(
+    /^\s*(?:auf\s+(?:diese|die|die\s+ausgewählte|die\s+markierte)\s+(?:mail|e-?mail|email|nachricht)|darauf|hierauf)\s*/i,
+    ""
+  );
   rest = rest.replace(/^[\s,:\-.]+/, "").trim();
 
   return rest.length ? rest : undefined;
@@ -215,6 +233,7 @@ export function buildReplyIntentFromSelectedMailContext(
   const hasStrongReply =
     hasLeadingReplyCommand(normalized) ||
     hasContextWriteCommand(normalized) ||
+    hasContextPronounDirective(normalized) ||
     (hasReplyVerb(normalized) &&
       (hasMailTargetHint(normalized) || /\bwie\s+folgt\b/i.test(normalized) || directRequested));
   const hasShortcut = hasContextualReplyShortcut(normalized);
@@ -222,7 +241,7 @@ export function buildReplyIntentFromSelectedMailContext(
 
   let bodyHint = normalizeBodyHint(extractReplyBodyHint(normalized, selectedContext));
   if (
-    /^\s*(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?(?:antworte(?:n)?|beantworte(?:n)?|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?)(?:\s+auf\s+(?:diese|die)\s+(?:mail|e-?mail|email|nachricht))?\s*[.!?]*\s*$/i.test(
+    /^\s*(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?(?:antwort(?:e|en|et)\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b|informier(?:e|en)?\b)(?:\s+auf\s+(?:diese|die)\s+(?:mail|e-?mail|email|nachricht))?\s*[.!?]*\s*$/i.test(
       normalized
     )
   ) {
@@ -240,6 +259,11 @@ export function buildReplyIntentFromSelectedMailContext(
   const hasBodyForSend = !!bodyHint;
   const autoSend = directRequested && hasBodyForSend && !cancelRequested;
   const forcePreviewOnly = !autoSend || cancelRequested;
+  const forcePreviewOnlyReason = cancelRequested
+    ? "cancel_phrase"
+    : !hasBodyForSend
+      ? "missing_body"
+      : undefined;
 
   return {
     type: "email-compose",
@@ -254,10 +278,10 @@ export function buildReplyIntentFromSelectedMailContext(
         : "exchange-context-reply-phase-a",
       autoSend,
       forcePreviewOnly,
+      ...(forcePreviewOnlyReason && { forcePreviewOnlyReason }),
       ...(cancelRequested && {
         cancelled: true,
         disableSendPhraseDetection: true,
-        forcePreviewOnlyReason: "cancel_phrase",
       }),
       uiHint: bodyHint
         ? autoSend
