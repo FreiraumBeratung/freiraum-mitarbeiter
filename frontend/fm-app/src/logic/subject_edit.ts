@@ -12,11 +12,23 @@ export type SubjectEditIntent =
 
 const FILLER = /\b(?:bitte|noch|mal|eben)\b/gi;
 
+function stripSubjectCommandLead(raw: string): string {
+  return (raw ?? "")
+    .trim()
+    .replace(
+      /^(?:als\s+)?(?:folgendes|folgende|folgendes)\s*(?:im\s+)?(?:betreff)?\s*(?::|-)?\s*/i,
+      ""
+    )
+    .replace(/^(?:den\s+)?(?:betreff)\s*(?::|-)?\s*/i, "")
+    .trim();
+}
+
 /** trim, collapse spaces; Wörter kapitalisieren: erstes Zeichen groß, rest klein, außer ALLCAPS behalten */
 export function normalizeSubjectToken(s: string): string {
   if (!s || typeof s !== 'string') return '';
   let t = s.trim().replace(/\s+/g, ' ').replace(/[.,:;]+$/g, '').trim();
   t = t.replace(FILLER, ' ').replace(/\s+/g, ' ').trim();
+  t = stripSubjectCommandLead(t);
   if (!t) return '';
   const words = t.split(/\s+/).filter(Boolean);
   return words
@@ -97,11 +109,28 @@ export function parseSubjectEditIntent(raw: string): SubjectEditIntent | null {
     }
   }
 
+  // Umgangssprache: "den betreff guten tag" (ohne auf/zu/in)
+  {
+    const directSet = oTrim.match(/^den\s+betreff\s+(.+)$/i);
+    if (directSet?.[1]) {
+      const rawVal = directSet[1].trim();
+      const rawValNorm = normForMatch(rawVal);
+      const blocked = /^(?:losch|loesch|lösch|entfern|leer(?:en)?|hinzu|dazu|dran)\b/i.test(rawValNorm);
+      if (!blocked) {
+        const val = normalizeSubjectToken(rawVal.replace(/^(?:auf|zu|in)\s+/i, "").trim());
+        if (val.length > 0) return { type: 'email-subject-set', value: val };
+      }
+    }
+  }
+
   // SET: "ändere den betreff auf X", "betreff auf", "setze den betreff auf", "mach den betreff", "betreff lautet"
   const setReList: RegExp[] = [
-    /^(?:ändere|aendere)\s+(?:den\s+)?betreff\s+auf\s+(.+)$/i,
+    /^(?:ändere|aendere|änder|ander|andere)\s+(?:den\s+)?betreff\s+(?:auf|zu|in)\s+(.+)$/i,
     /^(?:setz|setze)\s+(?:den\s+)?betreff\s+auf\s+(.+)$/i,
+    /^(?:stell|stelle)\s+(?:den\s+)?betreff\s+auf\s+(.+)$/i,
     /^mach\s+(?:den\s+)?betreff\s+(.+)$/i,
+    /^mach\s+aus\s+dem\s+betreff\s+folgendes\s+(.+)$/i,
+    /^den\s+betreff\s+(?:auf|zu|in)\s+(.+)$/i,
     /^betreff\s+ist\s+(.+)$/i,
     /^betreff\s+auf\s+(.+)$/i,
     /^betreff\s+lautet\s+(.+)$/i,
@@ -121,6 +150,7 @@ export function parseSubjectEditIntent(raw: string): SubjectEditIntent | null {
   const appendReList: Array<{ re: RegExp; stripEnd: boolean }> = [
     { re: /^(?:füge|fuege|fuge)\s+(?:beim|im)\s+betreff\s+(.+?)\s+hinzu$/i, stripEnd: false },
     { re: /^(?:füge|fuege|fuge)\s+betreff\s+(.+?)\s+hinzu$/i, stripEnd: false },
+    { re: /^(?:füge|fuege|fuge)\s+(?:beim|im)\s+betreff\s+folgendes\s+(.+?)\s+hinzu$/i, stripEnd: false },
     { re: /^(?:häng|hänge|hängen|haeng|hange|hangen)\s+(?:beim|im)\s+betreff\s+(.+?)\s+dran$/i, stripEnd: false },
     { re: /^pack\s+(?:beim|im)\s+betreff\s+(.+?)\s+(?:dazu|hinzu|dran)$/i, stripEnd: false },
     { re: /^(?:setz|setze)\s+(?:beim|im)\s+betreff\s+(.+?)\s+(?:noch\s+)?(?:dazu|hinzu|dran)$/i, stripEnd: false },

@@ -6,6 +6,38 @@ import { describe, it, expect } from 'vitest';
 import { routeVoiceIntent } from './intent_router';
 
 describe('Subject-Edit Intents', () => {
+  it('"den betreff zu guten tag" -> email-subject-set(subject="Guten Tag")', () => {
+    const intent = routeVoiceIntent('den betreff zu guten tag');
+    expect(intent.type).toBe('email-subject-set');
+    if (intent.type === 'email-subject-set') {
+      expect(intent.payload.subject).toBe('Guten Tag');
+    }
+  });
+
+  it('"den betreff guten tag" -> email-subject-set(subject="Guten Tag")', () => {
+    const intent = routeVoiceIntent('den betreff guten tag');
+    expect(intent.type).toBe('email-subject-set');
+    if (intent.type === 'email-subject-set') {
+      expect(intent.payload.subject).toBe('Guten Tag');
+    }
+  });
+
+  it('"ändere den betreff zu guten tag" -> email-subject-set(subject="Guten Tag")', () => {
+    const intent = routeVoiceIntent('ändere den betreff zu guten tag');
+    expect(intent.type).toBe('email-subject-set');
+    if (intent.type === 'email-subject-set') {
+      expect(intent.payload.subject).toBe('Guten Tag');
+    }
+  });
+
+  it('"mach aus dem betreff folgendes guten tag" -> email-subject-replace(subject="Guten Tag")', () => {
+    const intent = routeVoiceIntent('mach aus dem betreff folgendes guten tag');
+    expect(intent.type).toBe('email-subject-replace');
+    if (intent.type === 'email-subject-replace') {
+      expect(intent.payload.subject).toBe('Guten Tag');
+    }
+  });
+
   it('"ändere den betreff auf rückruf" -> email-subject-set(subject="Rückruf")', () => {
     const intent = routeVoiceIntent('ändere den betreff auf rückruf');
     expect(intent.type).toBe('email-subject-set');
@@ -98,5 +130,13 @@ describe('Subject-Edit Intents', () => {
     const intent = routeVoiceIntent('Füge beim Betreff dringend hinzu.');
     expect(intent.type).toBe('email-subject-append');
     expect(intent.type).not.toBe('email-compose');
+  });
+
+  it('"füge im betreff folgendes dringend hinzu" -> email-subject-append(append="Dringend")', () => {
+    const intent = routeVoiceIntent('füge im betreff folgendes dringend hinzu');
+    expect(intent.type).toBe('email-subject-append');
+    if (intent.type === 'email-subject-append') {
+      expect(intent.payload.append).toBe('Dringend');
+    }
   });
 });

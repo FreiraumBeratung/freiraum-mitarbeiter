@@ -76,6 +76,8 @@ declare global {
     __fm_pending_body_replace?: string | null;
     __fm_subject_locked?: boolean;
     __fm_subject_locked_value?: string | null;
+    __fm_subject_lock_context_uid?: string | null;
+    __fm_append_followup_pending?: { ts: number } | null;
     __fm_wizard4_last_draft?: any;
     __fm_reset_mail_flow?: () => void;
     __fm_guided_mail_context?: {
@@ -116,6 +118,8 @@ function resetMailVoiceFlowState() {
   w.__fm_wizard4_last_draft = null;
   w.__fm_subject_locked = false;
   w.__fm_subject_locked_value = null;
+  w.__fm_subject_lock_context_uid = null;
+  w.__fm_append_followup_pending = null;
   w.__fm_subject_manually_edited = false;
   w.__fm_last_hint = {
     kind: "draft_reset",
@@ -2592,6 +2596,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         forceSetExplicitPrevious = currentUiSubject;
         w.__fm_subject_locked = true;
         w.__fm_subject_locked_value = intentExplicitSubjectTrimmed;
+        const activeContextUid = getSelectedMailContext()?.uid ?? null;
+        w.__fm_subject_lock_context_uid = activeContextUid ? String(activeContextUid) : null;
         (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
         console.log(`[wizard4][subject-lock] locked subject="${intentExplicitSubjectTrimmed}"`);
         console.log('[wizard4][subject] using explicitSubject from source:', subject);
@@ -3234,14 +3240,34 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       console.log(`[body-replace] composerFnsAvailable=${!!setter}, waitedMs=${totalWaitMs}, hadSetterBefore=${hadSetterBefore}`);
 
       if (setter) {
+        let bodyForApply = cleaned;
+        try {
+          const polishResult = await polishEmailBody(cleaned, { mode: "previewOnly", timeoutMs: 3000 });
+          if (polishResult.ok && typeof polishResult.body === "string" && polishResult.body.trim().length > 0) {
+            const normalized = normalizeEmailBodyAfterPolish(polishResult.body).trim();
+            if (normalized.length > 0) {
+              bodyForApply = normalized;
+            }
+          }
+          console.log("[body-replace][polish]", {
+            ok: polishResult.ok,
+            usedAi: polishResult.usedAi,
+            reason: polishResult.reason || null,
+            beforeLength: cleaned.length,
+            afterLength: bodyForApply.length,
+          });
+        } catch (err) {
+          console.warn("[body-replace][polish] failed, fallback to original replace text", err);
+        }
+
         const beforeBody = (window as any).__fm_get_mail_body?.() ?? "";
-        (window as any).__fm_set_mail_body?.(cleaned);
+        (window as any).__fm_set_mail_body?.(bodyForApply);
         await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
         const afterBody = (window as any).__fm_get_mail_body?.() ?? "";
         console.log("[body-replace] requested=", cleaned);
         console.log("[body-replace] before=", beforeBody);
         console.log("[body-replace] after=", afterBody);
-        if ((String(afterBody).trim()) === cleaned.trim()) {
+        if ((String(afterBody).trim()) === bodyForApply.trim()) {
           console.log("[body-replace] applied ok");
         } else {
           console.warn("[body-replace] mismatch detected");
@@ -3250,7 +3276,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           w.__fm_guided_mail_context = {
             ...w.__fm_guided_mail_context,
             stage: "recipient_set_choice",
-            bodyText: cleaned,
+            bodyText: bodyForApply,
             ts: Date.now(),
           };
         }
@@ -3778,6 +3804,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     if (appendText.length === 0) {
       const hintMessage = "Zusatz erkannt – sag den Text, den ich anhängen soll.";
       w.__fm_last_hint = { kind: "append_missing_text", message: hintMessage, ts: Date.now() };
+      w.__fm_append_followup_pending = { ts: Date.now() };
       console.log("[fm-voice][ui-hint] append_missing_text -> hint set");
       if (typeof window.dispatchEvent === "function") {
         window.dispatchEvent(new CustomEvent("fm-hint-update"));
@@ -3795,13 +3822,35 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // FM PATCH: Bei leerem Body Append-Anfang groß schreiben.
       const appendForApply = normalizeAppendWhenBodyEmpty(current, appendText);
       const add = normalizeAppend(appendForApply);
-      const merged = mergeBodies(current, add);
-      const lenBefore = current.length;
-      const lenAfter = merged.length;
-      setBody?.(merged);
-      console.log("[fm-voice][email-append] applied", { lenBefore, lenAfter });
-      triggerEmotion("success");
-      PartnerBotBus.say("Text hinzugefügt.");
+      (async () => {
+        try {
+          const polishResult = await polishEmailBody(add, { mode: 'previewOnly', timeoutMs: 3000 });
+          const polishedAppend =
+            polishResult.ok && typeof polishResult.body === 'string' && polishResult.body.trim().length > 0
+              ? normalizeEmailBodyAfterPolish(polishResult.body).trim()
+              : add;
+          const merged = mergeBodies(current, polishedAppend || add);
+          const lenBefore = current.length;
+          const lenAfter = merged.length;
+          setBody?.(merged);
+          w.__fm_append_followup_pending = null;
+          console.log("[fm-voice][email-append] applied", { lenBefore, lenAfter });
+          console.log("[email-append][append-guard][polish]", {
+            ok: polishResult.ok,
+            usedAi: polishResult.usedAi,
+            reason: polishResult.reason || null,
+          });
+          triggerEmotion("success");
+          PartnerBotBus.say("Text hinzugefügt.");
+        } catch (err) {
+          console.warn("[email-append][append-guard][polish] failed, fallback to raw append", err);
+          const merged = mergeBodies(current, add);
+          setBody?.(merged);
+          w.__fm_append_followup_pending = null;
+          triggerEmotion("success");
+          PartnerBotBus.say("Text hinzugefügt.");
+        }
+      })();
       return;
     }
 
@@ -3834,6 +3883,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
 
         if (typeof w.__fm_set_mail_body === 'function') {
           w.__fm_set_mail_body(finalBody);
+          w.__fm_append_followup_pending = null;
           console.log('[email-append] body updated in UI');
         }
 
@@ -4003,6 +4053,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     w.__fm_set_mail_subject(newSubject);
     w.__fm_subject_locked = true;
     w.__fm_subject_locked_value = newSubject;
+    const activeContextUid = getSelectedMailContext()?.uid ?? null;
+    w.__fm_subject_lock_context_uid = activeContextUid ? String(activeContextUid) : null;
     if (w.__fm_wizard4_last_draft && typeof w.__fm_wizard4_last_draft === "object") {
       w.__fm_wizard4_last_draft.meta = {
         ...(w.__fm_wizard4_last_draft.meta ?? {}),
@@ -4574,6 +4626,43 @@ function handleWizard2EditSubject(newSubject: string) {
   window.__fm_set_mail_subject(normalized);
 }
 
+export function syncSubjectLockWithContext(selectedContext: { uid?: string | null } | null) {
+  if (typeof window === "undefined") return;
+  const w = window as any;
+  const currentContextUid = selectedContext?.uid ? String(selectedContext.uid) : null;
+  const lockContextUid = w.__fm_subject_lock_context_uid ? String(w.__fm_subject_lock_context_uid) : null;
+
+  if (!currentContextUid) {
+    w.__fm_subject_lock_context_uid = null;
+    return;
+  }
+
+  if (!lockContextUid) {
+    w.__fm_subject_lock_context_uid = currentContextUid;
+    return;
+  }
+
+  if (lockContextUid === currentContextUid) return;
+
+  if (w.__fm_subject_locked || w.__fm_subject_manually_edited) {
+    w.__fm_subject_locked = false;
+    w.__fm_subject_locked_value = null;
+    w.__fm_subject_manually_edited = false;
+    if (w.__fm_wizard4_last_draft && typeof w.__fm_wizard4_last_draft === "object") {
+      w.__fm_wizard4_last_draft.meta = {
+        ...(w.__fm_wizard4_last_draft.meta ?? {}),
+        subjectLocked: false,
+      };
+    }
+    console.log("[wizard4][subject-lock] reset on context switch", {
+      fromContextUid: lockContextUid,
+      toContextUid: currentContextUid,
+    });
+  }
+
+  w.__fm_subject_lock_context_uid = currentContextUid;
+}
+
 export function processVoiceCommand(transcript: string, navigate: NavigateFunction) {
   const normalizeContextReplySubject = (rawSubject: string | null | undefined): string => {
     const cleaned = (rawSubject ?? "").trim();
@@ -4584,6 +4673,7 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
 
   lastTranscript = transcript; // Für Wizard4Intent-Parsing speichern
   const selectedContext = getSelectedMailContext();
+  syncSubjectLockWithContext(selectedContext);
   if (selectedContext && isExplicitContextSendConfirmation(transcript)) {
     const w = typeof window !== "undefined" ? (window as any) : null;
     const to = String(w?.__fm_get_mail_to?.() ?? "").trim();

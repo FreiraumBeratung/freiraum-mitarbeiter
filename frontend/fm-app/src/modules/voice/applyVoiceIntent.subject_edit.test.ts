@@ -36,4 +36,22 @@ describe('applyVoiceIntent subject-edit', () => {
     expect(setTo).not.toHaveBeenCalled();
     expect(setBody).not.toHaveBeenCalled();
   });
+
+  it('Subject-Set via "den betreff zu ..." ruft NUR __fm_set_mail_subject auf', async () => {
+    processVoiceCommand('den betreff zu guten tag', fakeNavigate);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(setSubject).toHaveBeenCalledWith('Guten Tag');
+    expect(setTo).not.toHaveBeenCalled();
+    expect(setBody).not.toHaveBeenCalled();
+  });
+
+  it('Subject-Set via "den betreff ..." ruft NUR __fm_set_mail_subject auf', async () => {
+    processVoiceCommand('den betreff guten tag', fakeNavigate);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(setSubject).toHaveBeenCalledWith('Guten Tag');
+    expect(setTo).not.toHaveBeenCalled();
+    expect(setBody).not.toHaveBeenCalled();
+  });
 });

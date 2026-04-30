@@ -5355,6 +5355,51 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     return { type: "unknown" };
   }
 
+  // Follow-up für "Text fortführen / ergänzen":
+  // Wenn zuvor ein Append-Trigger ohne Inhalt kam, wird die nächste freie Diktat-Äußerung
+  // als email-append behandelt (statt in Compose/AI-Fallback zu fallen).
+  {
+    const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+    const pendingAppend = !!w?.__fm_append_followup_pending;
+    if (pendingAppend) {
+      const isCancel = /^(?:abbrechen|stop|stopp|doch\s+nicht|lieber\s+doch\s+nicht)\b/i.test(text);
+      if (isCancel) {
+        w.__fm_append_followup_pending = null;
+        return { type: "unknown" };
+      }
+      const isLikelyNewCommand = /^(?:schick|sende|antworte|antwort|betreff|öffne|oeffne|zeige|lösch|loesch|reset|zuruck|zurück|entwurf)\b/i.test(text);
+      if (!isLikelyNewCommand) {
+        w.__fm_append_followup_pending = null;
+        return {
+          type: "email-append",
+          payload: { appendText: original.trim() },
+          meta: { source: "append-followup" },
+        };
+      }
+      w.__fm_append_followup_pending = null;
+    }
+  }
+
+  // Explizite Fortführen/Ergänzen-Kommandos ohne Inline-Text -> in Append-Followup-Modus wechseln.
+  {
+    const w = typeof (globalThis as any).window !== "undefined" ? ((globalThis as any).window as any) : null;
+    const composerOpen =
+      !!w &&
+      typeof w.__fm_get_mail_body === "function" &&
+      typeof w.__fm_set_mail_body === "function";
+    const lastAction = getLastAction();
+    const hasDraftContext = !!(lastAction && (lastAction.kind === "email-compose" || lastAction.kind === "email-append"));
+    const isContinuationTrigger = /^(?:text\s+(?:fortf(?:u|ü)hren|fortsetzen|weiter(?:f(?:u|ü)hren)?|hinzuf(?:u|ü)gen|erg(?:a|ä)nzen)|weiter(?:\s+diktieren)?|(?:füge|fuege|fuge)\s+hinzu|(?:ergänze|erganze))(?:[.!?]+)?$/i.test(
+      original.trim()
+    );
+    if (isContinuationTrigger && (composerOpen || hasDraftContext)) {
+      if (w) {
+        w.__fm_append_followup_pending = { ts: Date.now() };
+      }
+      return { type: "email-append", payload: { appendText: "" }, meta: { source: "append-followup-trigger" } };
+    }
+  }
+
   // Globaler Fallback für den Guided-Flow:
   // "Neuer Text" soll bei offenem/aktivem Compose-Kontext immer in den Replace-Flow gehen,
   // auch wenn der Guided-Kontext unerwartet fehlt.
