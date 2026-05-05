@@ -2,6 +2,99 @@ export async function recordAndTranscribe(
   maxMs = 6000,
   signal?: AbortSignal
 ): Promise<string | null> {
+  const downsampleTo16kMono = (input: Float32Array, sourceRate: number): Int16Array => {
+    const targetRate = 16000;
+    if (sourceRate <= 0) return new Int16Array(0);
+    const ratio = sourceRate / targetRate;
+    const length = Math.max(1, Math.floor(input.length / ratio));
+    const out = new Int16Array(length);
+    let pos = 0;
+    for (let i = 0; i < length; i += 1) {
+      const nextPos = Math.min(input.length, Math.floor((i + 1) * ratio));
+      let sum = 0;
+      let count = 0;
+      for (let j = pos; j < nextPos; j += 1) {
+        sum += input[j];
+        count += 1;
+      }
+      const sample = count > 0 ? sum / count : 0;
+      const clamped = Math.max(-1, Math.min(1, sample));
+      out[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+      pos = nextPos;
+    }
+    return out;
+  };
+
+  const pcm16ToWavBlob = (pcm: Int16Array, sampleRate: number): Blob => {
+    const channels = 1;
+    const bytesPerSample = 2;
+    const blockAlign = channels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = pcm.length * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    let offset = 0;
+    const writeStr = (text: string) => {
+      for (let i = 0; i < text.length; i += 1) {
+        view.setUint8(offset + i, text.charCodeAt(i));
+      }
+      offset += text.length;
+    };
+
+    writeStr("RIFF");
+    view.setUint32(offset, 36 + dataSize, true);
+    offset += 4;
+    writeStr("WAVE");
+    writeStr("fmt ");
+    view.setUint32(offset, 16, true);
+    offset += 4;
+    view.setUint16(offset, 1, true); // PCM
+    offset += 2;
+    view.setUint16(offset, channels, true);
+    offset += 2;
+    view.setUint32(offset, sampleRate, true);
+    offset += 4;
+    view.setUint32(offset, byteRate, true);
+    offset += 4;
+    view.setUint16(offset, blockAlign, true);
+    offset += 2;
+    view.setUint16(offset, 16, true);
+    offset += 2;
+    writeStr("data");
+    view.setUint32(offset, dataSize, true);
+    offset += 4;
+
+    for (let i = 0; i < pcm.length; i += 1) {
+      view.setInt16(offset, pcm[i], true);
+      offset += 2;
+    }
+
+    return new Blob([buffer], { type: "audio/wav" });
+  };
+
+  const toBackendWav = async (audioBlob: Blob): Promise<Blob> => {
+    try {
+      const AudioCtx =
+        (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return audioBlob;
+      const ctx = new AudioCtx();
+      try {
+        const arr = await audioBlob.arrayBuffer();
+        const decoded = await ctx.decodeAudioData(arr.slice(0));
+        const channel = decoded.numberOfChannels > 0 ? decoded.getChannelData(0) : new Float32Array(0);
+        if (!channel.length) return audioBlob;
+        const pcm = downsampleTo16kMono(channel, decoded.sampleRate);
+        if (!pcm.length) return audioBlob;
+        return pcm16ToWavBlob(pcm, 16000);
+      } finally {
+        await ctx.close().catch(() => undefined);
+      }
+    } catch {
+      return audioBlob;
+    }
+  };
+
   const fetchWithTimeout = async (url: string, init: RequestInit = {}, timeoutMs = 3000) => {
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -47,8 +140,10 @@ export async function recordAndTranscribe(
       signal?.removeEventListener("abort", abortHandler);
       if (signal?.aborted) return null;
 
+      const backendBlob = await toBackendWav(audioBlob);
+      const filename = backendBlob.type === "audio/wav" ? "voice.wav" : "voice.webm";
       const form = new FormData();
-      form.append("file", audioBlob, "voice.webm");
+      form.append("file", backendBlob, filename);
       const resp = await fetchWithTimeout(
         "http://127.0.0.1:30521/api/stt/transcribe",
         {

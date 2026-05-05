@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class STTLocal(BaseModel):
-    whisper_exe: str = os.getenv("WHISPER_EXE", "bin/whisper/main.exe")
+    whisper_exe: str = os.getenv("WHISPER_EXE", "bin/whisper/Release/whisper-cli.exe")
     whisper_model: str = os.getenv("WHISPER_MODEL", "models/whisper/ggml-small.bin")
     lang: str = os.getenv("WHISPER_LANG", "de")
     threads: int = int(os.getenv("WHISPER_THREADS", "4"))

@@ -31,6 +31,11 @@ Thumbs.db
 coverage/
 pytest_cache/
 pip-wheel-metadata/
+# Build artifacts (Electron/PyInstaller)
+backend/build/
+backend/dist/
+electron/app/
+installers/
 # Runtime/Exports/Logs
 data/
 exports/

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { BrowserRouter, HashRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import Dashboard from "./pages/Dashboard";
 import Leads from "./pages/Leads.jsx";
@@ -174,6 +174,10 @@ function Shell() {
 }
 
 export default function App() {
+  const Router =
+    typeof window !== "undefined" && window.location?.protocol === "file:"
+      ? HashRouter
+      : BrowserRouter;
   const [transitionMessage, setTransitionMessage] = useState(null);
   const transitionTimer = useRef(null);
 
@@ -191,7 +195,7 @@ export default function App() {
   }, []);
 
   return (
-    <BrowserRouter>
+    <Router>
       <div className="h-screen flex flex-col overflow-hidden bg-black text-white">
         <div className="fixed inset-0 -z-10">
           <HeroFloatCanvas />
@@ -199,6 +203,6 @@ export default function App() {
         {transitionMessage && <TransitionOverlay message={transitionMessage} />}
         <Shell />
       </div>
-    </BrowserRouter>
+    </Router>
   );
 }

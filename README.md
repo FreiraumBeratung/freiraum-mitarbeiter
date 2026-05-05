@@ -64,6 +64,16 @@ Invoke-RestMethod -Method GET -Uri "http://127.0.0.1:30521/api/system/status"
 .\scripts\dev_health.ps1
 ```
 
+### Windows Installer bauen (Electron + Backend EXE)
+```powershell
+.\scripts\pack_win.ps1
+```
+
+Voraussetzungen:
+- `backend\.venv\Scripts\python.exe` muss vorhanden sein.
+- Das Build erzeugt `assets\logo.ico` automatisch aus `assets\logo.png` oder
+  `frontend\fm-app\public\branding\freiraum-logo.png`.
+
 ## Features (TODO)
 
 - Mail-Management (IMAP/SMTP)

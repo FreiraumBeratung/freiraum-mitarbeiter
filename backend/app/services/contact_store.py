@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -180,10 +181,17 @@ class ContactStore:
 _store_instance: ContactStore | None = None
 
 
+def _cache_dir() -> Path:
+    data_dir = (os.getenv("FREIRAUM_DATA_DIR") or "").strip()
+    if data_dir:
+        return Path(data_dir) / "cache"
+    return Path(__file__).resolve().parents[2] / "data" / "cache"
+
+
 def get_contact_store() -> ContactStore:
     global _store_instance
     if _store_instance is None:
-        db_path = Path(__file__).resolve().parents[2] / "data" / "cache" / "contact_store.sqlite3"
+        db_path = _cache_dir() / "contact_store.sqlite3"
         _store_instance = ContactStore(db_path=db_path)
     return _store_instance
 

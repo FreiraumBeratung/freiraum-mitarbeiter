@@ -5,7 +5,9 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win nsis"
+    "start:dev": "set FM_ELECTRON_MODE=dev&& set FM_START_BACKEND_DEV=1&& electron .",
+    "start:renderer": "set FM_ELECTRON_MODE=dev&& electron .",
+    "build": "set FM_ELECTRON_MODE=prod&& electron-builder --win nsis"
   },
   "dependencies": {},
   "devDependencies": {
@@ -24,9 +26,20 @@
       "preload.js",
       "app/**"
     ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/backend_server",
+        "to": "backend/backend_server",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "win": {
       "target": "nsis",
-      "icon": "../assets/logo.png"
+      "icon": "../assets/logo.ico",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": true,

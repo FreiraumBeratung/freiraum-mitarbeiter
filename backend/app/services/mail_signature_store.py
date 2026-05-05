@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -7,8 +8,15 @@ from pathlib import Path
 from typing import Any
 
 
+def _cache_dir() -> Path:
+    data_dir = (os.getenv("FREIRAUM_DATA_DIR") or "").strip()
+    if data_dir:
+        return Path(data_dir) / "cache"
+    return Path(__file__).resolve().parents[2] / "data" / "cache"
+
+
 def _db_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "data" / "cache" / "mail_signatures.sqlite3"
+    return _cache_dir() / "mail_signatures.sqlite3"
 
 
 class MailSignatureStore:

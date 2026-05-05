@@ -17,10 +17,46 @@ def _backend_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _resolve_whisper_exe(root: Path) -> Path:
+    configured = root / stt_settings.local.whisper_exe
+    candidates = [
+        root / "bin/whisper/Release/whisper-cli.exe",
+        root / "bin/whisper/whisper-cli.exe",
+        configured,
+        root / "bin/whisper/Release/main.exe",
+        root / "bin/whisper/main.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return configured
+
+
+def _extract_text(parsed: dict) -> str:
+    segments = parsed.get("segments")
+    if isinstance(segments, list) and segments:
+        text = " ".join(str(seg.get("text", "")) for seg in segments if isinstance(seg, dict)).strip()
+        if text:
+            return text
+
+    transcription = parsed.get("transcription")
+    if isinstance(transcription, list) and transcription:
+        text = " ".join(str(seg.get("text", "")) for seg in transcription if isinstance(seg, dict)).strip()
+        if text:
+            return text
+
+    result = parsed.get("result")
+    if isinstance(result, dict):
+        text = str(result.get("text", "")).strip()
+        if text:
+            return text
+    return ""
+
+
 @router.get("/health")
 def health():
     root = _backend_root()
-    exe = root / stt_settings.local.whisper_exe
+    exe = _resolve_whisper_exe(root)
     model = root / stt_settings.local.whisper_model
     ok = stt_settings.provider == "local" and exe.exists() and model.exists()
     return {
@@ -38,7 +74,7 @@ async def transcribe(file: UploadFile = File(...)):
         raise HTTPException(status_code=501, detail="local stt not active")
 
     root = _backend_root()
-    exe = root / stt_settings.local.whisper_exe
+    exe = _resolve_whisper_exe(root)
     model = root / stt_settings.local.whisper_model
 
     if not exe.exists() or not model.exists():
@@ -74,7 +110,7 @@ async def transcribe(file: UploadFile = File(...)):
         if not out_json.exists():
             raise RuntimeError("whisper output missing")
         parsed = json.loads(out_json.read_text(encoding="utf-8"))
-        text = " ".join(seg.get("text", "") for seg in parsed.get("segments", [])).strip()
+        text = _extract_text(parsed)
         return {"ok": True, "text": text}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"whisper error: {exc}") from exc
