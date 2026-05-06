@@ -729,7 +729,14 @@ function isExplicitSendNowCommand(text: string): boolean {
  */
 function shouldSendNowFromSourceText(sourceText?: string): boolean {
   if (!sourceText) return false;
-  return isExplicitSendNowCommand(sourceText);
+  if (isExplicitSendNowCommand(sourceText)) {
+    return true;
+  }
+  // Umgangssprachlicher Reply-Trigger im aktiven Kontext:
+  // "Antwort direkt ...", "Antworte sofort ...", "Antwortet jetzt ..."
+  // wird wie ein expliziter SendNow-Wunsch behandelt.
+  const normalized = sourceText.trim().toLowerCase();
+  return /^\s*antwort(?:e|et)?\b[\s,.:;!?-]*(direkt|sofort|jetzt)\b/.test(normalized);
 }
 
 function isHardSendConfirmationPhrase(sourceText?: string): boolean {
@@ -1065,7 +1072,11 @@ export class VoiceController {
   }
 
   async start() {
-    const rec = getRecognition();
+    if (this.listening || this.starting) {
+      return;
+    }
+    const forceRecorderInElectron = Boolean((window as any).__fm_backend_stt_ready);
+    const rec = forceRecorderInElectron ? null : getRecognition();
 
     if (!rec) {
       console.warn("[fm-voice] SpeechRecognition nicht verfügbar – fallback auf Recorder.");
@@ -1130,7 +1141,8 @@ export class VoiceController {
       return;
     }
 
-    const rec = getRecognition();
+    const forceRecorderInElectron = Boolean((window as any).__fm_backend_stt_ready);
+    const rec = forceRecorderInElectron ? null : getRecognition();
     if (!rec || !this.listening) {
       this.setState("idle");
       return;
@@ -4724,24 +4736,34 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     selectedContext?.fromEmail &&
     intent.type === "email-compose"
   ) {
+    const explicitSendNowRequested =
+      shouldSendNowFromSourceText(transcript) || intent?.meta?.autoSend === true;
     const normalizedSubject = normalizeContextReplySubject(selectedContext.subject);
+    const nextMeta: any = {
+      ...(intent.meta ?? {}),
+      source: "exchange-context-compose-fallback",
+      uiHint: intent.meta?.uiHint || "Mail-Kontext aktiv. Ich antworte auf die ausgewählte Nachricht.",
+    };
+    if (explicitSendNowRequested) {
+      nextMeta.autoSend = true;
+      nextMeta.forcePreviewOnly = false;
+      nextMeta.forcePreviewOnlyReason = undefined;
+    } else {
+      nextMeta.forcePreviewOnly = true;
+      nextMeta.forcePreviewOnlyReason = "context_reply_default";
+    }
     intent = {
       ...intent,
       to: selectedContext.fromEmail,
       toRaw: selectedContext.fromName || selectedContext.fromEmail,
       subjectHint: normalizedSubject,
-      meta: {
-        ...(intent.meta ?? {}),
-        source: "exchange-context-compose-fallback",
-        forcePreviewOnly: true,
-        forcePreviewOnlyReason: "context_reply_default",
-        uiHint: intent.meta?.uiHint || "Mail-Kontext aktiv. Ich antworte auf die ausgewählte Nachricht.",
-      },
+      meta: nextMeta,
     };
     console.log("[fm-voice][exchange-context] compose fallback applied", {
       contextUid: selectedContext.uid,
       to: selectedContext.fromEmail,
       subjectHint: normalizedSubject,
+      explicitSendNowRequested,
     });
   }
 

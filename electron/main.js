@@ -198,10 +198,10 @@ function installRendererDiagnostics() {
                 sttHealth.provider === "local" &&
                 sttHealth.ok === true;
               if (localSttReady) {
-                window.SpeechRecognition = undefined;
-                window.webkitSpeechRecognition = undefined;
-                log("speech-recognition-disabled", "reason=local-backend-stt-active");
+                window.__fm_backend_stt_ready = true;
+                log("speech-recognition-kept", "reason=backend-stt-active-fallback-enabled");
               } else {
+                window.__fm_backend_stt_ready = false;
                 log(
                   "speech-recognition-kept",
                   "reason=backend-stt-not-ready",
@@ -437,6 +437,40 @@ function checkBackendReady() {
   });
 }
 
+function prewarmLocalStt() {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: BACKEND_HOST,
+        port: BACKEND_PORT,
+        path: "/api/stt/prewarm",
+        method: "POST",
+        timeout: 25000,
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => {
+          body += chunk.toString();
+        });
+        res.on("end", () => {
+          logMain(`[stt-prewarm] status=${res.statusCode} body=${body.slice(0, 240)}`);
+          resolve(Boolean(res.statusCode && res.statusCode < 500));
+        });
+      }
+    );
+    req.on("error", (err) => {
+      logMain(`[stt-prewarm] request-error: ${String(err)}`);
+      resolve(false);
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      logMain("[stt-prewarm] timeout");
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
 async function waitForBackend(maxMs = 25000) {
   const started = Date.now();
   while (Date.now() - started < maxMs) {
@@ -456,6 +490,9 @@ async function bootstrap() {
     await waitForBackend();
   }
   createMainWindow();
+  if (MODE !== "dev" || process.env.FM_START_BACKEND_DEV === "1") {
+    prewarmLocalStt().catch(() => undefined);
+  }
 }
 
 app.whenReady().then(() => {

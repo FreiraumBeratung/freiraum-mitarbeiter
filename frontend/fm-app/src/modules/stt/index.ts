@@ -150,7 +150,7 @@ export async function recordAndTranscribe(
           method: "POST",
           body: form,
         },
-        8000
+        18000
       );
       if (resp.ok) {
         const j = await resp.json();
