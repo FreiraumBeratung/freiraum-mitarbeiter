@@ -1,7 +1,13 @@
 export async function recordAndTranscribe(
-  maxMs = 6000,
+  maxMs = 60000,
   signal?: AbortSignal
 ): Promise<string | null> {
+  const nowMs = (): number => {
+    if (typeof performance !== "undefined" && typeof performance.now === "function") {
+      return performance.now();
+    }
+    return Date.now();
+  };
   const downsampleTo16kMono = (input: Float32Array, sourceRate: number): Int16Array => {
     const targetRate = 16000;
     if (sourceRate <= 0) return new Int16Array(0);
@@ -109,54 +115,85 @@ export async function recordAndTranscribe(
   if (signal?.aborted) return null;
   // Prefer backend STT first
   try {
+    const sttStartedAtMs = nowMs();
     const health = await fetchWithTimeout("http://127.0.0.1:30521/api/stt/health", {}, 1200).then((r) =>
       r.json()
     );
+    const healthCheckedAtMs = nowMs();
     if (health?.provider === "local" && health?.ok) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
       const chunks: BlobPart[] = [];
-      let resolved = false;
       const done = new Promise<Blob>((resolve) => {
         recorder.ondataavailable = (e) => chunks.push(e.data);
         recorder.onstop = () => resolve(new Blob(chunks, { type: "audio/webm" }));
       });
+      let resolveStopRequest: (() => void) | null = null;
+      const stopRequested = new Promise<void>((resolve) => {
+        resolveStopRequest = resolve;
+      });
       const abortHandler = () => {
-        if (resolved) return;
-        resolved = true;
-        try {
-          if (recorder.state !== "inactive") recorder.stop();
-        } catch {
-          /* ignore */
-        }
-        stream.getTracks().forEach((track) => track.stop());
+        resolveStopRequest?.();
       };
       signal?.addEventListener("abort", abortHandler, { once: true });
+      const recordStartedAtMs = nowMs();
       recorder.start();
-      await new Promise((res) => setTimeout(res, maxMs));
-      recorder.stop();
+      await Promise.race([new Promise((res) => setTimeout(res, maxMs)), stopRequested]);
+      try {
+        if (recorder.state !== "inactive") recorder.stop();
+      } catch {
+        /* ignore */
+      }
       const audioBlob = await done;
       stream.getTracks().forEach((track) => track.stop());
       signal?.removeEventListener("abort", abortHandler);
-      if (signal?.aborted) return null;
+      const recordFinishedAtMs = nowMs();
+      const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
 
       const backendBlob = await toBackendWav(audioBlob);
+      const wavReadyAtMs = nowMs();
       const filename = backendBlob.type === "audio/wav" ? "voice.wav" : "voice.webm";
       const form = new FormData();
       form.append("file", backendBlob, filename);
+      const isLikelyCommandMode = recordedMs <= 4500;
+      const sttMode = isLikelyCommandMode ? "command" : "dictation";
+      form.append("mode", sttMode);
+      const transcribeTimeoutMs = isLikelyCommandMode ? 30000 : 120000;
       const resp = await fetchWithTimeout(
         "http://127.0.0.1:30521/api/stt/transcribe",
         {
           method: "POST",
           body: form,
         },
-        18000
+        transcribeTimeoutMs
       );
+      const transcribeDoneAtMs = nowMs();
       if (resp.ok) {
         const j = await resp.json();
+        const jsonParsedAtMs = nowMs();
         const text = (j?.text || "").trim();
+        console.log("[fm-stt][timing]", {
+          mode: sttMode,
+          healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
+          recordMs: recordedMs,
+          wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),
+          transcribeMs: Math.max(0, Math.round(transcribeDoneAtMs - wavReadyAtMs)),
+          jsonMs: Math.max(0, Math.round(jsonParsedAtMs - transcribeDoneAtMs)),
+          totalMs: Math.max(0, Math.round(jsonParsedAtMs - sttStartedAtMs)),
+          textLength: text.length,
+        });
         if (text) return text;
       }
+      console.log("[fm-stt][timing]", {
+        mode: sttMode,
+        healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
+        recordMs: recordedMs,
+        wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),
+        transcribeMs: Math.max(0, Math.round(transcribeDoneAtMs - wavReadyAtMs)),
+        totalMs: Math.max(0, Math.round(transcribeDoneAtMs - sttStartedAtMs)),
+        textLength: 0,
+        emptyText: true,
+      });
     }
   } catch {
     // fall back to browser API

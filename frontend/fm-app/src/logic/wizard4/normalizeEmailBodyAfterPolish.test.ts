@@ -40,6 +40,24 @@ describe("normalizeEmailBodyAfterPolish", () => {
     const out = normalizeEmailBodyAfterPolish(input);
     expect(out).toBe("Guten Tag Thomas, ich habe eine Frage.");
   });
+
+  it("normalizes spoken clock format to digital time", () => {
+    const input = "Wir arbeiten bis 20 Uhr 30 und starten wieder um 8 05 Uhr.";
+    const out = normalizeEmailBodyAfterPolish(input);
+    expect(out).toBe("Wir arbeiten bis 20:30 Uhr und starten wieder um 8:05 Uhr.");
+  });
+
+  it("normalizes HH.MM Uhr to HH:MM Uhr", () => {
+    const input = "Der Termin ist um 20.30 Uhr und der Reminder folgt um 7.05 Uhr.";
+    const out = normalizeEmailBodyAfterPolish(input);
+    expect(out).toBe("Der Termin ist um 20:30 Uhr und der Reminder folgt um 7:05 Uhr.");
+  });
+
+  it("restores common umlaut for Doenermann/Donermann", () => {
+    const input = "Vielleicht bestellen wir noch beim Donermann etwas zu essen.";
+    const out = normalizeEmailBodyAfterPolish(input);
+    expect(out).toBe("Vielleicht bestellen wir noch beim Dönermann etwas zu essen.");
+  });
 });
 
 

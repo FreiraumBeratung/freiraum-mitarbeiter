@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { processVoiceCommand } from "./index";
+import { clearSelectedMailContext, setSelectedMailContext } from "../mail/selectedMailContext";
 
 const noop = () => {};
 const fakeNavigate = noop as any;
@@ -25,6 +26,7 @@ describe("applyVoiceIntent sentence-replace", () => {
   afterEach(() => {
     delete (globalThis as any).window.__fm_set_mail_body;
     delete (globalThis as any).window.__fm_get_mail_body;
+    clearSelectedMailContext();
     warnSpy.mockRestore();
   });
 
@@ -92,6 +94,18 @@ describe("applyVoiceIntent sentence-replace", () => {
     expect(body).toBe("Hier ist Dennis. Ich bin gerade im Termin. Ich rufe dich heute an.");
   });
 
+  it("ASR: Ersätze Satz 3 durch Ich liebe Dich", async () => {
+    processVoiceCommand("Ersätze Satz 3 durch Ich liebe Dich.", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Ich bin gerade im Termin. Ich liebe Dich.");
+  });
+
+  it('ASR: Ersätze Satz 1 durch "guten morgen" -> sauber ohne Zusatzzeichen', async () => {
+    processVoiceCommand('Ersätze Satz 1 durch "guten morgen".', fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Guten morgen. Ich bin gerade im Termin. Ich melde mich später.");
+  });
+
   it("Neu: Ersetze Satz 5 mit Test -> no-op", async () => {
     const before = body;
     processVoiceCommand("Ersetze Satz 5 mit Test", fakeNavigate);
@@ -100,6 +114,62 @@ describe("applyVoiceIntent sentence-replace", () => {
     expect(
       warnSpy.mock.calls.some((c) => String(c[0]).includes("replace-nth no-op (index out of range)"))
     ).toBe(true);
+  });
+
+  it("ASR + Kontext: 'Löschatz 2' bleibt Satz-Delete (nicht Kontext-Reply)", async () => {
+    setSelectedMailContext({
+      uid: "ctx-1",
+      messageId: "<ctx-1@test>",
+      subject: "AW: Test",
+      fromEmail: "ctx@example.com",
+      fromName: "Context User",
+    });
+
+    processVoiceCommand("Löschatz 2.", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Ich melde mich später.");
+  });
+
+  it("ASR + Kontext: 'Machaus Satz 2 ...' bleibt Satz-Replace", async () => {
+    setSelectedMailContext({
+      uid: "ctx-2",
+      messageId: "<ctx-2@test>",
+      subject: "AW: Test",
+      fromEmail: "ctx@example.com",
+      fromName: "Context User",
+    });
+
+    processVoiceCommand("Machaus Satz 2 Hallo Max.", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Hallo Max. Ich melde mich später.");
+  });
+
+  it("ASR + Kontext: 'Löschesatz 2' bleibt Satz-Delete", async () => {
+    setSelectedMailContext({
+      uid: "ctx-3",
+      messageId: "<ctx-3@test>",
+      subject: "AW: Test",
+      fromEmail: "ctx@example.com",
+      fromName: "Context User",
+    });
+
+    processVoiceCommand("Löschesatz 2", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("Hier ist Dennis. Ich melde mich später.");
+  });
+
+  it("Mini-Kommando + Kontext: 'Text löschen' bleibt Body-Clear", async () => {
+    setSelectedMailContext({
+      uid: "ctx-4",
+      messageId: "<ctx-4@test>",
+      subject: "AW: Test",
+      fromEmail: "ctx@example.com",
+      fromName: "Context User",
+    });
+
+    processVoiceCommand("Text löschen", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 260));
+    expect(body).toBe("");
   });
 });
 

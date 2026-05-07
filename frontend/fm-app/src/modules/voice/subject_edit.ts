@@ -37,6 +37,16 @@ function stripPunctuation(s: string): string {
   return (s ?? "").replace(/[.,:;!?]+$/g, "").trim();
 }
 
+function stripWrappingQuotes(s: string): string {
+  let out = (s ?? "").trim();
+  if (!out) return out;
+  // Doppelte/typografische Quotes am Rand robust entfernen.
+  out = out.replace(/^["'`„“‚‘]+/, "").replace(/["'`„“‚‘]+$/, "").trim();
+  // Falls innen nochmals doppelte Wrapper übrig bleiben, erneut strippen.
+  out = out.replace(/^["'`„“‚‘]+/, "").replace(/["'`„“‚‘]+$/, "").trim();
+  return out;
+}
+
 /** Mehrfach-Spaces innerhalb des Tokens zusammenführen. */
 function collapseSpaces(s: string): string {
   return (s ?? "").replace(/\s+/g, " ").trim();
@@ -45,7 +55,7 @@ function collapseSpaces(s: string): string {
 /** Capitalize: erster Buchstabe groß, Rest wie gesprochen. B2B bleibt B2B. */
 export function normalizeToken(token: string): string {
   if (!token || typeof token !== "string") return "";
-  let t = collapseSpaces(stripPunctuation(token));
+  let t = stripWrappingQuotes(collapseSpaces(stripPunctuation(token)));
   if (!t) return "";
   const words = t.split(/\s+/).filter(Boolean);
   return words

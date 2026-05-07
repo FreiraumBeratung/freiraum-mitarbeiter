@@ -61,6 +61,51 @@ function debugLog(...args: unknown[]) {
   console.log(...args);
 }
 
+type VoiceTiming = {
+  id: string;
+  startedAtMs: number;
+  transcriptLength: number;
+};
+
+let voiceTimingSeq = 0;
+
+function nowMs(): number {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function createVoiceTiming(transcript: string): VoiceTiming {
+  voiceTimingSeq += 1;
+  return {
+    id: `v${Date.now()}-${voiceTimingSeq}`,
+    startedAtMs: nowMs(),
+    transcriptLength: (transcript ?? "").length,
+  };
+}
+
+function logVoiceTiming(
+  timing: VoiceTiming | null | undefined,
+  stage: string,
+  extra?: Record<string, unknown>
+) {
+  if (!timing) return;
+  const elapsedMs = Math.max(0, Math.round(nowMs() - timing.startedAtMs));
+  const payload = {
+    id: timing.id,
+    stage,
+    elapsedMs,
+    transcriptLength: timing.transcriptLength,
+    ...(extra ?? {}),
+  };
+  // Flache String-Ausgabe, damit in DevTools keine unlesbare [Object]-Ansicht entsteht.
+  console.log(
+    `[fm-voice][timing] id=${payload.id} stage=${payload.stage} elapsedMs=${payload.elapsedMs} transcriptLength=${payload.transcriptLength}`
+  );
+  console.log("[fm-voice][timing][json]", JSON.stringify(payload));
+}
+
 declare global {
   interface Window {
     __fm_set_mail_body?: (text: string) => void;
@@ -106,6 +151,7 @@ debugLog('[fm-voice] Mail-Flow reset global registriert.');
 // AutoSend 4.0 – globales Flag
 const WIZARD4_AUTOSEND_ENABLED = true;
 let pendingEmailSendConfirmationUntil = 0;
+let allowNextEmailSendWithoutExtraConfirmationUntil = 0;
 
 const BACKEND = "http://127.0.0.1:30521";
 
@@ -113,6 +159,7 @@ function resetMailVoiceFlowState() {
   if (typeof window === "undefined") return;
   const w = window as any;
   pendingEmailSendConfirmationUntil = 0;
+  allowNextEmailSendWithoutExtraConfirmationUntil = 0;
   w.__fm_pending_body_replace = null;
   w.__fm_guided_mail_context = null;
   w.__fm_wizard4_last_draft = null;
@@ -735,9 +782,224 @@ function shouldSendNowFromSourceText(sourceText?: string): boolean {
   // Umgangssprachlicher Reply-Trigger im aktiven Kontext:
   // "Antwort direkt ...", "Antworte sofort ...", "Antwortet jetzt ..."
   // wird wie ein expliziter SendNow-Wunsch behandelt.
-  const normalized = sourceText.trim().toLowerCase();
-  return /^\s*antwort(?:e|et)?\b[\s,.:;!?-]*(direkt|sofort|jetzt)\b/.test(normalized);
+  const normalized = sourceText.trim().toLowerCase().replace(/\s+/g, " ");
+  // „Antwort ist sofort/direkt/jetzt“ (ASR) gleichwertig zu „Antwort sofort …“
+  return /^\s*antwort(?:e|et|en)?(?:\s+ist)?\s*[\s,.:;!?-]*(direkt|sofort|jetzt)\b/.test(
+    normalized
+  );
 }
+
+function normalizeTranscriptForRouting(transcript: string): string {
+  const raw = (transcript ?? "").toString();
+  if (!raw.trim()) return raw;
+  let normalized = raw.trim();
+
+  // ASR-Aliase für Bearbeitungsbefehle im Composer.
+  // Nur am Kommandoanfang normalisieren, um Freitext nicht zu verfälschen.
+  normalized = normalized
+    .replace(/^\s*ersätze\b/i, "ersetze")
+    .replace(/^\s*(?:bitte\s+)?(?:lösch|loesch|losch)e?\s*satz\b/i, (m) =>
+      m.replace(/e?\s*satz\b/i, " satz")
+    )
+    .replace(/^\s*(?:bitte\s+)?(?:lösch|loesch|losch)e?\s*esatz\b/i, (m) =>
+      m.replace(/e?\s*esatz\b/i, " satz")
+    )
+    .replace(/^\s*(?:bitte\s+)?(?:lösch|loesch|losch)\s*atz\b/i, (m) =>
+      m.replace(/(?:atz)\b/i, " satz")
+    )
+    .replace(/^\s*(?:bitte\s+)?(?:lösch|loesch|losch)satz\b/i, (m) =>
+      m.replace(/satz\b/i, " satz")
+    )
+    .replace(/^\s*(?:bitte\s+)?(?:lösch|loesch|losch)\s+aus\b/i, (m) =>
+      m.replace(/\saus\b/i, " satz")
+    )
+    .replace(/^\s*machaus\b/i, "mach aus")
+    .replace(/^\s*mach\s+ausatz\b/i, "mach aus satz")
+    .replace(/^\s*mach\s+aussatz\b/i, "mach aus satz")
+    .replace(/^\s*aussatz\s+(\d{1,2})\b/i, "aus satz $1")
+    .replace(/^\s*ausatz\s+(\d{1,2})\b/i, "aus satz $1")
+    .replace(/^\s*ersetzte\b/i, "ersetze")
+    .replace(/^\s*aendere\b/i, "ändere")
+    .replace(/^\s*andere\b(?=\s+(?:im|den)\s+betreff\b)/i, "ändere")
+    .replace(/^\s*ander\b(?=\s+(?:im|den)\s+betreff\b)/i, "ändere")
+    .replace(/^\s*änder\s+im\s+betreff\b/i, "ändere im betreff")
+    .replace(/^\s*ändere\s+im\s+betreff\b/i, "ändere den betreff")
+    .replace(/^\s*(?:bitte\s+)?(?:im|den)\s+betreff\b/i, "ändere den betreff")
+    .replace(/^\s*neue\s+texte?\b/i, "neuer text")
+    .replace(/^\s*neuer\s+texte\b/i, "neuer text")
+    .replace(/^\s*zenden\b/i, "senden");
+
+  // ASR: „folgende Nachricht am Peter“ ≈ „folgende Nachricht an Peter“
+  normalized = normalized.replace(/\bfolgende\s+nachricht\s+am\b/gi, "folgende nachricht an");
+
+  // ASR: „Antwort ist direkt/sofort/jetzt …“ → „Antwort direkt|sofort|jetzt …“ (Komma/Zeilenumbruch nach Adverb bleiben)
+  normalized = normalized.replace(
+    /^\s*antwort(?:e|et|en)?\s+ist\s+(direkt|sofort|jetzt)(\b[\s,.:;!?-]*)/i,
+    (_m, adv: string, tail: string) => `Antwort ${String(adv).toLowerCase()}${tail}`
+  );
+
+  // ASR-Korrektur für Reply-Befehle:
+  // "Worte direkt/sofort/jetzt ..." -> "Antwort direkt/sofort/jetzt ..."
+  normalized = normalized.replace(
+    /^\s*worte?\b(?=\s+(direkt|sofort|jetzt)\b)/i,
+    "Antwort"
+  );
+  // "im betreff X durch Y" -> expliziter Replace-Part-Befehl,
+  // damit es nicht in allgemeine Compose-Fallbacks kippt.
+  normalized = normalized.replace(
+    /^\s*im\s+betreff\s+(.+?)\s+durch\s+(.+)\s*$/i,
+    (_m, fromPart: string, toPart: string) =>
+      `ersetze im betreff ${String(fromPart).trim()} durch ${String(toPart).trim()}`
+  );
+  normalized = normalized.replace(
+    /^\s*ändere\s+den\s+betreff\s+(.+?)\s+durch\s+(.+)\s*$/i,
+    (_m, fromPart: string, toPart: string) =>
+      `ersetze im betreff ${String(fromPart).trim()} durch ${String(toPart).trim()}`
+  );
+  normalized = normalized.replace(
+    /^\s*im\s+betreff\s+(.+?)\s+zu\s+(.+)\s*$/i,
+    (_m, fromPart: string, toPart: string) =>
+      `ersetze im betreff ${String(fromPart).trim()} durch ${String(toPart).trim()}`
+  );
+  normalized = normalized.replace(
+    /^\s*ändere\s+(?:im|den)\s+betreff\s+(.+?)\s+zu\s+(.+)\s*$/i,
+    (_m, fromPart: string, toPart: string) =>
+      `ersetze im betreff ${String(fromPart).trim()} durch ${String(toPart).trim()}`
+  );
+  return normalized;
+}
+
+function isComposerPriorityIntentType(type: VoiceIntent["type"]): boolean {
+  return [
+    "email-send",
+    "mail-body-clear",
+    "mail-draft-reset",
+    "email-subject-set",
+    "email-subject-append",
+    "email-subject-clear",
+    "email-subject-replace",
+    "email-subject-replace-part",
+    "email-body-replace-all",
+    "email-body-delete-last-sentence",
+    "sentence-delete-last-n",
+    "sentence-delete-nth",
+    "sentence-insert-nth",
+    "sentence-replace-first",
+    "sentence-replace-last",
+    "sentence-replace-nth",
+    "sentence-replace-n",
+    "email-body-replace-first-sentence",
+  ].includes(type);
+}
+
+function isLikelyNoiseUtterance(input: string): boolean {
+  const raw = (input ?? "").toString().trim();
+  if (!raw) return true;
+  const alnum = raw.replace(/[^A-Za-z0-9ÄÖÜäöüß]/g, "");
+  if (alnum.length <= 1) return true;
+  return false;
+}
+
+function isLikelyMisheardComposerCommand(input: string): boolean {
+  const text = (input ?? "").toString().trim().toLowerCase().replace(/\s+/g, " ");
+  if (!text) return false;
+  return [
+    /^löschersatz\b/,
+    /^loeschersatz\b/,
+    /^loschersatz\b/,
+    /^ersätze\s+satz\b/,
+    /^ersaetze\s+satz\b/,
+    /^löschersatz\s+\d{1,2}\b/,
+  ].some((pattern) => pattern.test(text));
+}
+
+function isMiniCommandIntentType(type: VoiceIntent["type"]): boolean {
+  return [
+    "mail-body-clear",
+    "mail-draft-reset",
+    "email-send",
+    "email-subject-set",
+    "email-subject-append",
+    "email-subject-clear",
+    "email-subject-replace",
+    "email-subject-replace-part",
+    "email-body-replace-all",
+    "email-body-delete-last-sentence",
+    "sentence-delete-last-n",
+    "sentence-delete-nth",
+    "sentence-insert-nth",
+    "sentence-replace-first",
+    "sentence-replace-last",
+    "sentence-replace-nth",
+    "sentence-replace-n",
+    "email-body-replace-first-sentence",
+  ].includes(type);
+}
+
+function isLikelyMiniCommandText(input: string): boolean {
+  const text = (input ?? "").toString().trim().toLowerCase().replace(/\s+/g, " ");
+  if (!text) return false;
+  if (text.length <= 42) {
+    if (
+      /^(?:text|satz)\s+(?:löschen|loeschen|loschen)\b/.test(text) ||
+      /^(?:lösche|loesche|losche)\s+satz\s+\d{1,2}\b/.test(text) ||
+      /^aus\s+satz\s+\d{1,2}\b/.test(text) ||
+      /^betreff\s+(?:löschen|loeschen|loschen)\b/.test(text)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveMiniCommandIntentFromText(input: string): VoiceIntent | null {
+  const text = (input ?? "").toString().trim().toLowerCase().replace(/\s+/g, " ");
+  if (!text) return null;
+
+  if (
+    /^(?:text|mailtext|mail text)\s+(?:löschen|loeschen|loschen)\.?$/.test(text) ||
+    /^(?:lösche|loesche|losche)\s+(?:den\s+)?(?:text|mailtext|mail text)\b/.test(text)
+  ) {
+    return { type: "mail-body-clear" };
+  }
+
+  if (/^betreff\s+(?:löschen|loeschen|loschen)\.?$/.test(text)) {
+    return { type: "email-subject-clear", payload: {} };
+  }
+
+  return null;
+}
+
+function isLikelyTruncatedDictation(text?: string): boolean {
+  const value = (text ?? "").toString().trim();
+  if (!value) return false;
+  if (value.length < 80) return false;
+  return value.endsWith("...") || value.endsWith("…");
+}
+
+function getDynamicPolishTimeoutMs(mode: "sendNow" | "previewOnly", bodyLength: number): number {
+  const len = Math.max(0, bodyLength | 0);
+  if (mode === "sendNow") {
+    if (len <= 120) return 5000;
+    if (len <= 300) return 12000;
+    if (len <= 700) return 22000;
+    return 30000;
+  }
+  if (len <= 120) return 3000;
+  if (len <= 300) return 6000;
+  return 10000;
+}
+
+function normalizeFallbackBodyForSend(rawBody: string): string {
+  const input = (rawBody ?? "").toString();
+  if (!input.trim()) return input;
+  let out = normalizeEmailBodyAfterPolish(input);
+  out = stripLeadingFillerWords(out);
+  out = ensureTerminalPunctuation(out);
+  return out.trim();
+}
+
+const FAST_PATH_POLISH_MAX_BODY_LENGTH = 180;
 
 function isHardSendConfirmationPhrase(sourceText?: string): boolean {
   if (!sourceText) return false;
@@ -1058,6 +1320,8 @@ export class VoiceController {
   private listening = false;
   private starting = false;
   private cancelStart = false;
+  private recorderAbortController: AbortController | null = null;
+  private routeStartedAtMs = 0;
 
   setState(s: VoiceState) {
     this.state = s;
@@ -1082,7 +1346,16 @@ export class VoiceController {
       console.warn("[fm-voice] SpeechRecognition nicht verfügbar – fallback auf Recorder.");
       this.listening = true;
       this.setState("listening");
-      const text = await recordAndTranscribe(6000);
+      const sttStartedAtMs = nowMs();
+      const controller = new AbortController();
+      this.recorderAbortController = controller;
+      const text = await recordAndTranscribe(60000, controller.signal);
+      if (this.recorderAbortController === controller) {
+        this.recorderAbortController = null;
+      }
+      console.log(
+        `[fm-voice][timing] stage=stt-fallback-finished elapsedMs=${Math.max(0, Math.round(nowMs() - sttStartedAtMs))} textLength=${(text ?? "").length}`
+      );
       this.listening = false;
       if (text) {
         this.handleTranscript(text);
@@ -1144,6 +1417,10 @@ export class VoiceController {
     const forceRecorderInElectron = Boolean((window as any).__fm_backend_stt_ready);
     const rec = forceRecorderInElectron ? null : getRecognition();
     if (!rec || !this.listening) {
+      if (!rec && this.recorderAbortController) {
+        this.recorderAbortController.abort();
+        this.recorderAbortController = null;
+      }
       this.setState("idle");
       return;
     }
@@ -1223,15 +1500,17 @@ export class VoiceController {
 
   async route(text: string) {
     this.setState("acting");
+    this.routeStartedAtMs = nowMs();
     try {
-      const intent = parseIntentDE(text || "");
+      const routingText = normalizeTranscriptForRouting(text || "");
+      const intent = parseIntentDE(routingText);
 
       if (intent.type === "lead_hunt" && (intent.payload.category || intent.payload.location)) {
         try {
           const osmResp = await fetch(`${BACKEND}/voice/intent`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({ text: routingText }),
           })
             .then((r) => r.json())
             .catch(() => null);
@@ -1282,7 +1561,7 @@ export class VoiceController {
         // zur Reminder-/Termin-Logik und darf NICHT im E-Mail-Kontext (Wizard 2/3) ausgelöst werden.
         
         // Prüfung: Wenn E-Mail-Kontext vorhanden ist, KEINEN Reminder setzen
-        const lowerText = (text || "").toLowerCase();
+        const lowerText = routingText.toLowerCase();
         const isEmailKeywordInText =
           lowerText.includes("mail") ||
           lowerText.includes("e-mail") ||
@@ -1353,6 +1632,9 @@ export class VoiceController {
       }
       return;
     } finally {
+      console.log(
+        `[fm-voice][timing] stage=route-finished elapsedMs=${Math.max(0, Math.round(nowMs() - this.routeStartedAtMs))} state=${this.state}`
+      );
       if (this.state !== "error") {
         this.setState("done");
       }
@@ -1437,6 +1719,10 @@ function applyEmailToComposeUI(params: {
 }
 
 function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
+  const timing = ((intent as any)?.meta?.__fmTiming ?? null) as VoiceTiming | null;
+  const timingMark = (stage: string, extra?: Record<string, unknown>) =>
+    logVoiceTiming(timing, stage, extra);
+  timingMark("applyVoiceIntent-enter", { intentType: intent.type });
   debugLog("[fm-voice] intent result:", intent);
 
   if (intent.type === "navigate") {
@@ -1576,10 +1862,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
   }
 
   if (intent.type === "email-compose") {
+    timingMark("email-compose-enter");
     console.log("[fm-voice] email-compose intent:", intent);
     
     // WICHTIG: Ganzer Block wird in async IIFE gepackt, damit Resolver awaited werden kann
     (async () => {
+      const composeStartedAtMs = nowMs();
       const w = window as any;
       let didAutoSend = false;
       let completionSpoken = false;
@@ -1596,6 +1884,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         ? (intent as any).sourceText
         : (lastTranscript || intent.bodyHint || intent.toRaw || "");
       if (isFollowUpSendCurrentDraft(rawTextForFollowUp)) {
+        timingMark("email-compose-followup-send-check");
         if (typeof w.__fm_send_mail_now === 'function') {
           try {
             w.__fm_send_mail_now();
@@ -1621,6 +1910,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         !!(intent as any)?.meta?.autoSend &&
         /^(?:jetzt|sofort)\s+senden$/.test(normalizedSendText);
       if (isPureSendConfirmation && isUiDraftAvailable() && w) {
+        timingMark("email-compose-pure-send-confirmation");
         const safeTo = typeof w.__fm_get_mail_to === "function" ? String(w.__fm_get_mail_to() || "").trim() : "";
         const safeBody = typeof w.__fm_get_mail_body === "function" ? String(w.__fm_get_mail_body() || "").trim() : "";
         if (!safeTo || !safeBody) {
@@ -1629,8 +1919,14 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         }
         const now = Date.now();
         const hardConfirmation = isHardSendConfirmationPhrase(rawTextForFollowUp);
-        if (!hardConfirmation && pendingEmailSendConfirmationUntil < now) {
-          pendingEmailSendConfirmationUntil = now + 10000;
+        const consumeBypass =
+          allowNextEmailSendWithoutExtraConfirmationUntil >= now;
+        if (consumeBypass) {
+          allowNextEmailSendWithoutExtraConfirmationUntil = 0;
+        }
+        if (!hardConfirmation && !consumeBypass && pendingEmailSendConfirmationUntil < now) {
+          // 10s war bei lokaler STT zu knapp und führte zu Nachfrage-Loops.
+          pendingEmailSendConfirmationUntil = now + 30000;
           PartnerBotBus.say("Sicherheitscheck: Bitte bestätige mit 'jetzt senden' oder 'sofort senden'.");
           return;
         }
@@ -1681,6 +1977,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       let wizard4Draft: any = null;
       
       if (rawText && typeof w.buildWizard4EmailFromInput === 'function') {
+        timingMark("email-compose-draft-build-start");
         try {
           wizard4Draft = w.buildWizard4EmailFromInput(rawText);
           // sourceText wird bereits in buildWizard4EmailFromInput gesetzt
@@ -1831,6 +2128,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           w.__fm_wizard4_last_draft = wizard4Draft;
         } catch (err) {
           console.error('[fm-voice][wizard4] Fehler beim Bauen des Wizard4EmailDraft:', err);
+        } finally {
+          timingMark("email-compose-draft-build-finished", {
+            composeElapsedMs: Math.max(0, Math.round(nowMs() - composeStartedAtMs)),
+            hasDraft: !!wizard4Draft,
+          });
         }
       } else {
         console.log(
@@ -1873,12 +2175,40 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         const emailIntent: any = intent;
         const statusMeta = emailIntent?.meta?.statusEmail;
         const freeDictationMeta = emailIntent?.meta?.freeDictationMeta || null;
+        const hasExplicitSendNowPhrase = shouldSendNowFromSourceText(wizard4Draft.sourceText);
         
         // Standard: immer erstmal auf "previewOnly"
         let sendMode: "previewOnly" | "sendNow" = "previewOnly";
-        if (emailIntent?.meta?.forcePreviewOnly || emailIntent?.meta?.cancelled || emailIntent?.meta?.disableSendPhraseDetection) {
+        const forcePreviewReason = emailIntent?.meta?.forcePreviewOnlyReason;
+        const forcePreviewReasonText = String(forcePreviewReason || "").trim().toLowerCase();
+        const intentSourceText = String(emailIntent?.meta?.source || "").trim().toLowerCase();
+        const isContextReplyPreviewReason =
+          forcePreviewReasonText === "context_reply_default" ||
+          forcePreviewReasonText.startsWith("context_reply_");
+        const allowExplicitSendOverride =
+          hasExplicitSendNowPhrase &&
+          emailIntent?.meta?.cancelled !== true &&
+          emailIntent?.meta?.disableSendPhraseDetection !== true &&
+          (isContextReplyPreviewReason ||
+            intentSourceText.includes("exchange-context") ||
+            intentSourceText.includes("reply-context"));
+        if (allowExplicitSendOverride) {
+          sendMode = "sendNow";
+          console.log("[autosend] sendMode = sendNow (explicit phrase overrides context preview)", {
+            sourceText: wizard4Draft.sourceText,
+            forcePreviewOnlyReason: forcePreviewReason || null,
+            source: emailIntent?.meta?.source || null,
+          });
+        } else if (emailIntent?.meta?.forcePreviewOnly || emailIntent?.meta?.cancelled || emailIntent?.meta?.disableSendPhraseDetection) {
           sendMode = "previewOnly";
-          console.log('[autosend] forced previewOnly (cancel/forcePreviewOnly)');
+          console.log("[autosend] forced previewOnly (cancel/forcePreviewOnly)", {
+            forcePreviewOnly: !!emailIntent?.meta?.forcePreviewOnly,
+            forcePreviewOnlyReason: forcePreviewReason || null,
+            cancelled: !!emailIntent?.meta?.cancelled,
+            disableSendPhraseDetection: !!emailIntent?.meta?.disableSendPhraseDetection,
+            source: emailIntent?.meta?.source || null,
+            sourceText: wizard4Draft.sourceText,
+          });
         }
         // FIX 4: PRIORITÄT 1 - Intent-Meta autoSend (für ALLE Intent-Typen, auch Free-Dictation)
         // Dies muss ZUERST geprüft werden, damit es sich durchsetzt
@@ -1938,6 +2268,26 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             console.log('[wizard4][safety-pronoun] AutoSend cancelled (final check): pronoun detected:', finalToName);
           }
         }
+        if (sendMode === "sendNow") {
+          const truncationCandidate =
+            String((intent as any)?.bodyHint ?? "").trim() ||
+            String((wizard4Draft as any)?.body ?? "").trim() ||
+            String(wizard4Draft.sourceText ?? "").trim();
+          if (isLikelyTruncatedDictation(truncationCandidate)) {
+            sendMode = "previewOnly";
+            (intent as any).meta = {
+              ...((intent as any).meta ?? {}),
+              forcePreviewOnly: true,
+              forcePreviewOnlyReason: "suspected_truncated_dictation",
+              uiHint:
+                "Das Diktat wirkt abgeschnitten. Bitte fortsetzen mit 'Neuer Text' oder erneut vollständig diktieren.",
+            };
+            console.log("[autosend] forced previewOnly (suspected truncated dictation)", {
+              preview: truncationCandidate.slice(Math.max(0, truncationCandidate.length - 120)),
+              length: truncationCandidate.length,
+            });
+          }
+        }
         
         wizard4Draft.sendMode = sendMode;
         console.log('[autosend] final sendMode:', wizard4Draft.sendMode, 'sourceText:', wizard4Draft.sourceText);
@@ -1971,6 +2321,15 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             ts: Date.now()
           };
           console.log("[wizard4][ui-hint] missing_body -> hint set");
+        } else if (emailIntent?.meta?.forcePreviewOnlyReason === "suspected_truncated_dictation") {
+          (window as any).__fm_last_hint = {
+            kind: "truncated_dictation",
+            message:
+              emailIntent.meta.uiHint ||
+              "Das Diktat wirkt abgeschnitten. Bitte fortsetzen mit 'Neuer Text' oder erneut vollständig diktieren.",
+            ts: Date.now(),
+          };
+          console.log("[wizard4][ui-hint] suspected_truncated_dictation -> hint set");
         } else if (metaAutoSend && isPreviewOnly && !isExplicitPreviewIntent && !hasCancelPhrase) {
           // Setze window-Flag für UI-Hinweis
           (window as any).__fm_last_hint = {
@@ -2047,7 +2406,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         }
         
         // Schritt 3: Contact Resolver (nur wenn noch keine E-Mail vorhanden) - JETZT MIT AWAIT
+        const resolverStartedAtMs = nowMs();
         if (!finalToEmail && finalNameForResolver && finalNameForResolver.trim()) {
+          timingMark("email-compose-resolver-start", {
+            resolverInput: finalNameForResolver,
+          });
           console.log('[fm-voice][wizard4][contact-resolver] Versuche Kontakt aufzulösen:', finalNameForResolver);
           
           try {
@@ -2162,6 +2525,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             // Fehler nicht blockierend, wir versuchen es einfach nicht
           }
         }
+        timingMark("email-compose-resolver-finished", {
+          resolverMs: Math.max(0, Math.round(nowMs() - resolverStartedAtMs)),
+          recipientResolutionState,
+          hasFinalToEmail: !!finalToEmail,
+        });
         
         // AutoSend-safe Normalisierung
         safeAutoSendEmail = normalizeEmailForAutoSend(finalToEmail || primary || '');
@@ -2772,25 +3140,46 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         !isStatusBrainForPolish && // Status-Brain Templates nicht polishen
         !hasStatusBrainTemplateForPolish && // Doppelt sicher
         !isMissingBodyOrTooShort; // missing_body oder Body zu kurz → kein API-Call, Body bleibt leer
+      const shouldUseFastPathLocalNormalization =
+        shouldPolish && rawBodyForPolish.trim().length <= FAST_PATH_POLISH_MAX_BODY_LENGTH;
       
       // Starte Polish früh (parallel), speichere Promise
       let polishPromise: Promise<any> | null = null;
-      if (shouldPolish) {
+      let polishStartedAtMs = 0;
+      if (shouldPolish && !shouldUseFastPathLocalNormalization) {
         const sendMode = wizard4Draft.sendMode || 'previewOnly';
         const mode = sendMode === 'sendNow' ? 'sendNow' : 'previewOnly';
-        // Timeout: sendNow bekommt 3500ms (wie gefordert), previewOnly 3000ms
-        const timeoutMs = mode === 'sendNow' ? 3500 : 3000;
+        const timeoutMs = getDynamicPolishTimeoutMs(mode, rawBodyForPolish.length);
         
+        polishStartedAtMs = nowMs();
+        timingMark("email-compose-polish-start", {
+          mode,
+          timeoutMs,
+          bodyLength: rawBodyForPolish.length,
+        });
         console.log('[wizard4][ai-polish] Starte Polish früh (parallel)', { mode, timeoutMs, bodyLength: rawBodyForPolish.length });
         polishPromise = polishEmailBody(rawBodyForPolish, { mode, timeoutMs });
       } else {
-        if (isMissingBodyOrTooShort) {
+        if (shouldUseFastPathLocalNormalization) {
+          console.log('[wizard4][ai-polish] skipped (fast-path local normalization)', {
+            bodyLength: rawBodyForPolish.length,
+            threshold: FAST_PATH_POLISH_MAX_BODY_LENGTH,
+          });
+        } else if (isMissingBodyOrTooShort) {
           console.log('[wizard4][ai-polish] skipped (missing_body or too_short)');
         } else if (isStatusBrainForPolish || hasStatusBrainTemplateForPolish) {
           console.log('[wizard4][ai-polish] skipped - Status-Brain Template (kein Polish nötig)');
         } else {
           console.log('[wizard4][ai-polish] skipped - body empty or other reason');
         }
+      }
+      if (!polishPromise) {
+        timingMark("email-compose-polish-skipped", {
+          shouldUseFastPathLocalNormalization,
+          isMissingBodyOrTooShort,
+          isStatusBrainForPolish,
+          hasStatusBrainTemplateForPolish,
+        });
       }
       
       // ============================================================
@@ -2838,7 +3227,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               if (shouldRetryPolish) {
                 console.log('[wizard4][ai-polish] Timeout bei sendNow, versuche Retry mit kürzerem Prompt', { bodyLength: rawBodyForUi.length });
                 try {
-                  polishResult = await polishEmailBody(rawBodyForUi, { mode: 'sendNow', timeoutMs: 2200, shortPrompt: true });
+                  const retryTimeoutMs = getDynamicPolishTimeoutMs('sendNow', Math.max(40, Math.floor(rawBodyForUi.length * 0.55)));
+                  polishResult = await polishEmailBody(rawBodyForUi, { mode: 'sendNow', timeoutMs: retryTimeoutMs, shortPrompt: true });
                 } catch (retryErr) {
                   console.warn('[wizard4][ai-polish] Retry fehlgeschlagen, verwende Original', retryErr);
                   // polishResult bleibt beim ursprünglichen Ergebnis (ok: false)
@@ -2892,6 +3282,19 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             } else {
               // Fallback: Verwende Original-Body
               finalBodyForUi = rawBodyForUi;
+              const shouldUseLocalFallbackNormalization =
+                isSendNow && (polishResult.reason === "timeout" || polishResult.reason === "error");
+              if (shouldUseLocalFallbackNormalization) {
+                const locallyNormalized = normalizeFallbackBodyForSend(finalBodyForUi);
+                if (locallyNormalized && locallyNormalized !== finalBodyForUi) {
+                  console.log("[wizard4][ai-polish] local fallback normalization applied", {
+                    reason: polishResult.reason,
+                    beforeLength: finalBodyForUi.length,
+                    afterLength: locallyNormalized.length,
+                  });
+                  finalBodyForUi = locallyNormalized;
+                }
+              }
               
               // Safety-Net: Entferne führendes "An <Name>." auch im no-polish Fallback
               const recipientHints = [
@@ -2928,6 +3331,18 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             // DEFENSIV: Bei jedem Fehler Fallback auf Original, keine Exceptions werfen
             console.error('[wizard4][ai-polish] error during polishing, using original body:', err);
             finalBodyForUi = rawBodyForUi; // Sicherstellen, dass finalBodyForUi gesetzt ist
+            const sendMode = wizard4Draft.sendMode || 'previewOnly';
+            const isSendNow = sendMode === 'sendNow';
+            if (isSendNow) {
+              const locallyNormalized = normalizeFallbackBodyForSend(finalBodyForUi);
+              if (locallyNormalized && locallyNormalized !== finalBodyForUi) {
+                finalBodyForUi = locallyNormalized;
+                console.log("[wizard4][ai-polish] local fallback normalization applied after exception", {
+                  beforeLength: rawBodyForUi.length,
+                  afterLength: finalBodyForUi.length,
+                });
+              }
+            }
             
             // Safety-Net: Entferne führendes "An <Name>." auch im Error-Fallback
             const recipientHints = [
@@ -2937,13 +3352,31 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             ].filter(Boolean) as string[];
             
             finalBodyForUi = stripLeadingAnRecipient(finalBodyForUi, recipientHints);
-            
-            const sendMode = wizard4Draft.sendMode || 'previewOnly';
-            const isSendNow = sendMode === 'sendNow';
             if (isSendNow) {
               console.warn('[wizard4][ai-polish] fallback -> sending without polish (sendNow=true, exception occurred):', err.message || 'unknown');
             }
           }
+        }
+        if (!polishPromise && shouldUseFastPathLocalNormalization) {
+          const fastPathBody = normalizeFallbackBodyForSend(rawBodyForUi);
+          if (fastPathBody && fastPathBody !== rawBodyForUi) {
+            finalBodyForUi = fastPathBody;
+            console.log('[wizard4][ai-polish] fast-path local normalization applied', {
+              beforeLength: rawBodyForUi.length,
+              afterLength: fastPathBody.length,
+            });
+          }
+        }
+        if (polishPromise) {
+          timingMark("email-compose-polish-finished", {
+            polishMs: Math.max(0, Math.round(nowMs() - polishStartedAtMs)),
+            usedFastPath: false,
+          });
+        } else {
+          timingMark("email-compose-polish-finished", {
+            polishMs: 0,
+            usedFastPath: shouldUseFastPathLocalNormalization,
+          });
         }
         
         // ============================================================
@@ -3011,6 +3444,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         if (wizard4Draft) {
           wizard4Draft.body = finalBodyForUi;
         }
+        const uiSetStartedAtMs = nowMs();
         
         // Setze E-Mail-Felder über Helper-Funktion mit Wizard4-Daten (mit poliertem Body)
         applyEmailToComposeUI({
@@ -3018,6 +3452,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           subject: subject,
           body: finalBodyForUi,
           logPrefix: "[fm-voice] email-compose (Wizard4)",
+        });
+        timingMark("email-compose-ui-set-finished", {
+          uiSetMs: Math.max(0, Math.round(nowMs() - uiSetStartedAtMs)),
+          hasTo: !!finalToEmail,
+          hasSubject: !!subject,
+          bodyLength: finalBodyForUi.length,
         });
         if (forceSetExplicitCurrentCompose && typeof w.__fm_set_mail_subject === "function") {
           const prev = (forceSetExplicitPrevious ?? "").toString().trim();
@@ -3066,10 +3506,16 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         // AutoSend 4.0 – Wizard 4 (mit Retry-Logik)
         // WICHTIG: Startet NACH Polishing (await wurde bereits abgewartet)
         // -----------------------------
+        const autoSendStartedAtMs = nowMs();
         try {
+          timingMark("email-compose-autosend-start");
           // Edgecase: Prüfe nochmal, ob UI noch verfügbar ist (UI könnte zwischenzeitlich unmounted sein)
           if (typeof window === 'undefined' || !w.__fm_send_mail_now) {
             console.warn('[wizard4][autosend] UI unmounted oder __fm_send_mail_now nicht verfügbar, überspringe AutoSend');
+            timingMark("email-compose-autosend-finished", {
+              autosendMs: Math.max(0, Math.round(nowMs() - autoSendStartedAtMs)),
+              reason: "ui_unavailable",
+            });
             return;
           }
           
@@ -3117,6 +3563,10 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                     if (typeof w.__fm_send_mail_now === 'function') {
                       w.__fm_send_mail_now();
                       console.log('[fm-voice][wizard4] AutoSend: __fm_send_mail_now erfolgreich aufgerufen');
+                      timingMark("email-compose-autosend-sent", {
+                        autosendMs: Math.max(0, Math.round(nowMs() - autoSendStartedAtMs)),
+                        totalMs: timing ? Math.max(0, Math.round(nowMs() - timing.startedAtMs)) : null,
+                      });
                     } else {
                       console.error('[fm-voice][wizard4] AutoSend: __fm_send_mail_now ist keine Funktion');
                     }
@@ -3163,6 +3613,10 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               hasSafeAutoSendEmail: safeAutoSendEmail !== null,
               hasSendFn: typeof w.__fm_send_mail_now === 'function',
             });
+            timingMark("email-compose-autosend-finished", {
+              autosendMs: Math.max(0, Math.round(nowMs() - autoSendStartedAtMs)),
+              reason: "not_executed",
+            });
             // AutoSend nicht ausgeführt, zeige prepared-Nachricht
             if (!didAutoSend) {
               sayPreparedOnce("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
@@ -3170,11 +3624,20 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           }
         } catch (err) {
           console.error('[fm-voice][wizard4] Fehler beim AutoSend:', err);
+          timingMark("email-compose-autosend-finished", {
+            autosendMs: Math.max(0, Math.round(nowMs() - autoSendStartedAtMs)),
+            reason: "exception",
+          });
           // Bei Fehler zeige prepared-Nachricht
           if (!didAutoSend) {
             sayPreparedOnce("Alles klar, ich habe die E-Mail vorbereitet. Du kannst sie jetzt prüfen oder senden.");
           }
         }
+        timingMark("email-compose-finished", {
+          composeMs: Math.max(0, Math.round(nowMs() - composeStartedAtMs)),
+          totalMs: timing ? Math.max(0, Math.round(nowMs() - timing.startedAtMs)) : null,
+          didAutoSend,
+        });
       }, 100);
     })();
     return;
@@ -3576,12 +4039,23 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     }
 
     const before = (w.__fm_get_mail_body?.() ?? "").toString();
-    const sanitizeReplacementText = (raw: string): string =>
-      (raw ?? "")
+    const sanitizeReplacementText = (raw: string): string => {
+      let s = (raw ?? "")
         .toString()
         .trim()
         .replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "")
+        .replace(/[\s"'„“‚‘`]+$/g, "")
         .trim();
+      if (!s) return "";
+      s = s.replace(/["'„“‚‘`]+([.!?])$/g, "$1");
+      s = s.replace(/[.!?]{2,}$/g, (m) => m.slice(0, 1));
+      const m = /[A-Za-zÄÖÜäöüß]/.exec(s);
+      if (m && m.index >= 0) {
+        const i = m.index;
+        s = s.slice(0, i) + s.charAt(i).toUpperCase() + s.slice(i + 1);
+      }
+      return s.trim();
+    };
     const replacement = sanitizeReplacementText((payload?.text ?? "").toString());
     const n = Math.max(1, Math.min(20, Number.isFinite(payload?.n as number) ? Math.floor(payload!.n as number) : 1));
     if (!replacement) {
@@ -3683,7 +4157,24 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
     const w = typeof window !== "undefined" ? (window as any) : null;
     const p = intent.payload as { n?: number; text?: string };
     const n = Math.max(1, Math.min(20, Number.isFinite(p?.n as number) ? Math.floor(p!.n as number) : 1));
-    const replacement = (p?.text ?? "").toString().trim();
+    const sanitizeReplacementText = (raw: string): string => {
+      let s = (raw ?? "")
+        .toString()
+        .trim()
+        .replace(/^[\s\.,:;\-–—"'„“‚‘`]+/g, "")
+        .replace(/[\s"'„“‚‘`]+$/g, "")
+        .trim();
+      if (!s) return "";
+      s = s.replace(/["'„“‚‘`]+([.!?])$/g, "$1");
+      s = s.replace(/[.!?]{2,}$/g, (m) => m.slice(0, 1));
+      const m = /[A-Za-zÄÖÜäöüß]/.exec(s);
+      if (m && m.index >= 0) {
+        const i = m.index;
+        s = s.slice(0, i) + s.charAt(i).toUpperCase() + s.slice(i + 1);
+      }
+      return s.trim();
+    };
+    const replacement = sanitizeReplacementText((p?.text ?? "").toString());
     if (!replacement) {
       console.warn("[sentence] replace-nth no-op (empty replacement)");
       return;
@@ -3928,8 +4419,14 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         const sendSourceText =
           ((intent as any)?.sourceText ?? (intent as any)?.rawText ?? (intent as any)?.originalText ?? "").toString();
         const hardConfirmation = isHardSendConfirmationPhrase(sendSourceText);
-        if (!hardConfirmation && pendingEmailSendConfirmationUntil < now) {
-          pendingEmailSendConfirmationUntil = now + 10000;
+        const consumeBypass =
+          allowNextEmailSendWithoutExtraConfirmationUntil >= now;
+        if (consumeBypass) {
+          allowNextEmailSendWithoutExtraConfirmationUntil = 0;
+        }
+        if (!hardConfirmation && !consumeBypass && pendingEmailSendConfirmationUntil < now) {
+          // 10s war bei lokaler STT zu knapp und führte zu Nachfrage-Loops.
+          pendingEmailSendConfirmationUntil = now + 30000;
           PartnerBotBus.say("Sicherheitscheck: Bitte bestätige mit 'jetzt senden' oder 'sofort senden'.");
           return;
         }
@@ -4676,6 +5173,8 @@ export function syncSubjectLockWithContext(selectedContext: { uid?: string | nul
 }
 
 export function processVoiceCommand(transcript: string, navigate: NavigateFunction) {
+  const commandTiming = createVoiceTiming(transcript ?? "");
+  logVoiceTiming(commandTiming, "command-received");
   const normalizeContextReplySubject = (rawSubject: string | null | undefined): string => {
     const cleaned = (rawSubject ?? "").trim();
     if (!cleaned) return "AW: Ihre Nachricht";
@@ -4683,10 +5182,23 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     return `AW: ${cleaned}`;
   };
 
-  lastTranscript = transcript; // Für Wizard4Intent-Parsing speichern
+  const routingTranscript = normalizeTranscriptForRouting(transcript);
+  logVoiceTiming(commandTiming, "transcript-normalized", {
+    changed: routingTranscript !== transcript,
+  });
+  if (routingTranscript !== transcript) {
+    console.log("[fm-voice][normalize] transcript adjusted for routing", {
+      before: transcript,
+      after: routingTranscript,
+    });
+  }
+  lastTranscript = routingTranscript; // Für Wizard4Intent-Parsing speichern
   const selectedContext = getSelectedMailContext();
+  logVoiceTiming(commandTiming, "context-loaded", {
+    hasContext: !!selectedContext,
+  });
   syncSubjectLockWithContext(selectedContext);
-  if (selectedContext && isExplicitContextSendConfirmation(transcript)) {
+  if (selectedContext && isExplicitContextSendConfirmation(routingTranscript)) {
     const w = typeof window !== "undefined" ? (window as any) : null;
     const to = String(w?.__fm_get_mail_to?.() ?? "").trim();
     const subject = String(w?.__fm_get_mail_subject?.() ?? "").trim();
@@ -4714,19 +5226,83 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
       subject,
       bodyLength: body.length,
     });
-    applyVoiceIntent({ type: "email-send" }, navigate);
+    allowNextEmailSendWithoutExtraConfirmationUntil = Date.now() + 30000;
+    applyVoiceIntent(
+      { type: "email-send", sourceText: routingTranscript } as any,
+      navigate
+    );
     return;
   }
 
-  const replyIntent = buildReplyIntentFromSelectedMailContext(transcript, selectedContext);
+  const replyIntent = buildReplyIntentFromSelectedMailContext(routingTranscript, selectedContext);
   if (replyIntent) {
     console.log("[fm-voice][exchange-context] reply intent from active mail context", {
       contextUid: selectedContext?.uid ?? null,
       hasBodyHint: "bodyHint" in replyIntent && !!replyIntent.bodyHint,
     });
   }
-  const routedIntent = routeVoiceIntent(transcript);
-  let intent = replyIntent ?? routedIntent;
+  const miniCommandIntent = resolveMiniCommandIntentFromText(routingTranscript);
+  const routedIntent = miniCommandIntent ?? routeVoiceIntent(routingTranscript);
+  const hasComposerContext =
+    typeof window !== "undefined" &&
+    typeof (window as any).__fm_set_mail_body === "function" &&
+    typeof (window as any).__fm_get_mail_body === "function";
+  const shouldHardBypassContext =
+    isComposerPriorityIntentType(routedIntent.type) ||
+    (isLikelyMiniCommandText(routingTranscript) && isMiniCommandIntentType(routedIntent.type));
+  if (shouldHardBypassContext && replyIntent) {
+    console.log("[fm-voice][exchange-context] hard bypass: prefer routed mini/editor command", {
+      routedType: routedIntent.type,
+      replyType: replyIntent.type,
+      transcript: routingTranscript,
+    });
+  }
+
+  if (
+    routedIntent.type === "ai-chat" &&
+    (selectedContext?.uid || hasComposerContext) &&
+    (isLikelyNoiseUtterance(routingTranscript) || isLikelyMisheardComposerCommand(routingTranscript))
+  ) {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    const commandLikeMisheard = isLikelyMisheardComposerCommand(routingTranscript);
+    if (w) {
+      w.__fm_last_hint = {
+        kind: commandLikeMisheard ? "voice_command_retry" : "voice_noise_retry",
+        message: commandLikeMisheard
+          ? "Das klang wie ein Bearbeitungsbefehl, aber unklar. Bitte wiederhole den Befehl deutlich."
+          : "Ich habe nur einen kurzen Laut verstanden. Wiederhole bitte den Befehl.",
+        ts: Date.now(),
+      };
+      if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      }
+    }
+    PartnerBotBus.say(
+      commandLikeMisheard
+        ? "Ich habe den Bearbeitungsbefehl nicht sicher verstanden. Bitte wiederholen."
+        : "Ich habe nur einen kurzen Laut verstanden. Bitte wiederholen."
+    );
+    logVoiceTiming(commandTiming, "noise-guard-ignored", {
+      transcript: routingTranscript,
+      commandLikeMisheard,
+    });
+    return;
+  }
+  let intent = shouldHardBypassContext ? routedIntent : (replyIntent ?? routedIntent);
+  const preferRoutedIntentInContext =
+    !!selectedContext?.uid &&
+    !!replyIntent &&
+    isComposerPriorityIntentType(routedIntent.type);
+  if (preferRoutedIntentInContext) {
+    intent = routedIntent;
+    console.log("[fm-voice][exchange-context] routed intent has priority over context reply", {
+      routedType: routedIntent.type,
+      replyType: replyIntent.type,
+    });
+  }
+  logVoiceTiming(commandTiming, "intent-routed", {
+    intentType: (intent as any)?.type ?? "unknown",
+  });
 
   // Kontext-Fallback: Wenn eine Mail ausgewählt ist und ein allgemeiner Compose-Intent erkannt wurde,
   // antworte standardmäßig auf den ausgewählten Kontext (Empfänger + Betreff aus Kontext).
@@ -4737,7 +5313,7 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     intent.type === "email-compose"
   ) {
     const explicitSendNowRequested =
-      shouldSendNowFromSourceText(transcript) || intent?.meta?.autoSend === true;
+      shouldSendNowFromSourceText(routingTranscript) || intent?.meta?.autoSend === true;
     const normalizedSubject = normalizeContextReplySubject(selectedContext.subject);
     const nextMeta: any = {
       ...(intent.meta ?? {}),
@@ -4767,5 +5343,15 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     });
   }
 
-  applyVoiceIntent(intent, navigate);
+  const intentWithTiming: any = {
+    ...(intent as any),
+    meta: {
+      ...(((intent as any)?.meta ?? {}) as Record<string, unknown>),
+      __fmTiming: commandTiming,
+    },
+  };
+  logVoiceTiming(commandTiming, "apply-intent-start", {
+    intentType: (intentWithTiming as any)?.type ?? "unknown",
+  });
+  applyVoiceIntent(intentWithTiming, navigate);
 }

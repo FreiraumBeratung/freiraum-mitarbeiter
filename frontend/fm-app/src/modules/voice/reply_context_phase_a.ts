@@ -51,11 +51,11 @@ function hasAddressedSenderDirective(text: string, context: SelectedMailContext 
 }
 
 function hasReplyVerb(text: string): boolean {
-  return /\b(antwort(?:e|en|et)|beantwort(?:e|en|et)|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?)\b/i.test(text);
+  return /\b(antwort(?:e|en|et)?|beantwort(?:e|en|et)|zurückschreib(?:en)?|reagier(?:e|en)?|informier(?:e|en)?)\b/i.test(text);
 }
 
 function hasLeadingReplyCommand(text: string): boolean {
-  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+|bitte\s+)*(?:antwort(?:e|en|et)\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b|informier(?:e|en)?\b|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:|direkt(?:e)?\s+antwort(?:\s*:)?|kurze?\s+antwort(?:\s*:)?)/i.test(
+  return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+|bitte\s+)*(?:antwort(?:e|en|et)?\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b|informier(?:e|en)?\b|schreib\s+zur(?:ue|[üu])ck|antwort(?:e|en)?\s*:|zur(?:ue|[üu])ck\s*:|direkt(?:e)?\s+antwort(?:\s*:)?|kurze?\s+antwort(?:\s*:)?)/i.test(
     text
   );
 }
@@ -95,8 +95,8 @@ function hasMailTargetHint(text: string): boolean {
 
 function hasDirectReplyTrigger(text: string): boolean {
   return (
-    /\b(?:antwort(?:e|en|et)|beantwort(?:e|en|et)|zurückschreib(?:en)?|schreib\s+zur(?:ue|[üu])ck)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
-    /\b(?:direkt|sofort)\s+(?:antwort(?:e|en|et)|beantwort(?:e|en|et)|zurückschreib(?:en)?|zurück)\b/i.test(text) ||
+    /\b(?:antwort(?:e|en|et)?|beantwort(?:e|en|et)|zurückschreib(?:en)?|schreib\s+zur(?:ue|[üu])ck)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
+    /\b(?:direkt|sofort)\s+(?:antwort(?:e|en|et)?|beantwort(?:e|en|et)|zurückschreib(?:en)?|zurück)\b/i.test(text) ||
     /\b(?:sende|schick(?:e)?)\b[\s\S]*\b(?:direkt|sofort)\b/i.test(text) ||
     /\bdirekt(?:e)?\s+antwort\b/i.test(text) ||
     /\b(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+)?)?(?:direkt|sofort)\s+wissen\b/i.test(text) ||
@@ -178,11 +178,16 @@ export function extractReplyBodyHint(
   const stripLeadingReplyCommands = (value: string): string => {
     let out = value;
     out = out.replace(
-      /^\s*(?:bitte\s+)?(?:antwort(?:e|en|et)\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b)(?:\s+bitte)?\s+(?:direkt|sofort)\s*/i,
+      /^\s*(?:bitte\s+)?(?:antwort(?:e|en|et)?\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b)(?:\s+bitte)?\s+(?:direkt|sofort)[\s,.:;!?-]*/i,
+      ""
+    );
+    // ASR: „Antwort ist sofort …“ (Wort „ist“ zwischen Trigger und Adverb)
+    out = out.replace(
+      /^\s*(?:bitte\s+)?(?:antwort(?:e|en|et)?\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b)\s+ist\s+(?:direkt|sofort|jetzt)[\s,.:;!?-]*/i,
       ""
     );
     out = out.replace(
-      /^\s*(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?(?:antwort(?:e|en|et)\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b)(?:\s*[,:-]\s*)?\s*/i,
+      /^\s*(?:bitte\s+)?(?:(?:direkt|sofort)\s+)?(?:antwort(?:e|en|et)?\b|beantwort(?:e|en|et)\b|zurückschreib(?:en)?\b|reagier(?:e|en)?\b)(?:\s*[,:-]\s*)?\s*/i,
       ""
     );
     return out;

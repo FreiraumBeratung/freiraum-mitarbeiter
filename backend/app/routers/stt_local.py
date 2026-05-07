@@ -8,7 +8,7 @@ import time
 import wave
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from ..core.stt_settings import stt_settings
 
@@ -81,7 +81,7 @@ def health():
 
 
 @router.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(file: UploadFile = File(...), mode: str = Form("dictation")):
     if stt_settings.provider != "local":
         raise HTTPException(status_code=501, detail="local stt not active")
 
@@ -102,7 +102,9 @@ async def transcribe(file: UploadFile = File(...)):
     out_prefix = in_path.with_suffix("")
     out_json = out_prefix.with_suffix(".json")
 
-    cmd = [
+    mode_normalized = (mode or "dictation").strip().lower()
+    use_fast_command_mode = mode_normalized == "command"
+    base_cmd = [
         str(exe),
         "-m",
         str(model),
@@ -116,14 +118,29 @@ async def transcribe(file: UploadFile = File(...)):
         "-t",
         str(stt_settings.local.threads),
     ]
+    cmd = list(base_cmd)
+    if use_fast_command_mode:
+        # Fast-Path für kurze Kommandos: geringere Suchkomplexität.
+        # Falls eine Flag in einer Whisper-Version nicht unterstützt wird,
+        # fällt der Code unten automatisch auf den stabilen Basis-Call zurück.
+        cmd.extend(["-bs", "1", "-bo", "1"])
 
     try:
-        subprocess.check_call(cmd, cwd=root)
+        started = time.perf_counter()
+        try:
+            subprocess.check_call(cmd, cwd=root)
+        except Exception:
+            if use_fast_command_mode:
+                # Sicherheitsnetz: niemals Transkription komplett verlieren.
+                subprocess.check_call(base_cmd, cwd=root)
+            else:
+                raise
         if not out_json.exists():
             raise RuntimeError("whisper output missing")
         parsed = json.loads(out_json.read_text(encoding="utf-8"))
         text = _extract_text(parsed)
-        return {"ok": True, "text": text}
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        return {"ok": True, "text": text, "mode": mode_normalized, "elapsed_ms": elapsed_ms}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"whisper error: {exc}") from exc
     finally:

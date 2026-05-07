@@ -62,6 +62,24 @@ describe("reply_context_phase_a", () => {
     expect(body).toBe("Bei mir ist die Lage sehr gut.");
   });
 
+  it("extracts body for ASR 'Antwort ist sofort, …' ohne 'Ist sofort'-Rest", () => {
+    const body = extractReplyBodyHint("Antwort ist sofort, guten Morgen.");
+    expect(body).toBe("guten Morgen.");
+  });
+
+  it("sendNow bei aktivem Kontext wenn 'Antwort ist sofort' mit Body", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "Antwort ist sofort, guten Morgen.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.bodyHint).toBe("guten Morgen.");
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+    }
+  });
+
   it("supports natural shortcut phrasing 'sag ihm bitte ...'", () => {
     const intent = buildReplyIntentFromSelectedMailContext(
       "Sag ihm bitte wir schicken die Unterlagen bis heute Abend.",

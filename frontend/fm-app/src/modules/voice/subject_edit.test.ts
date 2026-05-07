@@ -14,6 +14,11 @@ describe("subjectSet", () => {
   it('1) set: current="" -> subjectSet(" Angebote ") => "Angebote"', () => {
     expect(subjectSet(" Angebote ")).toBe("Angebote");
   });
+
+  it('1b) strips wrapping quotes: subjectSet("\\"Angebot morgen\\"" )', () => {
+    expect(subjectSet('"Angebot morgen"')).toBe("Angebot Morgen");
+    expect(subjectSet('""Angebot morgen Abend""')).toBe("Angebot Morgen Abend");
+  });
 });
 
 describe("subjectAppend", () => {
