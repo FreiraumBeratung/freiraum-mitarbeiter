@@ -30,4 +30,17 @@ describe("processVoiceCommand noise guard", () => {
     const hint = (globalThis as any).window.__fm_last_hint;
     expect(hint?.kind).toBe("voice_noise_retry");
   });
+
+  it('blocks unclear ai-chat fallback in active compose context ("Text-Glaschen")', () => {
+    processVoiceCommand("Text-Glaschen.", fakeNavigate);
+    const hint = (globalThis as any).window.__fm_last_hint;
+    expect(hint?.kind).toBe("voice_command_retry");
+  });
+
+  it('blocks unclear compose fallback in active context ("Schiss Satz 1")', () => {
+    processVoiceCommand("Schiss Satz 1", fakeNavigate);
+    const hint = (globalThis as any).window.__fm_last_hint;
+    expect(hint?.kind).toBe("voice_command_retry");
+    expect((globalThis as any).window.__fm_set_mail_body).not.toHaveBeenCalled();
+  });
 });

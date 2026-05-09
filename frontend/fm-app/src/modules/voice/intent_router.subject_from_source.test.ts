@@ -12,5 +12,16 @@ describe("intent_router subject-from-source", () => {
       expect(((intent as any).explicitSubject ?? "").length).toBeGreaterThan(0);
     }
   });
+
+  it("erkennt explicitSubject auch bei ASR-Variante 'betrefft'", () => {
+    const intent = routeVoiceIntent(
+      "Sende folgende Nachricht an Peter betrefft Baustelle. Hi Peter, ich komme morgen."
+    );
+    expect(intent.type).toBe("email-compose");
+    if (intent.type === "email-compose") {
+      expect(((intent as any).explicitSubject ?? "").toLowerCase()).toContain("baustelle");
+      expect((intent.subjectHint ?? "").toLowerCase()).toContain("baustelle");
+    }
+  });
 });
 

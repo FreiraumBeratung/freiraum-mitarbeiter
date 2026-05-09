@@ -35,6 +35,7 @@ MIN_SCORE_THRESHOLD = 0.72
 MIN_SCORE_DIFF = 0.08
 SINGLE_TOKEN_SOFT_THRESHOLD = 0.60
 SINGLE_TOKEN_SOFT_DIFF = 0.12
+MIN_TOKENS_FOR_RESOLVER_MEMORY = 2
 
 
 @dataclass
@@ -186,11 +187,12 @@ class ContactResolver:
             email_value = (row.get("email") or "").strip().lower()
             if not email_value:
                 continue
+            source = (row.get("source") or "").strip().lower() or "learned"
             display_name = (row.get("display_name") or "").strip() or email_value.split("@", 1)[0]
             aliases = row.get("aliases") if isinstance(row.get("aliases"), list) else []
             contacts.append(
                 Contact(
-                    id=f"learned:{email_value}",
+                    id=f"learned:{source}:{email_value}",
                     display_name=display_name,
                     aliases=[str(a) for a in aliases if isinstance(a, str)],
                     emails=[email_value],
@@ -657,6 +659,24 @@ class ContactResolver:
                 best_score = score
         
         return best_score
+
+    @staticmethod
+    def _contact_priority(candidate: Contact) -> int:
+        cid = (candidate.id or "").strip().lower()
+        if cid.startswith("learned:manual:"):
+            return 5
+        if cid.startswith("learned:send:"):
+            return 4
+        if cid.startswith("learned:resolved:"):
+            return 1
+        if cid.startswith("learned:"):
+            return 2
+        if cid.startswith("mailbox:"):
+            return 2
+        if cid.startswith("graph:"):
+            return 2
+        # Kontakte aus contacts.local.json (IDs ohne Prefix) bevorzugen.
+        return 4
     
     def resolve(self, to_name: str) -> ResolveResult:
         """
@@ -670,10 +690,6 @@ class ContactResolver:
         """
         # Auto-Reload prüfen
         self._check_reload()
-        # Graph-Kontakte bei Bedarf on-demand nachladen (z. B. direkt nach frischem OAuth-Connect).
-        graph_enabled = os.getenv("CONTACT_RESOLVER_USE_GRAPH_CONTACTS", "true").lower() in ("1", "true", "yes")
-        if graph_enabled and len(self._graph_contacts) == 0:
-            self._load_graph_contacts()
         
         debug_info = {
             "inputName": to_name,
@@ -695,12 +711,16 @@ class ContactResolver:
         # Normalisieren
         normalized_input = self._normalize(to_name)
         debug_info["normalizedInput"] = normalized_input
+        input_token_count = len(set(normalized_input.split()))
+        debug_info["inputTokenCount"] = input_token_count
         
         if not normalized_input:
             debug_info["result"] = "normalized_empty"
             return ResolveResult(email=None, matched_contact=None, debug=debug_info, ambiguous_contacts=[])
 
-        remembered = self._contact_store.get_remembered_resolution(normalized_input)
+        use_memory_lookup = input_token_count >= MIN_TOKENS_FOR_RESOLVER_MEMORY
+        debug_info["memoryLookupUsed"] = use_memory_lookup
+        remembered = self._contact_store.get_remembered_resolution(normalized_input) if use_memory_lookup else None
         if remembered and remembered.get("email"):
             remembered_email = str(remembered["email"]).strip().lower()
             remembered_name = str(remembered.get("display_name") or remembered_email.split("@", 1)[0])
@@ -755,8 +775,14 @@ class ContactResolver:
                 "score": score
             })
         
-        # Sortiere nach Score (höchster zuerst)
-        scored_candidates.sort(key=lambda x: x["score"], reverse=True)
+        # Sortiere nach Score und danach nach Quell-Priorität.
+        scored_candidates.sort(
+            key=lambda x: (
+                x["score"],
+                self._contact_priority(x["contact"]),
+            ),
+            reverse=True,
+        )
         
         # Debug-Info sammeln
         debug_info["candidatesScored"] = [
@@ -779,9 +805,24 @@ class ContactResolver:
         debug_info["topScore"] = top_score
         debug_info["secondScore"] = second_score
         
+        # Ein-Wort-Namen (z. B. "Peter") nie aggressiv auto-resolven, wenn mehrere ähnlich starke Kandidaten existieren.
+        if input_token_count == 1:
+            single_token_candidates = [
+                c for c in scored_candidates
+                if c["score"] >= SINGLE_TOKEN_SOFT_THRESHOLD
+            ]
+            if len(single_token_candidates) >= 2:
+                top_ambiguous = [c["contact"] for c in single_token_candidates[:3]]
+                debug_info["result"] = "ambiguous"
+                return ResolveResult(
+                    email=None,
+                    matched_contact=None,
+                    debug=debug_info,
+                    ambiguous_contacts=top_ambiguous,
+                )
+
         # Prüfe Threshold
         if top_score < MIN_SCORE_THRESHOLD:
-            input_token_count = len(set(normalized_input.split()))
             if (
                 input_token_count == 1
                 and (
@@ -793,11 +834,12 @@ class ContactResolver:
                 matched_contact = scored_candidates[0]["contact"]
                 email = matched_contact.emails[0]
                 debug_info["result"] = "matched_single_token_soft_threshold"
-                self._contact_store.remember_resolution(
-                    query_norm=normalized_input,
-                    email=email,
-                    display_name=matched_contact.display_name,
-                )
+                if input_token_count >= MIN_TOKENS_FOR_RESOLVER_MEMORY:
+                    self._contact_store.remember_resolution(
+                        query_norm=normalized_input,
+                        email=email,
+                        display_name=matched_contact.display_name,
+                    )
                 self._contact_store.upsert_contact(
                     email=email,
                     display_name=matched_contact.display_name,
@@ -836,11 +878,12 @@ class ContactResolver:
             f"Contact resolved: '{to_name}' -> '{email}' "
             f"(matched: {matched_contact.id}, score: {top_score:.2f})"
         )
-        self._contact_store.remember_resolution(
-            query_norm=normalized_input,
-            email=email,
-            display_name=matched_contact.display_name,
-        )
+        if input_token_count >= MIN_TOKENS_FOR_RESOLVER_MEMORY:
+            self._contact_store.remember_resolution(
+                query_norm=normalized_input,
+                email=email,
+                display_name=matched_contact.display_name,
+            )
         self._contact_store.upsert_contact(
             email=email,
             display_name=matched_contact.display_name,

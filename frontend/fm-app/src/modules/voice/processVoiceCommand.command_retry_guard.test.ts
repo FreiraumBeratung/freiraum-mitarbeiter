@@ -25,10 +25,15 @@ describe("processVoiceCommand command retry guard", () => {
     delete (globalThis as any).window.__fm_last_hint;
   });
 
-  it('blocks command-like ASR noise ("Löschersatz 1") from ai-chat fallback', () => {
+  it('routet "Löschersatz 1" als Satz-Delete im Composer-Kontext', async () => {
     processVoiceCommand("Löschersatz 1", fakeNavigate);
-    const hint = (globalThis as any).window.__fm_last_hint;
-    expect(hint?.kind).toBe("voice_command_retry");
+    await new Promise((r) => setTimeout(r, 50));
+    expect((globalThis as any).window.__fm_set_mail_body).toHaveBeenCalledWith("");
+  });
+
+  it('routes merged ASR command "Textlöschen" to body clear', () => {
+    processVoiceCommand("Textlöschen", fakeNavigate);
+    expect((globalThis as any).window.__fm_set_mail_body).toHaveBeenCalledWith("");
   });
 });
 

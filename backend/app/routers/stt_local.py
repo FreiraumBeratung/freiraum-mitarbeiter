@@ -14,6 +14,14 @@ from ..core.stt_settings import stt_settings
 
 router = APIRouter(prefix="/api/stt", tags=["stt"])
 
+if os.name == "nt":
+    _WHISPER_CREATIONFLAGS = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        | getattr(subprocess, "HIGH_PRIORITY_CLASS", 0)
+    )
+else:
+    _WHISPER_CREATIONFLAGS = 0
+
 
 def _backend_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -104,6 +112,8 @@ async def transcribe(file: UploadFile = File(...), mode: str = Form("dictation")
 
     mode_normalized = (mode or "dictation").strip().lower()
     use_fast_command_mode = mode_normalized == "command"
+    cpu_count = os.cpu_count() or stt_settings.local.threads
+    command_threads = max(stt_settings.local.threads, min(16, cpu_count))
     base_cmd = [
         str(exe),
         "-m",
@@ -119,28 +129,84 @@ async def transcribe(file: UploadFile = File(...), mode: str = Form("dictation")
         str(stt_settings.local.threads),
     ]
     cmd = list(base_cmd)
+    out_txt = out_prefix.with_suffix(".txt")
+    used_fast_profile = False
+    fallback_used = False
+    command_exe_used = False
     if use_fast_command_mode:
-        # Fast-Path für kurze Kommandos: geringere Suchkomplexität.
+        # Fast-Path für kurze Kommandos:
+        # - plain text output statt JSON
+        # - keine Timestamps
+        # - geringe Suchkomplexität
         # Falls eine Flag in einer Whisper-Version nicht unterstützt wird,
         # fällt der Code unten automatisch auf den stabilen Basis-Call zurück.
-        cmd.extend(["-bs", "1", "-bo", "1"])
+        cmd = [
+            str(exe),
+            "-m",
+            str(model),
+            "-f",
+            str(in_path),
+            "-l",
+            stt_settings.local.lang,
+            "-otxt",
+            "-nt",
+            "-of",
+            str(out_prefix),
+            "-t",
+            str(command_threads),
+            "-bs",
+            "1",
+            "-bo",
+            "1",
+        ]
+        used_fast_profile = True
 
     try:
         started = time.perf_counter()
         try:
-            subprocess.check_call(cmd, cwd=root)
+            subprocess.check_call(
+                cmd,
+                cwd=root,
+                creationflags=_WHISPER_CREATIONFLAGS,
+            )
         except Exception:
             if use_fast_command_mode:
                 # Sicherheitsnetz: niemals Transkription komplett verlieren.
-                subprocess.check_call(base_cmd, cwd=root)
+                fallback_used = True
+                subprocess.check_call(
+                    base_cmd,
+                    cwd=root,
+                    creationflags=_WHISPER_CREATIONFLAGS,
+                )
             else:
                 raise
-        if not out_json.exists():
-            raise RuntimeError("whisper output missing")
-        parsed = json.loads(out_json.read_text(encoding="utf-8"))
-        text = _extract_text(parsed)
+        text = ""
+        if use_fast_command_mode and used_fast_profile and not fallback_used and out_txt.exists():
+            text = out_txt.read_text(encoding="utf-8").strip()
+        if use_fast_command_mode and used_fast_profile and not fallback_used and not text:
+            # Sicherheitsnetz: Fast-Path lieferte keinen Text/Output -> stabiler Base-Call.
+            fallback_used = True
+            subprocess.check_call(
+                base_cmd,
+                cwd=root,
+                creationflags=_WHISPER_CREATIONFLAGS,
+            )
+        if not text:
+            if not out_json.exists():
+                raise RuntimeError("whisper output missing")
+            parsed = json.loads(out_json.read_text(encoding="utf-8"))
+            text = _extract_text(parsed)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        return {"ok": True, "text": text, "mode": mode_normalized, "elapsed_ms": elapsed_ms}
+        return {
+            "ok": True,
+            "text": text,
+            "mode": mode_normalized,
+            "elapsed_ms": elapsed_ms,
+            "fast_profile_used": used_fast_profile,
+            "fallback_used": fallback_used,
+            "command_exe_used": command_exe_used,
+            "command_threads": command_threads if use_fast_command_mode else stt_settings.local.threads,
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"whisper error: {exc}") from exc
     finally:

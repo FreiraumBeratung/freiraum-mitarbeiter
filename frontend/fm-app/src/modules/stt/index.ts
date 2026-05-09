@@ -1,7 +1,18 @@
+let cachedLocalSttHealthAtMs = 0;
+let cachedLocalSttHealthOk = false;
+const LOCAL_STT_HEALTH_CACHE_MS = 45000;
+const COMMAND_MODE_MAX_RECORD_MS = 7000;
+
 export async function recordAndTranscribe(
   maxMs = 60000,
   signal?: AbortSignal
 ): Promise<string | null> {
+  const logSttTiming = (payload: Record<string, unknown>) => {
+    const parts = Object.entries(payload).map(([key, value]) => `${key}=${String(value)}`);
+    console.log(`[fm-stt][timing] ${parts.join(" ")}`);
+    console.log("[fm-stt][timing][json]", JSON.stringify(payload));
+  };
+
   const nowMs = (): number => {
     if (typeof performance !== "undefined" && typeof performance.now === "function") {
       return performance.now();
@@ -116,10 +127,18 @@ export async function recordAndTranscribe(
   // Prefer backend STT first
   try {
     const sttStartedAtMs = nowMs();
-    const health = await fetchWithTimeout("http://127.0.0.1:30521/api/stt/health", {}, 1200).then((r) =>
-      r.json()
-    );
+    const healthCacheAgeMs = Date.now() - cachedLocalSttHealthAtMs;
+    const hasFreshLocalHealth = cachedLocalSttHealthOk && healthCacheAgeMs >= 0 && healthCacheAgeMs <= LOCAL_STT_HEALTH_CACHE_MS;
+    const health = hasFreshLocalHealth
+      ? { provider: "local", ok: true, cached: true }
+      : await fetchWithTimeout("http://127.0.0.1:30521/api/stt/health", {}, 1200).then((r) => r.json());
     const healthCheckedAtMs = nowMs();
+    if (health?.provider === "local" && health?.ok) {
+      cachedLocalSttHealthOk = true;
+      cachedLocalSttHealthAtMs = Date.now();
+    } else {
+      cachedLocalSttHealthOk = false;
+    }
     if (health?.provider === "local" && health?.ok) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
@@ -155,7 +174,7 @@ export async function recordAndTranscribe(
       const filename = backendBlob.type === "audio/wav" ? "voice.wav" : "voice.webm";
       const form = new FormData();
       form.append("file", backendBlob, filename);
-      const isLikelyCommandMode = recordedMs <= 4500;
+      const isLikelyCommandMode = recordedMs <= COMMAND_MODE_MAX_RECORD_MS;
       const sttMode = isLikelyCommandMode ? "command" : "dictation";
       form.append("mode", sttMode);
       const transcribeTimeoutMs = isLikelyCommandMode ? 30000 : 120000;
@@ -172,8 +191,18 @@ export async function recordAndTranscribe(
         const j = await resp.json();
         const jsonParsedAtMs = nowMs();
         const text = (j?.text || "").trim();
-        console.log("[fm-stt][timing]", {
+        const backendFastProfileUsed =
+          typeof j?.fast_profile_used === "boolean" ? j.fast_profile_used : null;
+        const backendFallbackUsed =
+          typeof j?.fallback_used === "boolean" ? j.fallback_used : null;
+        const backendCommandExeUsed =
+          typeof j?.command_exe_used === "boolean" ? j.command_exe_used : null;
+        logSttTiming({
           mode: sttMode,
+          backendFastProfileUsed,
+          backendFallbackUsed,
+          backendCommandExeUsed,
+          healthCached: !!(health as any)?.cached,
           healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
           recordMs: recordedMs,
           wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),
@@ -184,8 +213,12 @@ export async function recordAndTranscribe(
         });
         if (text) return text;
       }
-      console.log("[fm-stt][timing]", {
+      logSttTiming({
         mode: sttMode,
+        backendFastProfileUsed: null,
+        backendFallbackUsed: null,
+        backendCommandExeUsed: null,
+        healthCached: !!(health as any)?.cached,
         healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
         recordMs: recordedMs,
         wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),

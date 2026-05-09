@@ -45,6 +45,12 @@ describe("intent_router sentence-delete-nth", () => {
     if (intent.type === "sentence-delete-nth") expect(intent.payload.n).toBe(3);
   });
 
+  it("ASR alias Blöschesatz 2 -> sentence-delete-nth(n=2)", () => {
+    const intent = routeVoiceIntent("Blöschesatz 2");
+    expect(intent.type).toBe("sentence-delete-nth");
+    if (intent.type === "sentence-delete-nth") expect(intent.payload.n).toBe(2);
+  });
+
   it("Lösche Satz 99 -> sentence-delete-nth (execute no-op later)", () => {
     const intent = routeVoiceIntent("Lösche Satz 99");
     expect(intent.type).toBe("sentence-delete-nth");

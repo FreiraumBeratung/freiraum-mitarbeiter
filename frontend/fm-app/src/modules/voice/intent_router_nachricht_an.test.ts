@@ -2,6 +2,18 @@ import { describe, it, expect } from "vitest";
 import { routeVoiceIntent } from "./intent_router";
 
 describe("intent_router: nachricht an <name> (optional betreff)", () => {
+  it("trennt Empfängernamen robust vor 'betreff' in freier Diktion", () => {
+    const r = routeVoiceIntent(
+      "Sendefolge Nachricht an Peter, betreff Baustelle. Hi Peter, ich komme morgen um 15 Uhr."
+    );
+    const intent = r.type === "email-compose" ? r : null;
+    expect(intent).toBeTruthy();
+    if (!intent) return;
+    expect(intent.type).toBe("email-compose");
+    expect((intent.toRaw ?? "").toLowerCase()).toBe("peter");
+    expect((intent.subjectHint ?? "").toLowerCase()).toContain("baustelle");
+  });
+
   it("matches nachricht an <name> with betreff and avoids ai fallback", () => {
     const r = routeVoiceIntent("Nachricht an Thomas, Betreff Rückruf Hi Thomas, hier ist Dennis.");
     const intent = r.type === "email-compose" ? r : null;

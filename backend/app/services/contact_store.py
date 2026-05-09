@@ -66,7 +66,7 @@ class ContactStore:
         aliases_json = json.dumps(aliases_norm, ensure_ascii=False)
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT aliases_json, first_seen FROM learned_contacts WHERE email = ?",
+                "SELECT aliases_json, first_seen, source, display_name FROM learned_contacts WHERE email = ?",
                 (normalized_email,),
             ).fetchone()
             if row is None:
@@ -78,6 +78,29 @@ class ContactStore:
                     (normalized_email, normalized_name, aliases_json, source, now_ts, now_ts),
                 )
             else:
+                existing_source = str(row["source"] or "").strip().lower()
+                incoming_source = (source or "").strip().lower()
+                source_priority = {
+                    "manual": 50,
+                    "send": 40,
+                    "inbox": 30,
+                    "mailbox": 25,
+                    "graph": 20,
+                    "resolved": 10,
+                    "learned": 5,
+                }
+                chosen_source = (
+                    incoming_source
+                    if source_priority.get(incoming_source, 0) >= source_priority.get(existing_source, 0)
+                    else existing_source
+                )
+                existing_name = str(row["display_name"] or "").strip()
+                should_keep_existing_name = (
+                    incoming_source == "resolved"
+                    and source_priority.get(existing_source, 0) > source_priority.get(incoming_source, 0)
+                    and bool(existing_name)
+                )
+                chosen_name = existing_name if should_keep_existing_name else normalized_name
                 old_aliases = []
                 try:
                     raw = json.loads(row["aliases_json"] or "[]")
@@ -102,7 +125,7 @@ class ContactStore:
                     SET display_name = ?, aliases_json = ?, source = ?, last_seen = ?
                     WHERE email = ?
                     """,
-                    (normalized_name, json.dumps(merged, ensure_ascii=False), source, now_ts, normalized_email),
+                    (chosen_name, json.dumps(merged, ensure_ascii=False), chosen_source, now_ts, normalized_email),
                 )
             conn.commit()
 

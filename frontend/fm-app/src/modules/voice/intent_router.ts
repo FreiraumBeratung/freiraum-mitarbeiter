@@ -156,6 +156,11 @@ function normalize(text: string) {
   normalized = normalized.replace(/\ber\s*set(?:ze|zte)\b/gi, 'ersetze');
   // FM PATCH: ASR-Toleranz "ersetze seit 2 ..." -> "ersetze satz 2 ..."
   normalized = normalized.replace(/^(ersetze)\s+seit(\s+\d{1,2}\b)/i, "$1 satz$2");
+  // FM PATCH: ASR-Toleranz für "Löschersatz/Blöschesatz 2" -> "loesche satz 2"
+  normalized = normalized.replace(
+    /\b(?:bloeschesatz|bloschesatz|loeschersatz|loschersatz|loeschesatz|loschesatz)\s+(\d{1,2})\b/gi,
+    "loesche satz $1"
+  );
   
   return normalized;
 }
@@ -3281,7 +3286,18 @@ const WHATSAPP_STYLE_COMMAND_FIRST = new Set<string>([
 ]);
 
 /** Namen nach "für"/"an" bei Preview/Prepare: diese Wörter dürfen nie als Empfänger genommen werden. */
-const PREP_NAME_STOP = new Set<string>(['nur', 'vorbereiten', 'vorbereite', 'bitte', 'mal', 'eben', 'kurz', 'vorschlag', 'entwurf']);
+const PREP_NAME_STOP = new Set<string>([
+  'nur',
+  'vorbereiten',
+  'vorbereite',
+  'bitte',
+  'mal',
+  'eben',
+  'kurz',
+  'vorschlag',
+  'entwurf',
+  'betreff',
+]);
 
 /** Body-Start-Tokens: Name nach Präposition endet davor. */
 const PREP_BODY_START = new Set<string>(['ich', 'wir', 'hi', 'hallo', 'kannst', 'könnt', 'ruf', 'rufe', 'bitte', 'bin', 'meld', 'melde']);
@@ -4235,7 +4251,7 @@ const BODY_START_WORDS_FROM_SOURCE = new Set(["hi", "hallo", "hey", "moin", "ser
 function extractExplicitSubjectFromSource(sourceText: string): string | undefined {
   const src = (sourceText ?? "").toString();
   if (!src.trim()) return undefined;
-  const keywordMatch = /\bbetreff\b/i.exec(src);
+  const keywordMatch = /\b(?:betreff|betrefft)\b/i.exec(src);
   if (!keywordMatch || keywordMatch.index == null) return undefined;
 
   let rest = src.slice(keywordMatch.index + keywordMatch[0].length).trim();
@@ -4273,7 +4289,7 @@ function parseSubjectFromBody(bodyHint: string, bodyHintRaw: string): {
   bodyHintRaw: string;
   subjectDetected: boolean;
 } {
-  const re = /\b(betreff|titel|subject)\s+(.+)$/i;
+  const re = /\b(betreff|betrefft|titel|subject)\s+(.+)$/i;
   const match = bodyHintRaw.match(re);
   if (!match) {
     return { bodyHint, bodyHintRaw, subjectDetected: false };
@@ -5718,6 +5734,18 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     const deleteLastOne = text.match(/^(?:loesch(?:e)?|losch(?:e)?|entferne|mach)\s+(?:den\s+)?letzten\s+satz(?:\s+weg)?(?:\s+bitte)?[.!?]*$/i);
     if (deleteLastOne && hasSentenceEditContext) {
       return { type: "email-body-delete-last-sentence", payload: { n: 1 } };
+    }
+
+    const deleteNthAsrAlias = original.match(
+      /^(?:bl(?:oe|o|ö)schesatz|l(?:oe|o|ö)schersatz|l(?:oe|o|ö)schesatz)\s+(\d{1,2})(?:\s+bitte)?[.!?]*$/i
+    );
+    if (deleteNthAsrAlias && hasSentenceEditContext) {
+      const n = parseSentenceOrdinalOrNumber((deleteNthAsrAlias[1] ?? "").trim());
+      if (n >= 1) {
+        console.log(`[sentence] asr-alias detected: loeschersatz n=${n}`);
+        console.log(`[sentence] routed edit delete-nth from intent_router n=${n}`);
+        return { type: "sentence-delete-nth", payload: { n } };
+      }
     }
 
     const deleteNthSynonym =

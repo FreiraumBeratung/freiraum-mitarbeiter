@@ -292,7 +292,7 @@ export function buildReplyIntentFromSelectedMailContext(
         ? autoSend
           ? "Direktantwort erkannt. Ich sende sofort, sobald der Entwurf vollständig ist."
           : undefined
-        : "Mail-Kontext aktiv. Diktiere jetzt den Antworttext, ich erstelle den Entwurf.",
+        : "Diktiere jetzt den Antworttext, ich erstelle den Entwurf.",
     },
   };
 }

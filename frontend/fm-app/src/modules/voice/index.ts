@@ -913,6 +913,39 @@ function isLikelyMisheardComposerCommand(input: string): boolean {
   ].some((pattern) => pattern.test(text));
 }
 
+function isLikelyUnclearComposeFallbackInContext(input: string): boolean {
+  const text = (input ?? "").toString().trim();
+  if (!text) return false;
+  const normalized = text.replace(/["'`„“‚‘]/g, "").trim();
+  const compact = normalized.toLowerCase().replace(/\s+/g, " ");
+  if (!compact || compact.length > 28) return false;
+  if (/^(antwort(?:e|et|en)?|direkt|sofort|jetzt)\b/.test(compact)) return false;
+  if (
+    /^(?:text|mailtext|mail text)\s+(?:löschen|loeschen|loschen)\b/.test(compact) ||
+    /^(?:textlöschen|textloeschen|textloschen)\b/.test(compact)
+  ) {
+    return false;
+  }
+  if (/^(?:schiss|schiess|schieß)\s+satz\s+\d{1,2}\b/.test(compact)) return true;
+  if (/^(?:kein\s+)?neuer\s+text\b/.test(compact)) return true;
+  if (
+    /\bsatz\s+\d{1,2}\b/.test(compact) &&
+    !/\b(?:ersetz|ersätz|ersaetz|durch|lösch|loesch|losch|mach|aus)\b/.test(compact)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeContextDirectReplyTranscript(input: string): string {
+  const raw = (input ?? "").toString().trim();
+  if (!raw) return raw;
+  if (/^\s*(?:direkt|sofort|jetzt)\b[\s,.:;!?-]+\S/i.test(raw)) {
+    return `Antwort ${raw}`;
+  }
+  return raw;
+}
+
 function isMiniCommandIntentType(type: VoiceIntent["type"]): boolean {
   return [
     "mail-body-clear",
@@ -952,12 +985,55 @@ function isLikelyMiniCommandText(input: string): boolean {
   return false;
 }
 
+type ContactAmbiguityChoice = {
+  index: number;
+  displayName: string;
+  email: string;
+  label: string;
+};
+
+function parseAmbiguousContactChoiceIndex(input: string, maxChoices: number): number | null {
+  const text = (input ?? "").toString().trim().toLowerCase();
+  if (!text || maxChoices <= 0) return null;
+  const normalized = text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const patterns: Array<[RegExp, number]> = [
+    [/\b(?:kontakt|person|nummer)\s*(?:nr\.?\s*)?1\b/, 1],
+    [/\b(?:kontakt|person|nummer)\s*(?:nr\.?\s*)?2\b/, 2],
+    [/\b(?:kontakt|person|nummer)\s*(?:nr\.?\s*)?3\b/, 3],
+    [/\b(?:erste|erster|erstes)(?:\s+person)?\b/, 1],
+    [/\b(?:zweite|zweiter|zweites)(?:\s+person)?\b/, 2],
+    [/\b(?:dritte|dritter|drittes)(?:\s+person)?\b/, 3],
+  ];
+  for (const [re, n] of patterns) {
+    if (re.test(normalized)) return n <= maxChoices ? n : null;
+  }
+  return null;
+}
+
+function extractFirstEmailAddress(input: string): string | null {
+  const match = (input ?? "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0]?.trim().toLowerCase() || null;
+}
+
+function isAmbiguousChoiceSelectionAttempt(input: string): boolean {
+  const text = (input ?? "").toString().toLowerCase();
+  if (!text.trim()) return false;
+  if (/@/.test(text)) return true;
+  return /\b(?:kontakt|person|nummer|erste|erster|erstes|zweite|zweiter|zweites|dritte|dritter|drittes)\b/.test(text);
+}
+
 function resolveMiniCommandIntentFromText(input: string): VoiceIntent | null {
   const text = (input ?? "").toString().trim().toLowerCase().replace(/\s+/g, " ");
   if (!text) return null;
 
   if (
     /^(?:text|mailtext|mail text)\s+(?:löschen|loeschen|loschen)\.?$/.test(text) ||
+    /^(?:textlöschen|textloeschen|textloschen)\.?$/.test(text) ||
     /^(?:lösche|loesche|losche)\s+(?:den\s+)?(?:text|mailtext|mail text)\b/.test(text)
   ) {
     return { type: "mail-body-clear" };
@@ -1000,6 +1076,36 @@ function normalizeFallbackBodyForSend(rawBody: string): string {
 }
 
 const FAST_PATH_POLISH_MAX_BODY_LENGTH = 180;
+const LONG_DICTATION_POLISH_THRESHOLD = 260;
+const LONG_DICTATION_POLISH_TIMEOUT_CAP_SEND_NOW_MS = 12000;
+const LONG_DICTATION_POLISH_TIMEOUT_CAP_PREVIEW_MS = 7000;
+const VERY_LONG_DICTATION_POLISH_THRESHOLD = 430;
+const VERY_LONG_DICTATION_POLISH_TIMEOUT_CAP_SEND_NOW_MS = 15000;
+const VERY_LONG_DICTATION_POLISH_TIMEOUT_CAP_PREVIEW_MS = 10000;
+
+function getPolishRuntimeProfile(mode: "sendNow" | "previewOnly", bodyLength: number) {
+  const len = Math.max(0, bodyLength | 0);
+  const baseTimeoutMs = getDynamicPolishTimeoutMs(mode, len);
+  const isLongDictation = len >= LONG_DICTATION_POLISH_THRESHOLD;
+  const isVeryLongDictation = len >= VERY_LONG_DICTATION_POLISH_THRESHOLD;
+  const modeCapMs = isVeryLongDictation
+    ? (mode === "sendNow"
+      ? VERY_LONG_DICTATION_POLISH_TIMEOUT_CAP_SEND_NOW_MS
+      : VERY_LONG_DICTATION_POLISH_TIMEOUT_CAP_PREVIEW_MS)
+    : (mode === "sendNow"
+      ? LONG_DICTATION_POLISH_TIMEOUT_CAP_SEND_NOW_MS
+      : LONG_DICTATION_POLISH_TIMEOUT_CAP_PREVIEW_MS);
+  const timeoutMs = isLongDictation
+    ? Math.min(baseTimeoutMs, modeCapMs)
+    : baseTimeoutMs;
+  return {
+    timeoutMs,
+    baseTimeoutMs,
+    isLongDictation,
+    isVeryLongDictation,
+    shortPrompt: isLongDictation,
+  };
+}
 
 function isHardSendConfirmationPhrase(sourceText?: string): boolean {
   if (!sourceText) return false;
@@ -1178,6 +1284,30 @@ function isResolverPlaceholderName(value?: string | null): boolean {
   if (!raw) return true;
   const compact = raw.replace(/[^\p{L}\p{N}\s-]/gu, "").replace(/\s+/g, " ").trim();
   if (!compact) return true;
+  const singleToken = compact.split(" ").filter(Boolean).length === 1;
+  if (
+    singleToken &&
+    [
+      "gut",
+      "morgen",
+      "ja",
+      "nein",
+      "ok",
+      "okay",
+      "hallo",
+      "hi",
+      "hey",
+      "servus",
+      "moin",
+      "antwort",
+      "mail",
+      "email",
+      "nachricht",
+      "text",
+    ].includes(compact)
+  ) {
+    return true;
+  }
   return [
     "folgende",
     "folgendes",
@@ -1297,6 +1427,7 @@ function dispatchState(s: VoiceState) {
 
 let recognition: BrowserSpeechRecognition | null = null;
 let lastTranscript: string = ""; // Für Wizard4Intent-Parsing
+let latestVoiceCommandRunId = 0;
 
 function getRecognition(): BrowserSpeechRecognition | null {
   if (typeof window === "undefined") return null;
@@ -1359,8 +1490,21 @@ export class VoiceController {
       this.listening = false;
       if (text) {
         this.handleTranscript(text);
+      } else if (controller.signal.aborted) {
+        this.setState("idle");
       } else {
-        this.setState("error");
+        const w = typeof window !== "undefined" ? (window as any) : null;
+        if (w) {
+          w.__fm_last_hint = {
+            kind: "voice_retry",
+            message: "Ich habe nichts Verständliches erkannt. Bitte den Befehl kurz wiederholen.",
+            ts: Date.now(),
+          };
+          if (typeof window.dispatchEvent === "function") {
+            window.dispatchEvent(new CustomEvent("fm-hint-update"));
+          }
+        }
+        this.setState("idle");
       }
       return;
     }
@@ -1870,6 +2014,9 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const composeStartedAtMs = nowMs();
       const w = window as any;
       let didAutoSend = false;
+      const commandRunId = Number(((intent as any)?.meta?.__fmRunId ?? 0) as number);
+      const isStaleRun = () =>
+        commandRunId > 0 && commandRunId !== latestVoiceCommandRunId;
       let completionSpoken = false;
       const sayPreparedOnce = (fallbackText: string) => {
         if (completionSpoken) return;
@@ -2061,6 +2208,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             }
             
             let sanitizedBody = bodyHint;
+            sanitizedBody = sanitizedBody.replace(/^[\s?¿!.,:;]+(?=\S)/, "").trim();
             sanitizedBody = sanitizedBody.replace(/\s*(?:doch nicht|ach nein|lieber doch nicht|besser doch nicht|ne doch nicht)[\s,.:;!?-]*$/i, "").trim();
             sanitizedBody = stripSendControlPhrasesFinal(sanitizedBody);
             const recipientHints = [(intent as any).toRaw, (intent as any).toName, wizard4Draft?.toName].filter(Boolean) as string[];
@@ -2415,7 +2563,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           
           try {
             const resolveUrl = `${BACKEND}/api/contacts/resolve?name=${encodeURIComponent(finalNameForResolver)}`;
-            const resolveResponse = await fetch(resolveUrl);
+            const resolverAbortController = new AbortController();
+            const resolverTimeoutMs = 1200;
+            const resolverTimeout = setTimeout(() => resolverAbortController.abort(), resolverTimeoutMs);
+            const resolveResponse = await fetch(resolveUrl, {
+              signal: resolverAbortController.signal,
+            }).finally(() => clearTimeout(resolverTimeout));
             
             if (resolveResponse.ok) {
               const contentType = (resolveResponse.headers.get("content-type") || "").toLowerCase();
@@ -2432,6 +2585,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                 if (resolveData.ok && resolveData.email && isStrictValidEmail(resolveData.email)) {
                   finalToEmail = resolveData.email;
                   recipientResolutionState = "resolved";
+                  (window as any).__fm_contact_ambiguity_choices = null;
                   console.log('[fm-voice][wizard4][contact-resolver] Kontakt aufgelöst:', finalNameForResolver, '->', finalToEmail);
                   
                   // Draft-Felder setzen, damit AutoSend-Guard die E-Mail erkennt
@@ -2468,24 +2622,51 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                     };
                   }
                 } else if (resolveData?.ambiguity?.choices?.length) {
-                  const choices = (resolveData.ambiguity.choices as Array<{ displayName?: string; email?: string }>)
-                    .slice(0, 3)
-                    .map((choice) => {
-                      const label = (choice.displayName || "").trim();
-                      const email = (choice.email || "").trim();
-                      return label && email ? `${label} (${email})` : (label || email);
+                  const uniqueChoices = (resolveData.ambiguity.choices as Array<{ displayName?: string; email?: string }>)
+                    .slice(0, 5)
+                    .map((choice) => ({
+                      displayName: (choice.displayName || "").trim(),
+                      email: (choice.email || "").trim(),
+                    }))
+                    .filter((choice) => !!choice.email || !!choice.displayName)
+                    .filter((choice, idx, arr) => {
+                      const key = `${(choice.email || "").toLowerCase()}::${(choice.displayName || "").toLowerCase()}`;
+                      return arr.findIndex((x) => `${(x.email || "").toLowerCase()}::${(x.displayName || "").toLowerCase()}` === key) === idx;
                     })
-                    .filter(Boolean);
+                    .slice(0, 3);
+                  const choices = uniqueChoices.map((choice, idx) => {
+                    const normalizedEmail = (choice.email || "").trim();
+                    const displayRaw = (choice.displayName || "").trim();
+                    const displayWithoutEmail = normalizedEmail
+                      ? displayRaw
+                          .replace(new RegExp(`\\(\\s*${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\)`, "ig"), "")
+                          .replace(new RegExp(`\\b${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "ig"), "")
+                          .replace(/\s+/g, " ")
+                          .trim()
+                      : displayRaw;
+                    const baseLabel = displayWithoutEmail || normalizedEmail || `Kontakt ${idx + 1}`;
+                    return `Kontakt ${idx + 1}: ${baseLabel}`;
+                  });
                   recipientResolutionState = "ambiguous";
                   recipientAmbiguityChoices = choices;
                   if (choices.length > 0) {
                     const choiceText = choices.join(" oder ");
-                    const hintMessage = `Mehrdeutiger Kontakt: ${choiceText}. Nenne bitte den genauen Namen.`;
+                    const hintMessage = "Mehrdeutiger Kontakt. Sag bitte Kontakt 1, Kontakt 2 oder Kontakt 3.";
                     (intent as any).meta = {
                       ...((intent as any).meta ?? {}),
                       forcePreviewOnly: true,
                       forcePreviewOnlyReason: "missing_recipient",
-                      uiHint: `Ich habe mehrere Kontakte gefunden: ${choiceText}. Wen meinst du genau?`,
+                      uiHint: `Ich habe mehrere Kontakte gefunden: ${choiceText}. Wen meinst du genau? Sag Kontakt 1, Kontakt 2 oder Kontakt 3.`,
+                    };
+                    (window as any).__fm_contact_ambiguity_choices = {
+                      input: finalNameForResolver,
+                      ts: Date.now(),
+                      choices: uniqueChoices.map((choice, idx) => ({
+                        index: idx + 1,
+                        displayName: choice.displayName || choice.email || `Kontakt ${idx + 1}`,
+                        email: choice.email || "",
+                        label: choices[idx],
+                      })),
                     };
                     (window as any).__fm_last_hint = {
                       kind: "contact_ambiguous",
@@ -2521,7 +2702,12 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             }
           } catch (err) {
             recipientResolutionState = "api_error";
-            console.error('[fm-voice][wizard4][contact-resolver] Fehler beim Auflösen:', err);
+            const isAbortError = (err as any)?.name === "AbortError";
+            if (isAbortError) {
+              console.warn('[fm-voice][wizard4][contact-resolver] Timeout beim Auflösen:', finalNameForResolver);
+            } else {
+              console.error('[fm-voice][wizard4][contact-resolver] Fehler beim Auflösen:', err);
+            }
             // Fehler nicht blockierend, wir versuchen es einfach nicht
           }
         }
@@ -2967,9 +3153,6 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         const uiSubject = ((w as any).__fm_get_mail_subject() ?? '').toString().trim();
         subject = uiSubject || 'Kurze Info';
         console.log('[wizard4][subject] keeping manual-edit, skip override:', subject);
-      } else if (hasExplicitSubject || draftSubjectTrimmed) {
-        subject = (wizard4Draft!.subject ?? '').trim();
-        console.log('[wizard4][subject] keeping explicitSubject/draft, skip override:', subject);
       } else if (intentExplicitSubjectTrimmed) {
         subject = intentExplicitSubjectTrimmed;
         forceSetExplicitCurrentCompose = true;
@@ -2981,6 +3164,9 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
         console.log(`[wizard4][subject-lock] locked subject="${intentExplicitSubjectTrimmed}"`);
         console.log('[wizard4][subject] using explicitSubject from source:', subject);
+      } else if (hasExplicitSubject || draftSubjectTrimmed) {
+        subject = (wizard4Draft!.subject ?? '').trim();
+        console.log('[wizard4][subject] keeping explicitSubject/draft, skip override:', subject);
       } else if (isSubjectLocked) {
         subject = currentUiSubject || lockedSubjectValue || draftSubjectTrimmed || 'Kurze Info';
         (wizard4Draft as any).meta = { ...((wizard4Draft as any).meta ?? {}), subjectLocked: true };
@@ -3146,19 +3332,36 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       // Starte Polish früh (parallel), speichere Promise
       let polishPromise: Promise<any> | null = null;
       let polishStartedAtMs = 0;
+      let polishRuntimeProfile: ReturnType<typeof getPolishRuntimeProfile> | null = null;
       if (shouldPolish && !shouldUseFastPathLocalNormalization) {
         const sendMode = wizard4Draft.sendMode || 'previewOnly';
         const mode = sendMode === 'sendNow' ? 'sendNow' : 'previewOnly';
-        const timeoutMs = getDynamicPolishTimeoutMs(mode, rawBodyForPolish.length);
+        polishRuntimeProfile = getPolishRuntimeProfile(mode, rawBodyForPolish.length);
         
         polishStartedAtMs = nowMs();
         timingMark("email-compose-polish-start", {
           mode,
-          timeoutMs,
+          timeoutMs: polishRuntimeProfile.timeoutMs,
+          baseTimeoutMs: polishRuntimeProfile.baseTimeoutMs,
+          longDictation: polishRuntimeProfile.isLongDictation,
+          veryLongDictation: polishRuntimeProfile.isVeryLongDictation,
+          shortPrompt: polishRuntimeProfile.shortPrompt,
           bodyLength: rawBodyForPolish.length,
         });
-        console.log('[wizard4][ai-polish] Starte Polish früh (parallel)', { mode, timeoutMs, bodyLength: rawBodyForPolish.length });
-        polishPromise = polishEmailBody(rawBodyForPolish, { mode, timeoutMs });
+        console.log('[wizard4][ai-polish] Starte Polish früh (parallel)', {
+          mode,
+          timeoutMs: polishRuntimeProfile.timeoutMs,
+          baseTimeoutMs: polishRuntimeProfile.baseTimeoutMs,
+          longDictation: polishRuntimeProfile.isLongDictation,
+          veryLongDictation: polishRuntimeProfile.isVeryLongDictation,
+          shortPrompt: polishRuntimeProfile.shortPrompt,
+          bodyLength: rawBodyForPolish.length,
+        });
+        polishPromise = polishEmailBody(rawBodyForPolish, {
+          mode,
+          timeoutMs: polishRuntimeProfile.timeoutMs,
+          shortPrompt: polishRuntimeProfile.shortPrompt,
+        });
       } else {
         if (shouldUseFastPathLocalNormalization) {
           console.log('[wizard4][ai-polish] skipped (fast-path local normalization)', {
@@ -3176,6 +3379,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       if (!polishPromise) {
         timingMark("email-compose-polish-skipped", {
           shouldUseFastPathLocalNormalization,
+          longDictation: rawBodyForPolish.trim().length >= LONG_DICTATION_POLISH_THRESHOLD,
+          veryLongDictation: rawBodyForPolish.trim().length >= VERY_LONG_DICTATION_POLISH_THRESHOLD,
           isMissingBodyOrTooShort,
           isStatusBrainForPolish,
           hasStatusBrainTemplateForPolish,
@@ -3204,6 +3409,17 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       
       // Warte kurz, damit die MailCompose-Komponente gemountet ist
       setTimeout(async () => {
+        if (isStaleRun()) {
+          console.log("[fm-voice][stale-run-guard] skip stale email-compose run before UI update", {
+            runId: commandRunId,
+            latestRunId: latestVoiceCommandRunId,
+          });
+          timingMark("email-compose-skipped-stale-run", {
+            runId: commandRunId,
+            latestRunId: latestVoiceCommandRunId,
+          });
+          return;
+        }
         // ============================================================
         // KI-POLISHING: Warte auf Polish (bei sendNow) oder nutze Ergebnis (bei previewOnly)
         // WICHTIG: Bei sendNow wird hier AUSDRÜCKLICH auf Polish gewartet, bevor AutoSend startet
@@ -3282,13 +3498,17 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             } else {
               // Fallback: Verwende Original-Body
               finalBodyForUi = rawBodyForUi;
+              const isLongDictationFallback =
+                !isSendNow && rawBodyForUi.length >= LONG_DICTATION_POLISH_THRESHOLD;
               const shouldUseLocalFallbackNormalization =
-                isSendNow && (polishResult.reason === "timeout" || polishResult.reason === "error");
+                (isSendNow || isLongDictationFallback) &&
+                (polishResult.reason === "timeout" || polishResult.reason === "error");
               if (shouldUseLocalFallbackNormalization) {
                 const locallyNormalized = normalizeFallbackBodyForSend(finalBodyForUi);
                 if (locallyNormalized && locallyNormalized !== finalBodyForUi) {
                   console.log("[wizard4][ai-polish] local fallback normalization applied", {
                     reason: polishResult.reason,
+                    longDictationFallback: isLongDictationFallback,
                     beforeLength: finalBodyForUi.length,
                     afterLength: locallyNormalized.length,
                   });
@@ -3371,11 +3591,21 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           timingMark("email-compose-polish-finished", {
             polishMs: Math.max(0, Math.round(nowMs() - polishStartedAtMs)),
             usedFastPath: false,
+            longDictation: !!polishRuntimeProfile?.isLongDictation,
+            veryLongDictation: !!polishRuntimeProfile?.isVeryLongDictation,
+            shortPrompt: !!polishRuntimeProfile?.shortPrompt,
+            timeoutMs: polishRuntimeProfile?.timeoutMs ?? null,
+            baseTimeoutMs: polishRuntimeProfile?.baseTimeoutMs ?? null,
           });
         } else {
           timingMark("email-compose-polish-finished", {
             polishMs: 0,
             usedFastPath: shouldUseFastPathLocalNormalization,
+            longDictation: rawBodyForPolish.trim().length >= LONG_DICTATION_POLISH_THRESHOLD,
+            veryLongDictation: rawBodyForPolish.trim().length >= VERY_LONG_DICTATION_POLISH_THRESHOLD,
+            shortPrompt: false,
+            timeoutMs: null,
+            baseTimeoutMs: null,
           });
         }
         
@@ -3541,6 +3771,19 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             const maxRetries = 5;
             
             const trySend = () => {
+              if (isStaleRun()) {
+                console.log("[fm-voice][stale-run-guard] cancel stale autosend attempt", {
+                  runId: commandRunId,
+                  latestRunId: latestVoiceCommandRunId,
+                  retryCount,
+                });
+                timingMark("email-compose-autosend-cancelled-stale-run", {
+                  runId: commandRunId,
+                  latestRunId: latestVoiceCommandRunId,
+                  retryCount,
+                });
+                return;
+              }
               try {
                 // Stelle sicher, dass safeAutoSendEmail im UI steht
                 if (safeAutoSendEmail && typeof w.__fm_set_mail_to === 'function') {
@@ -5173,6 +5416,7 @@ export function syncSubjectLockWithContext(selectedContext: { uid?: string | nul
 }
 
 export function processVoiceCommand(transcript: string, navigate: NavigateFunction) {
+  const commandRunId = ++latestVoiceCommandRunId;
   const commandTiming = createVoiceTiming(transcript ?? "");
   logVoiceTiming(commandTiming, "command-received");
   const normalizeContextReplySubject = (rawSubject: string | null | undefined): string => {
@@ -5198,8 +5442,59 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     hasContext: !!selectedContext,
   });
   syncSubjectLockWithContext(selectedContext);
+  const w = typeof window !== "undefined" ? (window as any) : null;
+  const pendingAmbiguity = w?.__fm_contact_ambiguity_choices;
+  if (
+    pendingAmbiguity &&
+    Array.isArray(pendingAmbiguity.choices) &&
+    pendingAmbiguity.choices.length > 0 &&
+    w?.__fm_last_hint?.kind === "contact_ambiguous"
+  ) {
+    const choices = pendingAmbiguity.choices as ContactAmbiguityChoice[];
+    const selectedIndex = parseAmbiguousContactChoiceIndex(routingTranscript, choices.length);
+    const spokenEmail = extractFirstEmailAddress(routingTranscript);
+    const selectedByIndex = selectedIndex ? choices.find((c) => c.index === selectedIndex) ?? null : null;
+    const selectedByEmail = spokenEmail
+      ? choices.find((c) => (c.email || "").trim().toLowerCase() === spokenEmail) ?? null
+      : null;
+    const selectedChoice = selectedByIndex ?? selectedByEmail;
+    if (selectedChoice && typeof w.__fm_set_mail_to === "function") {
+      w.__fm_set_mail_to(selectedChoice.email);
+      w.__fm_contact_ambiguity_choices = null;
+      w.__fm_last_hint = {
+        kind: "contact_ambiguous_resolved",
+        message: `Empfänger gesetzt: ${selectedChoice.displayName || selectedChoice.email}.`,
+        ts: Date.now(),
+      };
+      if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      }
+      PartnerBotBus.say(`Alles klar. Ich nehme Kontakt ${selectedChoice.index}.`);
+      logVoiceTiming(commandTiming, "contact-ambiguity-choice-resolved", {
+        selectedIndex: selectedChoice.index,
+        selectedEmail: selectedChoice.email,
+      });
+      return;
+    }
+    if (isAmbiguousChoiceSelectionAttempt(routingTranscript)) {
+      const maxChoice = Math.min(choices.length, 3);
+      const hintMessage = `Bitte wähle eindeutig mit Kontakt 1 bis ${maxChoice}.`;
+      w.__fm_last_hint = {
+        kind: "contact_ambiguous",
+        message: hintMessage,
+        ts: Date.now(),
+      };
+      if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      }
+      PartnerBotBus.say(hintMessage);
+      logVoiceTiming(commandTiming, "contact-ambiguity-choice-invalid", {
+        transcript: routingTranscript,
+      });
+      return;
+    }
+  }
   if (selectedContext && isExplicitContextSendConfirmation(routingTranscript)) {
-    const w = typeof window !== "undefined" ? (window as any) : null;
     const to = String(w?.__fm_get_mail_to?.() ?? "").trim();
     const subject = String(w?.__fm_get_mail_subject?.() ?? "").trim();
     const body = String(w?.__fm_get_mail_body?.() ?? "").trim();
@@ -5228,13 +5523,23 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     });
     allowNextEmailSendWithoutExtraConfirmationUntil = Date.now() + 30000;
     applyVoiceIntent(
-      { type: "email-send", sourceText: routingTranscript } as any,
+      {
+        type: "email-send",
+        sourceText: routingTranscript,
+        meta: {
+          __fmTiming: commandTiming,
+          __fmRunId: commandRunId,
+        },
+      } as any,
       navigate
     );
     return;
   }
 
-  const replyIntent = buildReplyIntentFromSelectedMailContext(routingTranscript, selectedContext);
+  const contextRoutingTranscript = selectedContext
+    ? normalizeContextDirectReplyTranscript(routingTranscript)
+    : routingTranscript;
+  const replyIntent = buildReplyIntentFromSelectedMailContext(contextRoutingTranscript, selectedContext);
   if (replyIntent) {
     console.log("[fm-voice][exchange-context] reply intent from active mail context", {
       contextUid: selectedContext?.uid ?? null,
@@ -5242,7 +5547,7 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     });
   }
   const miniCommandIntent = resolveMiniCommandIntentFromText(routingTranscript);
-  const routedIntent = miniCommandIntent ?? routeVoiceIntent(routingTranscript);
+  const routedIntent = miniCommandIntent ?? routeVoiceIntent(contextRoutingTranscript);
   const hasComposerContext =
     typeof window !== "undefined" &&
     typeof (window as any).__fm_set_mail_body === "function" &&
@@ -5254,23 +5559,33 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     console.log("[fm-voice][exchange-context] hard bypass: prefer routed mini/editor command", {
       routedType: routedIntent.type,
       replyType: replyIntent.type,
-      transcript: routingTranscript,
+      transcript: contextRoutingTranscript,
     });
   }
 
-  if (
-    routedIntent.type === "ai-chat" &&
-    (selectedContext?.uid || hasComposerContext) &&
-    (isLikelyNoiseUtterance(routingTranscript) || isLikelyMisheardComposerCommand(routingTranscript))
-  ) {
+  if (routedIntent.type === "ai-chat" && (selectedContext?.uid || hasComposerContext)) {
     const w = typeof window !== "undefined" ? (window as any) : null;
+    const isNoise = isLikelyNoiseUtterance(routingTranscript);
     const commandLikeMisheard = isLikelyMisheardComposerCommand(routingTranscript);
+    const isUnclearInComposeContext = !isNoise && !commandLikeMisheard;
+    const canUseReplyContextFallback = !!selectedContext?.uid && !!replyIntent;
+    const shouldBlockAiFallback =
+      isNoise ||
+      commandLikeMisheard ||
+      !canUseReplyContextFallback;
+    if (!shouldBlockAiFallback) {
+      logVoiceTiming(commandTiming, "compose-ai-fallback-allowed-context-reply", {
+        transcript: contextRoutingTranscript,
+      });
+    } else {
     if (w) {
       w.__fm_last_hint = {
-        kind: commandLikeMisheard ? "voice_command_retry" : "voice_noise_retry",
+        kind: isNoise ? "voice_noise_retry" : "voice_command_retry",
         message: commandLikeMisheard
           ? "Das klang wie ein Bearbeitungsbefehl, aber unklar. Bitte wiederhole den Befehl deutlich."
-          : "Ich habe nur einen kurzen Laut verstanden. Wiederhole bitte den Befehl.",
+          : isNoise
+            ? "Ich habe nur einen kurzen Laut verstanden. Wiederhole bitte den Befehl."
+            : "Unklar verstanden. Bitte formuliere den Befehl erneut, zum Beispiel: 'Text löschen' oder 'Satz 2 ersetzen ...'.",
         ts: Date.now(),
       };
       if (typeof window.dispatchEvent === "function") {
@@ -5280,11 +5595,40 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     PartnerBotBus.say(
       commandLikeMisheard
         ? "Ich habe den Bearbeitungsbefehl nicht sicher verstanden. Bitte wiederholen."
-        : "Ich habe nur einen kurzen Laut verstanden. Bitte wiederholen."
+        : isNoise
+          ? "Ich habe nur einen kurzen Laut verstanden. Bitte wiederholen."
+          : "Ich habe den Befehl nicht sicher verstanden. Bitte wiederhole ihn klar."
     );
-    logVoiceTiming(commandTiming, "noise-guard-ignored", {
-      transcript: routingTranscript,
+    logVoiceTiming(commandTiming, "compose-ai-fallback-blocked", {
+      transcript: contextRoutingTranscript,
       commandLikeMisheard,
+      isNoise,
+      isUnclearInComposeContext,
+    });
+    return;
+    }
+  }
+  if (
+    routedIntent.type === "email-compose" &&
+    (selectedContext?.uid || hasComposerContext) &&
+    isLikelyUnclearComposeFallbackInContext(routingTranscript) &&
+    !shouldSendNowFromSourceText(contextRoutingTranscript)
+  ) {
+    const w = typeof window !== "undefined" ? (window as any) : null;
+    if (w) {
+      w.__fm_last_hint = {
+        kind: "voice_command_retry",
+        message:
+          "Das klang wie ein unklarer Bearbeitungsbefehl. Bitte wiederhole klar, z. B. 'Text löschen' oder 'Satz 2 ersetzen ...'.",
+        ts: Date.now(),
+      };
+      if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      }
+    }
+    PartnerBotBus.say("Ich habe den Bearbeitungsbefehl nicht sicher verstanden. Bitte wiederholen.");
+    logVoiceTiming(commandTiming, "compose-fallback-guard-blocked", {
+      transcript: contextRoutingTranscript,
     });
     return;
   }
@@ -5313,12 +5657,12 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     intent.type === "email-compose"
   ) {
     const explicitSendNowRequested =
-      shouldSendNowFromSourceText(routingTranscript) || intent?.meta?.autoSend === true;
+      shouldSendNowFromSourceText(contextRoutingTranscript) || intent?.meta?.autoSend === true;
     const normalizedSubject = normalizeContextReplySubject(selectedContext.subject);
     const nextMeta: any = {
       ...(intent.meta ?? {}),
       source: "exchange-context-compose-fallback",
-      uiHint: intent.meta?.uiHint || "Mail-Kontext aktiv. Ich antworte auf die ausgewählte Nachricht.",
+      uiHint: intent.meta?.uiHint || "Ich habe einen Antwort-Entwurf vorbereitet.",
     };
     if (explicitSendNowRequested) {
       nextMeta.autoSend = true;
@@ -5348,6 +5692,7 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     meta: {
       ...(((intent as any)?.meta ?? {}) as Record<string, unknown>),
       __fmTiming: commandTiming,
+      __fmRunId: commandRunId,
     },
   };
   logVoiceTiming(commandTiming, "apply-intent-start", {
