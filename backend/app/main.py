@@ -30,6 +30,11 @@ from .services.account_session import (
     set_current_account_id,
     verify_account_session,
 )
+from .services.license_guard import (
+    LICENSE_PAUSED_DETAIL,
+    current_account_license_paused,
+    license_pause_blocks_path,
+)
 from .services.scheduler import shutdown_scheduler, start_scheduler
 
 configure_logging()
@@ -62,6 +67,16 @@ async def account_session_middleware(request: Request, call_next):
     account_id = verify_account_session(session_token_from_request(request))
     token = set_current_account_id(account_id)
     try:
+        if account_id and license_pause_blocks_path(request.url.path, request.method):
+            if current_account_license_paused():
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "ok": False,
+                        "licensePaused": True,
+                        "detail": LICENSE_PAUSED_DETAIL,
+                    },
+                )
         return await call_next(request)
     finally:
         reset_current_account_id(token)

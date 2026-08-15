@@ -154,6 +154,31 @@ def test_session_cookie_is_persistent():
     assert kwargs["secure"] is True
 
 
+def test_license_pause_blocks_send_but_not_status():
+    from app.services.license_guard import license_pause_blocks_path
+
+    assert license_pause_blocks_path("/api/mail/send", "POST") is True
+    assert license_pause_blocks_path("/api/mail/inbox", "GET") is True
+    assert license_pause_blocks_path("/api/stt/transcribe", "POST") is True
+    assert license_pause_blocks_path("/api/setup/mail/status", "GET") is False
+    assert license_pause_blocks_path("/api/auth/microsoft/status", "GET") is False
+    assert license_pause_blocks_path("/api/auth/microsoft/logout", "POST") is False
+    assert license_pause_blocks_path("/api/admin/accounts", "GET") is False
+    assert license_pause_blocks_path("/api/mail/send", "OPTIONS") is False
+
+
+def test_license_can_be_paused(tmp_path: Path):
+    registry = AccountRegistry(db_path=tmp_path / "accounts.sqlite3")
+    account = registry.upsert_from_mailbox(email="pilot@example.com")
+    assert account["license_active"] is True
+    paused = registry.set_license_active(account["id"], False)
+    assert paused is not None
+    assert paused["license_active"] is False
+    resumed = registry.set_license_active(account["id"], True)
+    assert resumed is not None
+    assert resumed["license_active"] is True
+
+
 def test_email_logo_resolves_from_repo_branding():
     from app.routers.mail import _prepare_signature_inline_images, _resolve_email_logo_path
 

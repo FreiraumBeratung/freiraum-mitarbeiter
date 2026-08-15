@@ -396,12 +396,16 @@ def get_auth_status() -> Dict[str, Any]:
             pass
     bundle = _ensure_token_loaded(account_id) if account_id else None
     is_admin = False
+    license_paused = False
     try:
         from .admin_access import current_account_is_admin
+        from .license_guard import current_account_license_paused
 
         is_admin = current_account_is_admin()
+        license_paused = current_account_license_paused()
     except Exception:
         is_admin = False
+        license_paused = False
     if bundle is None:
         return {
             "connected": False,
@@ -413,6 +417,8 @@ def get_auth_status() -> Dict[str, Any]:
             "accountEmail": email,
             "accountDisplayName": display_name,
             "isAdmin": is_admin,
+            "licensePaused": license_paused,
+            "licenseActive": (not license_paused) if account_id else True,
         }
     active_token = get_valid_access_token(refresh_if_needed=True)
     remaining = int(max(0, bundle.expires_at - _now()))
@@ -429,6 +435,8 @@ def get_auth_status() -> Dict[str, Any]:
         "accountEmail": email,
         "accountDisplayName": display_name,
         "isAdmin": is_admin,
+        "licensePaused": license_paused,
+        "licenseActive": not license_paused,
     }
 
 

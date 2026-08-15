@@ -64,6 +64,8 @@ def _empty_setup_status(oauth: dict) -> dict:
             "useSsl": False,
         },
         "updatedAt": None,
+        "licensePaused": False,
+        "licenseActive": True,
     }
 
 
@@ -113,6 +115,8 @@ def get_setup_status(request: Request, response: Response):
         },
         "updatedAt": state.get("updated_at"),
         "sessionToken": sign_account_session(account_id),
+        "licensePaused": bool(oauth.get("licensePaused")),
+        "licenseActive": not bool(oauth.get("licensePaused")),
     }
 
 
@@ -216,7 +220,7 @@ def setup_imap(req: ImapSetupRequest, request: Request, response: Response):
 
         existing = get_account_registry().get_by_email(email)
         if existing and not existing.get("license_active"):
-            raise HTTPException(status_code=403, detail="Dieses Konto ist pausiert. Bitte den Admin kontaktieren.")
+            raise HTTPException(status_code=403, detail="Ihre Lizenz wurde pausiert. Bitte setzen Sie sich mit Freiraum Beratung in Kontakt.")
         account = get_account_registry().upsert_from_mailbox(email=email, provider="imap_smtp")
         set_current_account_id(account["id"])
         migrate_legacy_files_into_account(account["id"])

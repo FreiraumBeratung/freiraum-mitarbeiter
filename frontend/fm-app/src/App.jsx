@@ -23,6 +23,7 @@ import RobotAvatar from "./components/robot/RobotAvatar";
 import MailComposeForm from "./components/mail/MailComposeForm";
 import ExchangeInboxPanel from "./components/mail/ExchangeInboxPanel";
 import MailOnboardingOverlay from "./components/onboarding/MailOnboardingOverlay";
+import LicensePausedOverlay from "./components/onboarding/LicensePausedOverlay";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { installApiCredentials } from "./lib/backendBase";
 import { consumeMicrosoftClaimFromUrl } from "./modules/auth/microsoftClaim";
@@ -185,6 +186,7 @@ function Shell() {
       )}
       {/* <PartnerBot /> */}
       <MailOnboardingOverlay />
+      <LicensePausedOverlay />
     </>
   );
 }

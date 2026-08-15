@@ -59,6 +59,22 @@ export function installApiCredentials(): void {
       url.startsWith(backendBase()) ||
       url.includes(":30521/");
     if (!looksLikeAppApi) return originalFetch(input, init);
-    return originalFetch(input, withSessionHeader(init));
+    return originalFetch(input, withSessionHeader(init)).then((res) => {
+      if (res.status === 403) {
+        void res
+          .clone()
+          .json()
+          .then((data) => {
+            const detail = String(data?.detail || "").toLowerCase();
+            if (data?.licensePaused || detail.includes("lizenz wurde pausiert") || detail.includes("pausiert")) {
+              window.dispatchEvent(new CustomEvent("fm-license-paused"));
+            }
+          })
+          .catch(() => {
+            /* ignore */
+          });
+      }
+      return res;
+    });
   };
 }
