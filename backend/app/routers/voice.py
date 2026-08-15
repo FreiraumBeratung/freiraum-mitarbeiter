@@ -9,7 +9,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-from ..services.openai_speech import openai_api_key, tts_wav
+from ..services.openai_speech import openai_api_key, tts_audio
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -86,8 +86,8 @@ async def tts(request: TtsRequest):
     except Exception as exc:
         if openai_api_key():
             try:
-                data = await tts_wav(text)
-                return Response(content=data, media_type="audio/wav")
+                data, media_type = await tts_audio(text)
+                return Response(content=data, media_type=media_type)
             except Exception as tts_exc:
                 print("[openai-tts] error:", repr(tts_exc))
         if isinstance(exc, HTTPException):

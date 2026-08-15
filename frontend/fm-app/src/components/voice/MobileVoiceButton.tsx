@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
+import { stopActiveMicTracks } from "../../modules/stt";
 import { voice, type VoiceState } from "../../modules/voice";
 import { unlockTtsPlayback } from "../../modules/voice/tts";
 
@@ -68,6 +69,9 @@ export default function MobileVoiceButton() {
     lastToggleAtRef.current = now;
     if (busy) return;
     if (listening) {
+      // Mikro noch im Tipp-Gestus aus, sonst sperrt iOS danach den AudioContext → stille TTS.
+      stopActiveMicTracks();
+      unlockTtsPlayback();
       await voice.stop();
       return;
     }

@@ -5,6 +5,26 @@ let cachedLocalSttHealthOk = false;
 const LOCAL_STT_HEALTH_CACHE_MS = 120000;
 const COMMAND_MODE_MAX_RECORD_MS = 7000;
 
+let activeMicStream: MediaStream | null = null;
+let activeRecorder: MediaRecorder | null = null;
+
+export function stopActiveMicTracks(): void {
+  try {
+    if (activeRecorder && activeRecorder.state !== "inactive") {
+      activeRecorder.stop();
+    }
+  } catch {
+    /* ignore */
+  }
+  activeRecorder = null;
+  try {
+    activeMicStream?.getTracks().forEach((track) => track.stop());
+  } catch {
+    /* ignore */
+  }
+  activeMicStream = null;
+}
+
 export async function recordAndTranscribe(
   maxMs = 60000,
   signal?: AbortSignal,
@@ -178,18 +198,22 @@ export async function recordAndTranscribe(
       throw new Error("microphone-unavailable");
     }
     usedBackendRecorder = true;
+    activeMicStream = stream;
     if (signal?.aborted) {
       stopTracks(stream);
+      stopActiveMicTracks();
       return null;
     }
     opts?.onListening?.();
     if (signal?.aborted) {
       stopTracks(stream);
+      stopActiveMicTracks();
       return null;
     }
     if (health?.ok) {
       const mimeType = pickRecorderMime();
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      activeRecorder = recorder;
       const chunks: BlobPart[] = [];
       const blobType = mimeType || "audio/webm";
       const done = new Promise<Blob>((resolve) => {
@@ -225,6 +249,8 @@ export async function recordAndTranscribe(
       }
       const audioBlob = await done;
       stopTracks(stream);
+      activeRecorder = null;
+      activeMicStream = null;
       signal?.removeEventListener("abort", abortHandler);
       const recordFinishedAtMs = nowMs();
       const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));

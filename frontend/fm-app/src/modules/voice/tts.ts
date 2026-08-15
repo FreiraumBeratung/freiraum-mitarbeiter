@@ -26,7 +26,14 @@ export function unlockTtsPlayback() {
   try {
     const Ctx = window.AudioContext || (window as any).webkitAudioContext;
     if (Ctx) {
-      if (!unlockedAudioCtx) unlockedAudioCtx = new Ctx();
+      if (!unlockedAudioCtx) {
+        unlockedAudioCtx = new Ctx();
+        unlockedAudioCtx.onstatechange = () => {
+          if (unlockedAudioCtx && unlockedAudioCtx.state !== "running") {
+            keepAliveSource = null;
+          }
+        };
+      }
       void unlockedAudioCtx.resume();
       if (unlockedAudioCtx.state === "running" && !keepAliveSource) {
         const buffer = unlockedAudioCtx.createBuffer(1, 1, unlockedAudioCtx.sampleRate);
@@ -48,8 +55,10 @@ export function unlockTtsPlayback() {
     if (!primedAudio) {
       primedAudio = new Audio();
       primedAudio.setAttribute("playsinline", "true");
+      primedAudio.setAttribute("webkit-playsinline", "true");
       primedAudio.preload = "auto";
     }
+    primedAudio.loop = true;
     primedAudio.src = SILENCE_WAV;
     void primedAudio.play().catch(() => undefined);
   } catch {
@@ -57,11 +66,17 @@ export function unlockTtsPlayback() {
   }
 }
 
+function isAudioCtxRunning(): boolean {
+  return Boolean(unlockedAudioCtx && unlockedAudioCtx.state === "running");
+}
+
 async function playPcmViaUnlockedContext(data: ArrayBuffer, text: string): Promise<boolean> {
   if (!unlockedAudioCtx) return false;
   try {
     await unlockedAudioCtx.resume();
+    if (!isAudioCtxRunning()) return false;
     const decoded = await unlockedAudioCtx.decodeAudioData(data.slice(0));
+    if (!isAudioCtxRunning()) return false;
     const src = unlockedAudioCtx.createBufferSource();
     src.buffer = decoded;
     src.connect(unlockedAudioCtx.destination);
@@ -70,10 +85,59 @@ async function playPcmViaUnlockedContext(data: ArrayBuffer, text: string): Promi
       emitTtsEvent("end", { text, provider: "piper" });
     };
     src.start();
-    return true;
+    return isAudioCtxRunning();
   } catch {
     return false;
   }
+}
+
+function playViaHtmlAudio(data: ArrayBuffer, mimeType: string, text: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    try {
+      const blob = new Blob([data], { type: mimeType || "audio/mpeg" });
+      const objectUrl = URL.createObjectURL(blob);
+      const audio = primedAudio || new Audio();
+      primedAudio = audio;
+      audio.setAttribute("playsinline", "true");
+      audio.setAttribute("webkit-playsinline", "true");
+      audio.loop = false;
+      const cleanup = () => {
+        URL.revokeObjectURL(objectUrl);
+        audio.onplaying = null;
+        audio.onended = null;
+        audio.onerror = null;
+      };
+      audio.onplaying = () => {
+        emitTtsEvent("start", { text, provider: "piper" });
+        finish(true);
+      };
+      audio.onended = () => {
+        emitTtsEvent("end", { text, provider: "piper" });
+        cleanup();
+      };
+      audio.onerror = () => {
+        emitTtsEvent("error", { text, provider: "piper", reason: "playback_error" });
+        cleanup();
+        finish(false);
+      };
+      audio.src = objectUrl;
+      const playResult = audio.play();
+      if (playResult && typeof playResult.then === "function") {
+        playResult.catch(() => finish(false));
+      }
+      window.setTimeout(() => {
+        finish(!audio.paused);
+      }, 800);
+    } catch {
+      finish(false);
+    }
+  });
 }
 
 async function tryPiperTts(text: string): Promise<boolean> {
@@ -89,35 +153,10 @@ async function tryPiperTts(text: string): Promise<boolean> {
       if (!response.ok) continue;
 
       const buffer = await response.arrayBuffer();
+      if (!buffer || buffer.byteLength < 64) continue;
+      const mimeType = (response.headers.get("content-type") || "audio/wav").split(";")[0];
       if (await playPcmViaUnlockedContext(buffer, text)) return true;
-
-      const blob = new Blob([buffer], { type: "audio/wav" });
-      const objectUrl = URL.createObjectURL(blob);
-      const audio = primedAudio || new Audio();
-      audio.setAttribute("playsinline", "true");
-
-      const cleanup = () => {
-        URL.revokeObjectURL(objectUrl);
-        audio.onplaying = null;
-        audio.onended = null;
-        audio.onerror = null;
-      };
-
-      audio.onplaying = () => {
-        emitTtsEvent("start", { text, provider: "piper" });
-      };
-      audio.onended = () => {
-        emitTtsEvent("end", { text, provider: "piper" });
-        cleanup();
-      };
-      audio.onerror = () => {
-        emitTtsEvent("error", { text, provider: "piper", reason: "playback_error" });
-        cleanup();
-      };
-
-      audio.src = objectUrl;
-      await audio.play();
-      return true;
+      if (await playViaHtmlAudio(buffer, mimeType, text)) return true;
     } catch (error) {
       console.warn("[fm-voice] Piper TTS nicht erreichbar:", error);
     }
@@ -186,6 +225,7 @@ function fallbackWebSpeech(text: string) {
 
 export async function speak(text: string) {
   if (!text || !text.trim()) return;
+  unlockTtsPlayback();
   if (unlockedAudioCtx && unlockedAudioCtx.state !== "running") {
     try {
       await unlockedAudioCtx.resume();

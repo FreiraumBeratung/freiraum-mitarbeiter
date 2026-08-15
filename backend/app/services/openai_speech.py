@@ -9,7 +9,7 @@ def openai_api_key() -> str:
     return (os.getenv("OPENAI_API_KEY") or "").strip()
 
 
-async def tts_wav(text: str) -> bytes:
+async def tts_audio(text: str) -> tuple[bytes, str]:
     api_key = openai_api_key()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY fehlt")
@@ -26,9 +26,14 @@ async def tts_wav(text: str) -> bytes:
                 "model": model,
                 "input": cleaned[:4096],
                 "voice": voice,
-                "response_format": "wav",
+                "response_format": "mp3",
             },
         )
     if resp.status_code >= 400:
         raise RuntimeError(f"openai tts error: {resp.text[:240]}")
-    return resp.content
+    return resp.content, "audio/mpeg"
+
+
+async def tts_wav(text: str) -> bytes:
+    data, _media_type = await tts_audio(text)
+    return data

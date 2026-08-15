@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from ..core.tts_settings import tts_settings
-from ..services.openai_speech import openai_api_key, tts_wav
+from ..services.openai_speech import openai_api_key, tts_audio
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])
 
@@ -55,10 +55,10 @@ async def speak(inp: SpeakIn):
         if not openai_api_key():
             raise HTTPException(status_code=500, detail="piper not installed")
         try:
-            audio = await tts_wav(inp.text)
+            audio, media_type = await tts_audio(inp.text)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"openai tts error: {exc}") from exc
-        return Response(content=audio, media_type="audio/wav")
+        return Response(content=audio, media_type=media_type)
 
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as txt_file:
         txt_file.write(inp.text)
