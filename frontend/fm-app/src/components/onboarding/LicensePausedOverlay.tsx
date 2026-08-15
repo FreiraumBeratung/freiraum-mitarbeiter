@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { backendBase } from "../lib/backendBase";
-import { clearStoredSessionToken } from "../lib/sessionToken";
+import { backendBase } from "../../lib/backendBase";
+import { clearStoredSessionToken } from "../../lib/sessionToken";
 
 const PAUSE_TEXT =
   "Ihre Lizenz wurde pausiert. Bitte setzen Sie sich mit Freiraum Beratung in Kontakt.";
