@@ -2563,12 +2563,27 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           
           try {
             const resolveUrl = `${BACKEND}/api/contacts/resolve?name=${encodeURIComponent(finalNameForResolver)}`;
-            const resolverAbortController = new AbortController();
-            const resolverTimeoutMs = 1200;
-            const resolverTimeout = setTimeout(() => resolverAbortController.abort(), resolverTimeoutMs);
-            const resolveResponse = await fetch(resolveUrl, {
-              signal: resolverAbortController.signal,
-            }).finally(() => clearTimeout(resolverTimeout));
+            const fetchResolverWithTimeout = async (timeoutMs: number): Promise<Response> => {
+              const resolverAbortController = new AbortController();
+              const resolverTimeout = setTimeout(() => resolverAbortController.abort(), timeoutMs);
+              return fetch(resolveUrl, {
+                signal: resolverAbortController.signal,
+              }).finally(() => clearTimeout(resolverTimeout));
+            };
+            const inputTokenCount = finalNameForResolver.trim().split(/\s+/).filter(Boolean).length;
+            let resolveResponse: Response;
+            try {
+              resolveResponse = await fetchResolverWithTimeout(1200);
+            } catch (firstErr) {
+              const firstAbort = (firstErr as any)?.name === "AbortError";
+              const allowSingleRetry = firstAbort && inputTokenCount <= 2;
+              if (!allowSingleRetry) throw firstErr;
+              console.warn("[fm-voice][wizard4][contact-resolver] Timeout, retry once:", {
+                input: finalNameForResolver,
+                inputTokenCount,
+              });
+              resolveResponse = await fetchResolverWithTimeout(2200);
+            }
             
             if (resolveResponse.ok) {
               const contentType = (resolveResponse.headers.get("content-type") || "").toLowerCase();
@@ -2760,6 +2775,8 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             ? `Ich habe mehrere Kontakte gefunden: ${recipientAmbiguityChoices.join(" oder ")}. Wen meinst du genau?`
             : recipientResolutionState === "no_match" && !!finalNameForResolver
               ? `Ich finde keinen Kontakt zu "${recipientInputLabel}". Nenne bitte den vollen Namen oder die E-Mail-Adresse.`
+              : recipientResolutionState === "api_error"
+                ? "Kontaktauflösung dauert gerade zu lange. Nenne bitte den vollen Namen oder direkt die E-Mail-Adresse."
               : !finalNameForResolver
                 ? "Entschuldigung, den Empfänger habe ich nicht sicher verstanden. Nenne bitte nur den Empfänger oder die E-Mail-Adresse."
                 : intentBodyCandidate.length > 0

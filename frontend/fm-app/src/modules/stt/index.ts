@@ -1,6 +1,6 @@
 let cachedLocalSttHealthAtMs = 0;
 let cachedLocalSttHealthOk = false;
-const LOCAL_STT_HEALTH_CACHE_MS = 45000;
+const LOCAL_STT_HEALTH_CACHE_MS = 120000;
 const COMMAND_MODE_MAX_RECORD_MS = 7000;
 
 export async function recordAndTranscribe(
