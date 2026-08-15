@@ -1504,6 +1504,7 @@ export class VoiceController {
   private cancelStart = false;
   private recorderAbortController: AbortController | null = null;
   private routeStartedAtMs = 0;
+  private captureMode: "none" | "backend" | "browser" = "none";
 
   setState(s: VoiceState) {
     this.state = s;
@@ -1521,11 +1522,12 @@ export class VoiceController {
     if (this.listening || this.starting) {
       return;
     }
-    const rec = shouldUseBackendRecorder() ? null : getRecognition();
 
-    if (!rec) {
+    const tryBackend = shouldUseBackendRecorder();
+    if (tryBackend) {
       console.warn("[fm-voice] SpeechRecognition nicht verfügbar – fallback auf Recorder.");
       this.listening = true;
+      this.captureMode = "backend";
       this.setState("listening");
       const sttStartedAtMs = nowMs();
       const controller = new AbortController();
@@ -1540,6 +1542,63 @@ export class VoiceController {
         `[fm-voice][timing] stage=stt-fallback-finished elapsedMs=${Math.max(0, Math.round(nowMs() - sttStartedAtMs))} textLength=${(text ?? "").length}`
       );
       this.listening = false;
+      if (text) {
+        this.captureMode = "none";
+        this.handleTranscript(text);
+        return;
+      }
+      if (controller.signal.aborted) {
+        this.captureMode = "none";
+        this.setState("idle");
+        return;
+      }
+      const w = typeof window !== "undefined" ? (window as any) : null;
+      const sttError = w?.__fm_stt_last_error ? String(w.__fm_stt_last_error) : "";
+      if (sttError === "stt-unhealthy") {
+        this.captureMode = "none";
+        // Server hat kein lokales Whisper – iOS SpeechRecognition als einziger Pfad.
+      } else {
+        this.captureMode = "none";
+        if (w) {
+          w.__fm_last_hint = {
+            kind: "voice_retry",
+            message: sttError === "microphone-unavailable"
+              ? "Mikrofon wurde blockiert. Bitte antippen und den Zugriff erlauben."
+              : "Ich habe nichts Verständliches erkannt. Bitte den Befehl kurz wiederholen.",
+            ts: Date.now(),
+          };
+          if (typeof window.dispatchEvent === "function") {
+            window.dispatchEvent(new CustomEvent("fm-hint-update"));
+          }
+        }
+        this.setState(sttError === "microphone-unavailable" ? "error" : "idle");
+        return;
+      }
+    }
+
+    const rec = getRecognition();
+    if (!rec) {
+      if (tryBackend) {
+        this.setState("error");
+        return;
+      }
+      this.listening = true;
+      this.captureMode = "backend";
+      this.setState("listening");
+      const sttStartedAtMs = nowMs();
+      const controller = new AbortController();
+      this.recorderAbortController = controller;
+      const text = await recordAndTranscribe(60000, controller.signal, {
+        onListening: () => this.setState("listening"),
+      });
+      if (this.recorderAbortController === controller) {
+        this.recorderAbortController = null;
+      }
+      console.log(
+        `[fm-voice][timing] stage=stt-fallback-finished elapsedMs=${Math.max(0, Math.round(nowMs() - sttStartedAtMs))} textLength=${(text ?? "").length}`
+      );
+      this.listening = false;
+      this.captureMode = "none";
       if (text) {
         this.handleTranscript(text);
       } else if (controller.signal.aborted) {
@@ -1570,20 +1629,11 @@ export class VoiceController {
 
     this.starting = true;
     this.cancelStart = false;
-
-    let probeStream: MediaStream | null = null;
-    try {
-      probeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      // Ignore – Browser kann trotzdem aufnehmen
-    } finally {
-      if (probeStream) {
-        probeStream.getTracks().forEach((track) => track.stop());
-      }
-    }
+    this.captureMode = "browser";
 
     if (this.cancelStart) {
       this.starting = false;
+      this.captureMode = "none";
       this.setState("idle");
       return;
     }
@@ -1602,6 +1652,7 @@ export class VoiceController {
       console.warn("[fm-voice] recognition start failed:", err);
       this.starting = false;
       this.listening = false;
+      this.captureMode = "none";
       this.setState("error");
     }
   }
@@ -1613,15 +1664,22 @@ export class VoiceController {
       return;
     }
 
-    const rec = shouldUseBackendRecorder() ? null : getRecognition();
-    if (!rec || !this.listening) {
+    if (this.captureMode === "backend" || this.recorderAbortController) {
       const wasListening = this.listening || this.state === "listening";
-      if (!rec && this.recorderAbortController) {
+      if (this.recorderAbortController) {
         this.recorderAbortController.abort();
         this.recorderAbortController = null;
       }
       this.listening = false;
       this.setState(wasListening ? "transcribing" : "idle");
+      return;
+    }
+
+    const rec = getRecognition();
+    if (!rec || !this.listening) {
+      this.listening = false;
+      this.captureMode = "none";
+      this.setState("idle");
       return;
     }
     this.listening = false;
@@ -1639,6 +1697,7 @@ export class VoiceController {
     const transcript = last?.[0]?.transcript?.trim() || "";
     this.starting = false;
     this.listening = false;
+    this.captureMode = "none";
     if (!transcript) {
       this.setState("idle");
       return;
@@ -1669,6 +1728,7 @@ export class VoiceController {
     }
     this.starting = false;
     this.listening = false;
+    this.captureMode = "none";
     if (normalizedError === "aborted" || normalizedError === "no-speech") {
       this.setState("idle");
       return;

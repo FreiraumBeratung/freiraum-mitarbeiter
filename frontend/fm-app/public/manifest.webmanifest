@@ -1,0 +1,9 @@
+{
+  "name": "Freiraum Mitarbeiter",
+  "short_name": "Mitarbeiter",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000"
+}

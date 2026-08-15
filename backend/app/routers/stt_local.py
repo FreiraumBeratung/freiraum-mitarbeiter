@@ -8,6 +8,7 @@ import time
 import wave
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from ..core.stt_settings import stt_settings
@@ -63,6 +64,38 @@ def _extract_text(parsed: dict) -> str:
     return ""
 
 
+def _openai_ready() -> bool:
+    return bool((os.getenv("OPENAI_API_KEY") or "").strip())
+
+
+def _local_whisper_ready(root: Path) -> tuple[Path, Path, bool]:
+    exe = _resolve_whisper_exe(root)
+    model = root / stt_settings.local.whisper_model
+    return exe, model, exe.exists() and model.exists()
+
+
+async def _transcribe_openai(data: bytes, filename: str, lang: str) -> str:
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=501, detail="openai stt not configured")
+    files = {"file": (filename or "voice.wav", data, "application/octet-stream")}
+    form = {
+        "model": "whisper-1",
+        "language": (lang or "de")[:2],
+    }
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files=files,
+            data=form,
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"openai stt error: {resp.text[:240]}")
+    payload = resp.json() if resp.content else {}
+    return str(payload.get("text") or "").strip()
+
+
 def _write_silence_wav(path: Path, duration_sec: float = 0.25, sample_rate: int = 16000) -> None:
     frame_count = max(1, int(sample_rate * duration_sec))
     silence = b"\x00\x00" * frame_count
@@ -76,28 +109,44 @@ def _write_silence_wav(path: Path, duration_sec: float = 0.25, sample_rate: int 
 @router.get("/health")
 def health():
     root = _backend_root()
-    exe = _resolve_whisper_exe(root)
-    model = root / stt_settings.local.whisper_model
-    ok = stt_settings.provider == "local" and exe.exists() and model.exists()
+    exe, model, local_ready = _local_whisper_ready(root)
+    openai_ready = _openai_ready()
+    effective = "local" if local_ready else ("openai" if openai_ready else stt_settings.provider)
+    ok = effective in {"local", "openai"} and (local_ready or openai_ready)
     return {
         "ok": ok,
-        "provider": stt_settings.provider,
+        "provider": effective,
         "exe": str(exe),
         "model": str(model),
         "lang": stt_settings.local.lang,
+        "openai": openai_ready,
     }
 
 
 @router.post("/transcribe")
 async def transcribe(file: UploadFile = File(...), mode: str = Form("dictation")):
+    root = _backend_root()
+    exe, model, local_ready = _local_whisper_ready(root)
+    openai_ready = _openai_ready()
+    if not local_ready and openai_ready:
+        data = await file.read()
+        started = time.perf_counter()
+        text = await _transcribe_openai(data, file.filename or "voice.wav", stt_settings.local.lang)
+        return {
+            "ok": True,
+            "text": text,
+            "mode": (mode or "dictation").strip().lower(),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            "fast_profile_used": False,
+            "fallback_used": False,
+            "command_exe_used": False,
+            "provider": "openai",
+        }
+
     if stt_settings.provider != "local":
         raise HTTPException(status_code=501, detail="local stt not active")
 
-    root = _backend_root()
-    exe = _resolve_whisper_exe(root)
-    model = root / stt_settings.local.whisper_model
-
-    if not exe.exists() or not model.exists():
+    if not local_ready:
         raise HTTPException(status_code=500, detail="whisper not installed")
 
     suffix = Path(file.filename or "audio").suffix or ".webm"
@@ -219,14 +268,13 @@ async def transcribe(file: UploadFile = File(...), mode: str = Form("dictation")
 
 @router.post("/prewarm")
 def prewarm():
+    root = _backend_root()
+    exe, model, local_ready = _local_whisper_ready(root)
+    if not local_ready:
+        return {"ok": True, "provider": "openai" if _openai_ready() else stt_settings.provider, "skipped": True}
+
     if stt_settings.provider != "local":
         return {"ok": False, "provider": stt_settings.provider, "skipped": True}
-
-    root = _backend_root()
-    exe = _resolve_whisper_exe(root)
-    model = root / stt_settings.local.whisper_model
-    if not exe.exists() or not model.exists():
-        raise HTTPException(status_code=500, detail="whisper not installed")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_in:
         in_path = Path(tmp_in.name)

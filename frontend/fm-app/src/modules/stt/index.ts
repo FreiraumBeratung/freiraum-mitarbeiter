@@ -151,14 +151,33 @@ export async function recordAndTranscribe(
   };
 
   // Prefer backend STT first
+  let usedBackendRecorder = false;
   try {
     const sttStartedAtMs = nowMs();
+    const healthCacheAgeMs = Date.now() - cachedLocalSttHealthAtMs;
+    const hasFreshLocalHealth =
+      cachedLocalSttHealthOk && healthCacheAgeMs >= 0 && healthCacheAgeMs <= LOCAL_STT_HEALTH_CACHE_MS;
+    const health = hasFreshLocalHealth
+      ? { provider: "local", ok: true, cached: true }
+      : await fetchWithTimeout(`${backendBase()}/api/stt/health`, {}, 1200)
+          .then((r) => r.json())
+          .catch(() => ({ ok: false }));
+    if (signal?.aborted) return null;
+    const healthCheckedAtMs = nowMs();
+    if (!health?.ok) {
+      cachedLocalSttHealthOk = false;
+      throw new Error("stt-unhealthy");
+    }
+    cachedLocalSttHealthOk = true;
+    cachedLocalSttHealthAtMs = Date.now();
+
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
       throw new Error("microphone-unavailable");
     }
+    usedBackendRecorder = true;
     if (signal?.aborted) {
       stopTracks(stream);
       return null;
@@ -168,30 +187,7 @@ export async function recordAndTranscribe(
       stopTracks(stream);
       return null;
     }
-
-    const skipHealth =
-      typeof window !== "undefined" && Boolean((window as any).__fm_prefer_backend_stt);
-    const healthCacheAgeMs = Date.now() - cachedLocalSttHealthAtMs;
-    const hasFreshLocalHealth =
-      cachedLocalSttHealthOk && healthCacheAgeMs >= 0 && healthCacheAgeMs <= LOCAL_STT_HEALTH_CACHE_MS;
-    const health =
-      skipHealth || hasFreshLocalHealth
-        ? { provider: "local", ok: true, cached: true }
-        : await fetchWithTimeout(`${backendBase()}/api/stt/health`, {}, 1200).then((r) => r.json());
-    if (signal?.aborted) {
-      stopTracks(stream);
-      return null;
-    }
-    const healthCheckedAtMs = nowMs();
-    if (health?.provider === "local" && health?.ok) {
-      cachedLocalSttHealthOk = true;
-      cachedLocalSttHealthAtMs = Date.now();
-    } else {
-      cachedLocalSttHealthOk = false;
-      stopTracks(stream);
-      throw new Error("stt-unhealthy");
-    }
-    if (health?.provider === "local" && health?.ok) {
+    if (health?.ok) {
       const mimeType = pickRecorderMime();
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       const chunks: BlobPart[] = [];
@@ -291,9 +287,13 @@ export async function recordAndTranscribe(
         textLength: 0,
         emptyText: true,
       });
+      if (typeof window !== "undefined") {
+        (window as any).__fm_stt_last_error = "stt-empty";
+      }
+      return null;
     }
   } catch (err) {
-    if (typeof window !== "undefined" && (window as any).__fm_prefer_backend_stt) {
+    if (usedBackendRecorder || (typeof window !== "undefined" && (window as any).__fm_prefer_backend_stt)) {
       (window as any).__fm_stt_last_error =
         err instanceof Error ? err.message : "microphone-unavailable";
       return null;

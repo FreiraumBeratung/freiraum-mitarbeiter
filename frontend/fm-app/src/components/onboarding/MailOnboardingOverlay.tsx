@@ -385,11 +385,26 @@ export default function MailOnboardingOverlay() {
             )}
 
             {phase === "imap" && (
-              <div style={styles.stepWrap}>
+              <form
+                autoComplete="off"
+                onSubmit={(e) => e.preventDefault()}
+                style={styles.stepWrap}
+              >
+                <p style={styles.imapHint}>
+                  Das ist dein Mail-Passwort (Web.de, Gmail, IONOS …), nicht der Login der Baustellendoku.
+                  iPhone kann Zugangsdaten von derselben Domain anbieten — bitte nicht übernehmen.
+                </p>
                 <input
                   value={imapEmail}
                   onChange={(e) => setImapEmail(e.target.value)}
                   placeholder="E-Mail-Adresse"
+                  name="fm-imap-email"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  data-lpignore="true"
+                  data-1p-ignore="true"
                   style={styles.input}
                 />
                 <div style={styles.passwordWrap}>
@@ -398,6 +413,10 @@ export default function MailOnboardingOverlay() {
                     value={imapPassword}
                     onChange={(e) => setImapPassword(e.target.value)}
                     placeholder="Passwort / App-Passwort"
+                    name="fm-imap-password"
+                    autoComplete="new-password"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
                     style={{ ...styles.input, ...styles.inputWithIcon }}
                   />
                   <button
@@ -467,7 +486,7 @@ export default function MailOnboardingOverlay() {
                     Zurück
                   </button>
                 </div>
-              </div>
+              </form>
             )}
 
             {submitting && <div style={styles.progressText}>Verbindung wird geprüft...</div>}
@@ -596,6 +615,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     gap: 10,
+  },
+  imapHint: {
+    margin: 0,
+    fontSize: 12,
+    lineHeight: 1.45,
+    color: "rgba(255,255,255,0.62)",
   },
   stepText: {
     fontSize: 14,

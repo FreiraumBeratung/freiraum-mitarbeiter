@@ -197,15 +197,7 @@ export default function MobileMailShell() {
       setDetailOpen(true);
       setDetailLoading(true);
       setDetailError(null);
-      void (async () => {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          stream.getTracks().forEach((track) => track.stop());
-          unlockTtsPlayback();
-        } catch {
-          /* Safari-Dialog kann hier erscheinen; Aufnahme startet erst beim Mikro-Tap. */
-        }
-      })();
+      void unlockTtsPlayback();
       try {
         const res = await fetch(
           `${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}?mailbox=${mailboxMode}`
