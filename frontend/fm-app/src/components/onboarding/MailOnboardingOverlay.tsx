@@ -390,10 +390,6 @@ export default function MailOnboardingOverlay() {
                 onSubmit={(e) => e.preventDefault()}
                 style={styles.stepWrap}
               >
-                <p style={styles.imapHint}>
-                  Das ist dein Mail-Passwort (Web.de, Gmail, IONOS …), nicht der Login der Baustellendoku.
-                  iPhone kann Zugangsdaten von derselben Domain anbieten — bitte nicht übernehmen.
-                </p>
                 <input
                   value={imapEmail}
                   onChange={(e) => setImapEmail(e.target.value)}
@@ -620,12 +616,6 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     gap: 10,
-  },
-  imapHint: {
-    margin: 0,
-    fontSize: 12,
-    lineHeight: 1.45,
-    color: "rgba(255,255,255,0.62)",
   },
   stepText: {
     fontSize: 14,

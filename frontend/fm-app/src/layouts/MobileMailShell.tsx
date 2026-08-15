@@ -138,6 +138,7 @@ function buildContext(item: InboxItem): SelectedMailContext {
 export default function MobileMailShell() {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [inboxReady, setInboxReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mailboxMode, setMailboxMode] = useState<"inbox" | "sent">("inbox");
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
@@ -216,12 +217,16 @@ export default function MobileMailShell() {
         : Math.min(120, Math.max(INBOX_PAGE_SIZE, itemsRef.current.length || INBOX_PAGE_SIZE));
       const inboxUrl = `${backendBase()}/api/mail/inbox?limit=${limit}&offset=${offset}&mailbox=${mailboxMode}`;
       let res = await fetch(inboxUrl);
-      if (res.status === 503) {
-        await new Promise((resolve) => setTimeout(resolve, 900));
+      if ((res.status === 401 || res.status === 503) && !append) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
         res = await fetch(inboxUrl);
+        if (res.status === 401 || res.status === 503) {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          res = await fetch(inboxUrl);
+        }
       }
       const data = (await res.json()) as InboxResponse;
-      if (!res.ok || !data?.ok) throw new Error("Postfach konnte nicht geladen werden.");
+      if (!res.ok || !data?.ok) throw new Error("inbox_pending");
       const incoming = data.items || [];
       if (append) {
         const seen = new Set(itemsRef.current.map((item) => item.uid));
@@ -230,10 +235,11 @@ export default function MobileMailShell() {
         setItems(incoming);
       }
       setInboxTotal(typeof data.total === "number" ? data.total : incoming.length);
+      setInboxReady(true);
       setError(null);
-    } catch (err) {
+    } catch {
       if (itemsRef.current.length === 0) {
-        setError(err instanceof Error ? err.message : "Postfach konnte nicht geladen werden.");
+        setError(null);
       }
     } finally {
       inboxLoadInFlightRef.current = false;
@@ -433,8 +439,11 @@ export default function MobileMailShell() {
 
   useEffect(() => {
     const onSetupDone = () => {
+      setError(null);
+      setInboxReady(false);
+      inboxLoadInFlightRef.current = false;
       void loadMicrosoftAuthStatus();
-      void loadInbox({ silent: true });
+      void loadInbox();
     };
     window.addEventListener("fm-mail-setup-complete", onSetupDone);
     return () => window.removeEventListener("fm-mail-setup-complete", onSetupDone);
@@ -919,13 +928,15 @@ export default function MobileMailShell() {
           </div>
         ) : (
           <div>
-            {loading ? (
-              <div style={{ padding: 16, color: "rgba(255,255,255,0.6)", fontSize: 14 }}>Postfach wird geladen…</div>
+            {!inboxReady ? (
+              <div style={{ padding: 16, color: "rgba(255,255,255,0.62)", fontSize: 14, lineHeight: 1.45 }}>
+                Einen Moment Geduld. Gleich erscheint dein Postfach.
+              </div>
             ) : null}
-            {error ? (
+            {inboxReady && error ? (
               <div style={{ padding: 16, color: "rgba(255,170,170,0.95)", fontSize: 14 }}>{error}</div>
             ) : null}
-            {!loading && !error && visibleItems.length === 0 ? (
+            {inboxReady && !loading && !error && visibleItems.length === 0 ? (
               <div style={{ padding: 16, color: "rgba(255,255,255,0.55)", fontSize: 14 }}>
                 Keine Nachrichten. Unten auf das Mikro tippen, um eine neue Mail zu diktieren.
               </div>
