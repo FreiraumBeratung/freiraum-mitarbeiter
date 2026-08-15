@@ -126,8 +126,24 @@ export default function AdminAccounts() {
         Du siehst nur, wer sich angemeldet hat. Mails, Kontakte und Inhalte bleiben unsichtbar.
       </p>
       {sessionAdmin ? (
-        <div style={{ fontSize: 12, color: "rgba(180,220,255,0.9)", marginBottom: 16 }}>
-          Angemeldet als Admin-E-Mail.
+        <div style={{ fontSize: 12, color: "rgba(180,220,255,0.9)", marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
+          <span>Angemeldet als Admin-E-Mail.</span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loading}
+            style={{
+              height: 28,
+              borderRadius: 8,
+              border: "1px solid rgba(255,255,255,0.16)",
+              background: "rgba(255,255,255,0.08)",
+              color: "#fff",
+              padding: "0 10px",
+              fontSize: 12,
+            }}
+          >
+            Aktualisieren
+          </button>
         </div>
       ) : (
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -167,6 +183,11 @@ export default function AdminAccounts() {
       {items.length === 0 && !error && !loading ? (
         <div style={{ color: "rgba(255,255,255,0.5)", fontSize: 13 }}>Noch keine Konten.</div>
       ) : null}
+      {items.length === 1 && items[0]?.isAdmin ? (
+        <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 13, marginBottom: 12, lineHeight: 1.45 }}>
+          Das bist du. Sobald sich ein Mitarbeiter anmeldet, erscheint das Konto hier — dann kannst du die Lizenz pausieren oder löschen.
+        </div>
+      ) : null}
       <div style={{ display: "grid", gap: 8 }}>
         {items.map((item) => (
           <div
@@ -185,8 +206,13 @@ export default function AdminAccounts() {
               {item.licenseActive ? "Lizenz aktiv" : "Lizenz pausiert"} ·{" "}
               {item.mailboxConnected ? "Mailbox verbunden" : "Mailbox getrennt"}
               {item.isAdmin ? " · Admin" : ""}
+              {item.lastLoginAt ? ` · zuletzt ${new Date(item.lastLoginAt).toLocaleString("de-DE")}` : ""}
             </div>
-            {item.isAdmin ? null : (
+            {item.isAdmin ? (
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", marginTop: 8 }}>
+                Admin-Konto — Lizenz bleibt aktiv.
+              </div>
+            ) : (
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button
                   type="button"

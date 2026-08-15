@@ -35,11 +35,64 @@ def _require_account() -> str:
     return account_id
 
 # Pfade für E-Mail-Assets
-# Von mail.py (backend/app/routers/mail.py) zum backend-Root: parents[2]
-# 0=mail.py, 1=routers, 2=app, 3=backend
+# mail.py liegt in backend/app/routers → parents[2] = backend, parents[3] = Repo-Root
 BASE_DIR = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_EMAIL_LOGO_PATH = BASE_DIR / "data" / "assets" / "freiraum-email-logo.png.png"
 EMAIL_LOGO_PATH = Path(os.getenv("EMAIL_LOGO_PATH", str(DEFAULT_EMAIL_LOGO_PATH)))
+_DATA_IMG_SRC_RE = re.compile(
+    r"""(<img\b[^>]*?\bsrc\s*=\s*["'])(data:(image/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+))(["'])""",
+    re.IGNORECASE,
+)
+
+
+def _resolve_email_logo_path() -> Path | None:
+    candidates = [
+        EMAIL_LOGO_PATH,
+        BASE_DIR / "data" / "assets" / "freiraum-email-logo.png",
+        BASE_DIR / "data" / "assets" / "freiraum-email-logo.png.png",
+        REPO_ROOT / "frontend" / "fm-app" / "public" / "branding" / "freiraum-logo.png",
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = Path(candidate).expanduser().resolve()
+        except Exception:
+            continue
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.is_file() and resolved.stat().st_size > 32:
+            return resolved
+    return None
+
+
+def _prepare_signature_inline_images(html_body: str) -> tuple[str, list[tuple[str, bytes, str]]]:
+    """data:image in der Signatur → cid, damit Apple Mail / Outlook das Logo anzeigen."""
+    parts: list[tuple[str, bytes, str]] = []
+    html = html_body or ""
+    counter = 0
+
+    def _replace(match: re.Match) -> str:
+        nonlocal counter
+        mime = (match.group(3) or "image/png").split(";", 1)[0].strip().lower()
+        raw_b64 = re.sub(r"\s+", "", match.group(4) or "")
+        try:
+            payload = base64.b64decode(raw_b64)
+        except Exception:
+            return match.group(0)
+        if not payload or len(payload) > 1_500_000:
+            return match.group(0)
+        if not mime.startswith("image/"):
+            mime = "image/png"
+        counter += 1
+        cid = f"sigimg{counter}"
+        parts.append((cid, payload, mime))
+        return f"{match.group(1)}cid:{cid}{match.group(5)}"
+
+    html = _DATA_IMG_SRC_RE.sub(_replace, html)
+    return html, parts
 
 
 class MailSendRequest(BaseModel):
@@ -1126,6 +1179,7 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
     # --- NEUER MIME-AUFBAU MIT SIGNATUR UND INLINE-LOGO ---
     text_body = _build_email_text_with_signature(body, signature_bundle.get("text_signature") or "")
     html_body = _build_email_html_with_signature(body, signature_bundle.get("html_signature") or "")
+    html_body, inline_parts = _prepare_signature_inline_images(html_body)
 
     # multipart/related -> damit Inline-Bilder (cid) funktionieren
     msg = MIMEMultipart("related")
@@ -1133,33 +1187,50 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
     msg["To"] = to
     msg["Subject"] = subject
 
-    # multipart/alternative für text/plain + text/html
     alternative_part = MIMEMultipart("alternative")
     alternative_part.attach(MIMEText(text_body, "plain", "utf-8"))
     alternative_part.attach(MIMEText(html_body, "html", "utf-8"))
     msg.attach(alternative_part)
 
-    # E-Mail-Logo als inline Bild anhängen (wenn vorhanden)
-    try:
-        if "cid:freiraum_logo" in (html_body or "").lower() and EMAIL_LOGO_PATH.is_file():
-            with open(EMAIL_LOGO_PATH, "rb") as f:
-                logo_data = f.read()
+    attached_cids: set[str] = set()
+    for cid, payload, mime in inline_parts:
+        subtype = mime.split("/", 1)[-1] if "/" in mime else "png"
+        try:
+            image = MIMEImage(payload, _subtype=subtype)
+            image.add_header("Content-ID", f"<{cid}>")
+            image.add_header("Content-Disposition", "inline", filename=f"{cid}.{subtype}")
+            msg.attach(image)
+            attached_cids.add(cid.lower())
+        except Exception as exc:
+            logger.warning("Inline-Signaturbild konnte nicht angehängt werden", extra={"error": str(exc), "cid": cid})
 
-            logo_image = MIMEImage(logo_data)
-            # Content-ID muss mit dem Wert in der HTML-Signatur übereinstimmen
-            logo_image.add_header("Content-ID", "<freiraum_logo>")
-            logo_image.add_header("Content-Disposition", "inline", filename="freiraum-email-logo.png")
-            msg.attach(logo_image)
+    if "cid:freiraum_logo" in (html_body or "").lower() and "freiraum_logo" not in attached_cids:
+        logo_path = _resolve_email_logo_path()
+        if logo_path is not None:
+            try:
+                logo_data = logo_path.read_bytes()
+                subtype = "png"
+                suffix = logo_path.suffix.lower().lstrip(".")
+                if suffix in {"jpg", "jpeg"}:
+                    subtype = "jpeg"
+                elif suffix == "gif":
+                    subtype = "gif"
+                elif suffix == "webp":
+                    subtype = "webp"
+                logo_image = MIMEImage(logo_data, _subtype=subtype)
+                logo_image.add_header("Content-ID", "<freiraum_logo>")
+                logo_image.add_header("Content-Disposition", "inline", filename="freiraum-email-logo.png")
+                msg.attach(logo_image)
+            except Exception as exc:
+                logger.warning(
+                    "Fehler beim Anhängen des E-Mail-Logos",
+                    extra={"error": str(exc), "logo_path": str(logo_path)},
+                )
         else:
             logger.warning(
                 "E-Mail-Logo nicht gefunden",
                 extra={"logo_path": str(EMAIL_LOGO_PATH)},
             )
-    except Exception as e:
-        logger.warning(
-            "Fehler beim Anhängen des E-Mail-Logos",
-            extra={"error": str(e), "logo_path": str(EMAIL_LOGO_PATH)},
-        )
 
     logger.info(
         "Sende E-Mail",

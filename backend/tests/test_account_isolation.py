@@ -152,3 +152,18 @@ def test_session_cookie_is_persistent():
     assert kwargs["httponly"] is True
     assert kwargs["samesite"] == "lax"
     assert kwargs["secure"] is True
+
+
+def test_email_logo_resolves_from_repo_branding():
+    from app.routers.mail import _prepare_signature_inline_images, _resolve_email_logo_path
+
+    logo = _resolve_email_logo_path()
+    assert logo is not None
+    assert logo.is_file()
+
+    html = '<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=" alt="x">'
+    next_html, parts = _prepare_signature_inline_images(html)
+    assert "cid:sigimg1" in next_html
+    assert len(parts) == 1
+    assert parts[0][0] == "sigimg1"
+    assert parts[0][2].startswith("image/")
