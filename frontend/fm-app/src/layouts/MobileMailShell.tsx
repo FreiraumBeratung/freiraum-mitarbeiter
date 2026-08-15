@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import MailComposeForm from "../components/mail/MailComposeForm";
 import MobileVoiceButton from "../components/voice/MobileVoiceButton";
 import { backendBase } from "../lib/backendBase";
+import { ensureMicPermission } from "../lib/micPermission";
 import { releaseMicSession } from "../modules/stt";
 import { voice } from "../modules/voice";
 import { unlockTtsPlayback } from "../modules/voice/tts";
@@ -128,6 +129,7 @@ export default function MobileMailShell() {
   const [detailData, setDetailData] = useState<InboxMessageDetailResponse | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [voiceErrorHint, setVoiceErrorHint] = useState<string | null>(null);
+  const [sendBanner, setSendBanner] = useState<string | null>(null);
   const [activeContext, setActiveContext] = useState<SelectedMailContext | null>(() => getSelectedMailContext());
   const [query, setQuery] = useState("");
   const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
@@ -145,6 +147,7 @@ export default function MobileMailShell() {
   const itemsRef = useRef<InboxItem[]>([]);
   const mailboxInitRef = useRef(true);
   const detailOpenRef = useRef(false);
+  const sendBannerTimerRef = useRef<number | null>(null);
 
   const visibleItems = useMemo(() => {
     const normalized = items.map((item) => ({
@@ -201,6 +204,7 @@ export default function MobileMailShell() {
       setDetailLoading(true);
       setDetailError(null);
       unlockTtsPlayback();
+      void ensureMicPermission();
       try {
         const res = await fetch(
           `${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}?mailbox=${mailboxMode}`
@@ -411,9 +415,19 @@ export default function MobileMailShell() {
       setVoiceErrorHint(typeof msg === "string" && msg.trim() ? msg : null);
     };
     window.addEventListener("fm-hint-update", onHint);
+    const onMailSent = (event: Event) => {
+      const message =
+        (event as CustomEvent<{ message?: string }>).detail?.message || "Die E-Mail wurde versendet.";
+      setSendBanner(message);
+      if (sendBannerTimerRef.current) window.clearTimeout(sendBannerTimerRef.current);
+      sendBannerTimerRef.current = window.setTimeout(() => setSendBanner(null), 4200);
+    };
+    window.addEventListener("fm-mail-sent", onMailSent);
     return () => {
       document.removeEventListener("voice-state", handler as EventListener);
       window.removeEventListener("fm-hint-update", onHint);
+      window.removeEventListener("fm-mail-sent", onMailSent);
+      if (sendBannerTimerRef.current) window.clearTimeout(sendBannerTimerRef.current);
     };
   }, []);
 
@@ -515,6 +529,29 @@ export default function MobileMailShell() {
         color: "#fff",
       }}
     >
+      {sendBanner ? (
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 80,
+            padding: "calc(10px + env(safe-area-inset-top, 0px)) 16px 12px",
+            background: "linear-gradient(180deg, rgba(46, 140, 90, 0.96), rgba(28, 92, 58, 0.94))",
+            borderBottom: "1px solid rgba(180, 255, 210, 0.28)",
+            color: "#f3fff8",
+            fontSize: 15,
+            fontWeight: 700,
+            textAlign: "center",
+            letterSpacing: "0.01em",
+            boxShadow: "0 10px 28px rgba(0,0,0,0.35)",
+          }}
+        >
+          {sendBanner}
+        </div>
+      ) : null}
       <header
         style={{
           flexShrink: 0,

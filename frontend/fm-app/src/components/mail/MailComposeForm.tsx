@@ -89,6 +89,14 @@ export default function MailComposeForm() {
       }
 
       PartnerBotBus.say("Die E-Mail wurde versendet.");
+      try {
+        window.dispatchEvent(
+          new CustomEvent("fm-mail-sent", { detail: { message: "Die E-Mail wurde versendet." } })
+        );
+        navigator.vibrate?.([50, 90, 50]);
+      } catch {
+        /* ignore */
+      }
       const w = window as Window;
       w.__fm_subject_locked = false;
       w.__fm_subject_locked_value = null;

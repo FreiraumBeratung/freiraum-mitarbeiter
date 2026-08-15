@@ -236,5 +236,8 @@ export async function speak(text: string) {
   const ok = await tryPiperTts(text);
   if (ok) return;
   console.warn("[fm-voice] Piper nicht verfügbar, fallback auf WebSpeech.");
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent || "" : "";
+  const appleTouch = /iPad|iPhone|iPod/i.test(ua);
+  if (appleTouch) return;
   fallbackWebSpeech(text);
 }

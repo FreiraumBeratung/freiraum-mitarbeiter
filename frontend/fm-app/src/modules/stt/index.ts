@@ -236,6 +236,9 @@ export async function recordAndTranscribe(
     }
     usedBackendRecorder = true;
     activeMicStream = stream;
+    if (typeof window !== "undefined") {
+      (window as any).__fm_mic_granted = true;
+    }
     if (signal?.aborted) {
       stopTracks(stream);
       releaseMicSession();
