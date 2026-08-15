@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { requestRecorderStop } from "../../modules/stt";
+import { probeBackendSttHealth, requestRecorderStop } from "../../modules/stt";
 import { voice, type VoiceState } from "../../modules/voice";
 import { unlockTtsPlayback } from "../../modules/voice/tts";
 
@@ -47,13 +47,12 @@ export default function MobileVoiceButton() {
   const insecureUrl = httpsMicUrl();
 
   useEffect(() => {
-    (window as any).__fm_prefer_backend_stt = true;
+    void probeBackendSttHealth();
     const handler = (e: CustomEvent<{ state: VoiceState }>) => {
       setState(e.detail?.state || "idle");
     };
     document.addEventListener("voice-state", handler as EventListener);
     return () => {
-      (window as any).__fm_prefer_backend_stt = false;
       document.removeEventListener("voice-state", handler as EventListener);
     };
   }, []);

@@ -1477,7 +1477,14 @@ let latestVoiceCommandRunId = 0;
 function shouldUseBackendRecorder(): boolean {
   if (typeof window === "undefined") return false;
   const w = window as any;
-  return Boolean(w.__fm_backend_stt_ready) || Boolean(w.__fm_prefer_backend_stt);
+  return Boolean(w.__fm_backend_stt_ready);
+}
+
+function isAppleTouchDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iPad|iPhone|iPod/i.test(ua)) return true;
+  return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
 }
 
 function getRecognition(): BrowserSpeechRecognition | null {
@@ -1488,11 +1495,12 @@ function getRecognition(): BrowserSpeechRecognition | null {
   if (!ctor) return null;
   if (!recognition) {
     recognition = new ctor();
-    recognition.lang = "de-DE";
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    recognition.continuous = false;
   }
+  recognition.lang = "de-DE";
+  recognition.maxAlternatives = 1;
+  const apple = isAppleTouchDevice();
+  recognition.continuous = apple;
+  recognition.interimResults = apple;
   return recognition;
 }
 
@@ -1505,6 +1513,7 @@ export class VoiceController {
   private recorderAbortController: AbortController | null = null;
   private routeStartedAtMs = 0;
   private captureMode: "none" | "backend" | "browser" = "none";
+  private browserTranscript = "";
 
   setState(s: VoiceState) {
     this.state = s;
@@ -1623,6 +1632,7 @@ export class VoiceController {
     this.starting = true;
     this.cancelStart = false;
     this.captureMode = "browser";
+    this.browserTranscript = "";
 
     if (this.cancelStart) {
       this.starting = false;
@@ -1686,11 +1696,26 @@ export class VoiceController {
 
   private handleResult = (event: any) => {
     const results = event.results;
+    if (!results || results.length === 0) return;
+    let finalText = "";
+    for (let i = 0; i < results.length; i += 1) {
+      const piece = results[i];
+      if (piece?.isFinal) {
+        const next = String(piece?.[0]?.transcript || "").trim();
+        if (next) finalText = finalText ? `${finalText} ${next}` : next;
+      }
+    }
     const last = results[results.length - 1];
-    const transcript = last?.[0]?.transcript?.trim() || "";
+    const lastText = last?.[0]?.transcript?.trim() || "";
+    if (this.captureMode === "browser" && recognition?.continuous) {
+      if (finalText) this.browserTranscript = finalText;
+      else if (lastText) this.browserTranscript = lastText;
+      return;
+    }
     this.starting = false;
     this.listening = false;
     this.captureMode = "none";
+    const transcript = finalText || lastText;
     if (!transcript) {
       this.setState("idle");
       return;
@@ -1737,6 +1762,18 @@ export class VoiceController {
 
   private handleEnd = () => {
     this.starting = false;
+    if (this.captureMode === "browser") {
+      const text = (this.browserTranscript || "").trim();
+      this.browserTranscript = "";
+      this.listening = false;
+      this.captureMode = "none";
+      if (text) {
+        this.handleTranscript(text);
+        return;
+      }
+      this.setState("idle");
+      return;
+    }
     if (this.listening) return;
     if (this.state === "listening") {
       this.setState("idle");

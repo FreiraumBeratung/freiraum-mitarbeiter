@@ -4,6 +4,36 @@ let cachedLocalSttHealthAtMs = 0;
 let cachedLocalSttHealthOk = false;
 const LOCAL_STT_HEALTH_CACHE_MS = 120000;
 const COMMAND_MODE_MAX_RECORD_MS = 7000;
+const STT_HEALTH_PROBE_MS = 30000;
+
+let lastHealthProbeAtMs = 0;
+let lastHealthProbeOk = false;
+
+export async function probeBackendSttHealth(): Promise<boolean> {
+  const now = Date.now();
+  if (lastHealthProbeAtMs > 0 && now - lastHealthProbeAtMs < STT_HEALTH_PROBE_MS) {
+    return lastHealthProbeOk;
+  }
+  try {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 1500);
+    const res = await fetch(`${backendBase()}/api/stt/health`, {
+      credentials: "include",
+      signal: controller.signal,
+    });
+    window.clearTimeout(timeoutId);
+    const data = await res.json().catch(() => ({ ok: false }));
+    lastHealthProbeOk = Boolean(res.ok && data?.ok);
+  } catch {
+    lastHealthProbeOk = false;
+  }
+  lastHealthProbeAtMs = Date.now();
+  if (typeof window !== "undefined") {
+    (window as any).__fm_backend_stt_ready = lastHealthProbeOk;
+    (window as any).__fm_prefer_backend_stt = lastHealthProbeOk;
+  }
+  return lastHealthProbeOk;
+}
 
 let activeMicStream: MediaStream | null = null;
 let activeRecorder: MediaRecorder | null = null;
