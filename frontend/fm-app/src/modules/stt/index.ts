@@ -8,20 +8,27 @@ const COMMAND_MODE_MAX_RECORD_MS = 7000;
 let activeMicStream: MediaStream | null = null;
 let activeRecorder: MediaRecorder | null = null;
 
-export function stopActiveMicTracks(): void {
+export function requestRecorderStop(): void {
   try {
     if (activeRecorder && activeRecorder.state !== "inactive") {
+      if (typeof activeRecorder.requestData === "function") {
+        activeRecorder.requestData();
+      }
       activeRecorder.stop();
     }
   } catch {
     /* ignore */
   }
-  activeRecorder = null;
+}
+
+export function releaseMicSession(): void {
+  requestRecorderStop();
   try {
     activeMicStream?.getTracks().forEach((track) => track.stop());
   } catch {
     /* ignore */
   }
+  activeRecorder = null;
   activeMicStream = null;
 }
 
@@ -201,13 +208,13 @@ export async function recordAndTranscribe(
     activeMicStream = stream;
     if (signal?.aborted) {
       stopTracks(stream);
-      stopActiveMicTracks();
+      releaseMicSession();
       return null;
     }
     opts?.onListening?.();
     if (signal?.aborted) {
       stopTracks(stream);
-      stopActiveMicTracks();
+      releaseMicSession();
       return null;
     }
     if (health?.ok) {
@@ -220,7 +227,16 @@ export async function recordAndTranscribe(
         recorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) chunks.push(e.data);
         };
-        recorder.onstop = () => resolve(new Blob(chunks, { type: blobType }));
+        recorder.onstop = () => {
+          try {
+            stream.getTracks().forEach((track) => track.stop());
+          } catch {
+            /* ignore */
+          }
+          activeRecorder = null;
+          activeMicStream = null;
+          resolve(new Blob(chunks, { type: blobType }));
+        };
       });
       let resolveStopRequest: (() => void) | null = null;
       const stopRequested = new Promise<void>((resolve) => {
@@ -254,6 +270,12 @@ export async function recordAndTranscribe(
       signal?.removeEventListener("abort", abortHandler);
       const recordFinishedAtMs = nowMs();
       const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
+      if (!audioBlob || audioBlob.size < 200) {
+        if (typeof window !== "undefined") {
+          (window as any).__fm_stt_last_error = "stt-empty";
+        }
+        return null;
+      }
 
       const backendBlob = await toBackendWav(audioBlob);
       const wavReadyAtMs = nowMs();
@@ -269,6 +291,7 @@ export async function recordAndTranscribe(
         {
           method: "POST",
           body: form,
+          credentials: "include",
         },
         transcribeTimeoutMs
       );

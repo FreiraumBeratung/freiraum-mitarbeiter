@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import MailComposeForm from "../components/mail/MailComposeForm";
 import MobileVoiceButton from "../components/voice/MobileVoiceButton";
 import { backendBase } from "../lib/backendBase";
+import { releaseMicSession } from "../modules/stt";
+import { voice } from "../modules/voice";
 import { unlockTtsPlayback } from "../modules/voice/tts";
 import {
   clearSelectedMailContext,
@@ -125,6 +127,7 @@ export default function MobileMailShell() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailData, setDetailData] = useState<InboxMessageDetailResponse | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [voiceErrorHint, setVoiceErrorHint] = useState<string | null>(null);
   const [activeContext, setActiveContext] = useState<SelectedMailContext | null>(() => getSelectedMailContext());
   const [query, setQuery] = useState("");
   const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
@@ -197,15 +200,7 @@ export default function MobileMailShell() {
       setDetailOpen(true);
       setDetailLoading(true);
       setDetailError(null);
-      void (async () => {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          stream.getTracks().forEach((track) => track.stop());
-          unlockTtsPlayback();
-        } catch {
-          /* Safari-Dialog beim Mail-Klick: Kontext knüpfen, Aufnahme erst beim Mikro-Tap. */
-        }
-      })();
+      unlockTtsPlayback();
       try {
         const res = await fetch(
           `${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}?mailbox=${mailboxMode}`
@@ -234,6 +229,8 @@ export default function MobileMailShell() {
     setDetailError(null);
     setSelectedUid(null);
     clearSelectedMailContext();
+    releaseMicSession();
+    void voice.stop();
     try {
       window.__fm_set_mail_to?.("");
       window.__fm_set_mail_subject?.("");
@@ -402,10 +399,22 @@ export default function MobileMailShell() {
 
   useEffect(() => {
     const handler = (e: CustomEvent<{ state: VoiceState }>) => {
-      setVoiceState(e.detail?.state || "idle");
+      const next = e.detail?.state || "idle";
+      setVoiceState(next);
+      if (next === "listening" || next === "transcribing" || next === "acting") {
+        setVoiceErrorHint(null);
+      }
     };
     document.addEventListener("voice-state", handler as EventListener);
-    return () => document.removeEventListener("voice-state", handler as EventListener);
+    const onHint = () => {
+      const msg = (window as any).__fm_last_hint?.message;
+      setVoiceErrorHint(typeof msg === "string" && msg.trim() ? msg : null);
+    };
+    window.addEventListener("fm-hint-update", onHint);
+    return () => {
+      document.removeEventListener("voice-state", handler as EventListener);
+      window.removeEventListener("fm-hint-update", onHint);
+    };
   }, []);
 
   useEffect(() => {
@@ -484,6 +493,8 @@ export default function MobileMailShell() {
         ? "Versteht…"
         : voiceState === "acting"
           ? "Führt aus…"
+          : voiceErrorHint
+            ? voiceErrorHint
           : inboxHiddenForCompose
             ? "Entwurf prüfen – sag senden oder tippe Senden"
             : context

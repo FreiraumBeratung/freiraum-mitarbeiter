@@ -1547,33 +1547,26 @@ export class VoiceController {
         this.handleTranscript(text);
         return;
       }
-      if (controller.signal.aborted) {
-        this.captureMode = "none";
-        this.setState("idle");
-        return;
-      }
+      this.captureMode = "none";
       const w = typeof window !== "undefined" ? (window as any) : null;
       const sttError = w?.__fm_stt_last_error ? String(w.__fm_stt_last_error) : "";
-      if (sttError === "stt-unhealthy") {
-        this.captureMode = "none";
-        // Server hat kein lokales Whisper – iOS SpeechRecognition als einziger Pfad.
-      } else {
-        this.captureMode = "none";
-        if (w) {
-          w.__fm_last_hint = {
-            kind: "voice_retry",
-            message: sttError === "microphone-unavailable"
+      if (w) {
+        w.__fm_last_hint = {
+          kind: "voice_retry",
+          message:
+            sttError === "microphone-unavailable"
               ? "Mikrofon wurde blockiert. Bitte antippen und den Zugriff erlauben."
-              : "Ich habe nichts Verständliches erkannt. Bitte den Befehl kurz wiederholen.",
-            ts: Date.now(),
-          };
-          if (typeof window.dispatchEvent === "function") {
-            window.dispatchEvent(new CustomEvent("fm-hint-update"));
-          }
+              : sttError === "stt-unhealthy"
+                ? "Sprache ist auf dem Server nicht bereit. Bitte später erneut versuchen."
+                : "Ich habe nichts Verständliches erkannt. Bitte den Befehl kurz wiederholen.",
+          ts: Date.now(),
+        };
+        if (typeof window.dispatchEvent === "function") {
+          window.dispatchEvent(new CustomEvent("fm-hint-update"));
         }
-        this.setState(sttError === "microphone-unavailable" ? "error" : "idle");
-        return;
       }
+      this.setState(sttError === "microphone-unavailable" ? "error" : "idle");
+      return;
     }
 
     const rec = getRecognition();
