@@ -1476,6 +1476,7 @@ let latestVoiceCommandRunId = 0;
 
 function shouldUseBackendRecorder(): boolean {
   if (typeof window === "undefined") return false;
+  if (isAppleTouchDevice()) return true;
   const w = window as any;
   return Boolean(w.__fm_backend_stt_ready);
 }
@@ -1656,7 +1657,24 @@ export class VoiceController {
       this.starting = false;
       this.listening = false;
       this.captureMode = "none";
-      this.setState("error");
+      this.listening = true;
+      this.captureMode = "backend";
+      this.setState("listening");
+      const controller = new AbortController();
+      this.recorderAbortController = controller;
+      const text = await recordAndTranscribe(60000, controller.signal, {
+        onListening: () => this.setState("listening"),
+      });
+      if (this.recorderAbortController === controller) {
+        this.recorderAbortController = null;
+      }
+      this.listening = false;
+      this.captureMode = "none";
+      if (text) {
+        this.handleTranscript(text);
+        return;
+      }
+      this.setState("idle");
     }
   }
 
@@ -1757,7 +1775,9 @@ export class VoiceController {
       return;
     }
     recognition = null;
-    this.setState("error");
+    const granted =
+      typeof window !== "undefined" && (window as any).__fm_mic_granted === true;
+    this.setState(granted || normalizedError !== "not-allowed" ? "idle" : "error");
   };
 
   private handleEnd = () => {

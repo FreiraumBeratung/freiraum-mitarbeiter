@@ -10,6 +10,7 @@ type MailSetupStatus = {
   ok: boolean;
   provider?: "graph" | "imap_smtp" | null;
   onboardingComplete?: boolean;
+  sessionToken?: string;
   graph?: { connected?: boolean; configured?: boolean };
 };
 
@@ -25,6 +26,24 @@ function isAbortLikeError(err: unknown): boolean {
   const e = err as { name?: string; message?: string };
   const message = String(e.message || "").toLowerCase();
   return e.name === "AbortError" || message.includes("aborted");
+}
+
+function hasStoredSession(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return Boolean((window.localStorage.getItem("fm_sid") || "").trim());
+  } catch {
+    return false;
+  }
+}
+
+function storedOnboardingComplete(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem("fm_mail_onboarding_complete") === "1";
+  } catch {
+    return false;
+  }
 }
 
 export default function MailOnboardingOverlay() {
@@ -57,7 +76,18 @@ export default function MailOnboardingOverlay() {
     return path === "/" || path.startsWith("/mail/compose");
   }, [location.pathname]);
 
-  const shouldShow = !!(isMailWorkspace && statusReady && (!setupStatus || !setupStatus.onboardingComplete));
+  const shouldShow = (() => {
+    if (!isMailWorkspace) return false;
+    if (setupStatus?.onboardingComplete) return false;
+    const sessionPresent = hasStoredSession();
+    if (!statusReady) {
+      return !sessionPresent;
+    }
+    if (sessionPresent && storedOnboardingComplete() && !setupStatus) {
+      return false;
+    }
+    return !setupStatus || !setupStatus.onboardingComplete;
+  })();
 
   const loadStatuses = useCallback(async () => {
     setError(null);
@@ -66,28 +96,36 @@ export default function MailOnboardingOverlay() {
     const timeout = window.setTimeout(() => {
       setupController.abort();
       authController.abort();
-    }, 3500);
+    }, 12000);
     try {
       const [setupRes, authRes] = await Promise.all([
-        fetch(`${backendBase()}/api/setup/mail/status`, { signal: setupController.signal }),
-        fetch(`${backendBase()}/api/auth/microsoft/status`, { signal: authController.signal }),
+        fetch(`${backendBase()}/api/setup/mail/status`, { signal: setupController.signal, credentials: "include" }),
+        fetch(`${backendBase()}/api/auth/microsoft/status`, { signal: authController.signal, credentials: "include" }),
       ]);
       const setupData = (await setupRes.json()) as MailSetupStatus;
       const authData = (await authRes.json()) as MicrosoftAuthStatus;
       if (!setupRes.ok || !setupData?.ok) {
         throw new Error("Setup-Status konnte nicht geladen werden.");
       }
-      setSetupStatus(setupData);
+      if (typeof setupData.sessionToken === "string" && setupData.sessionToken.trim()) {
+        storeSessionToken(setupData.sessionToken);
+      }
       setMsAuth(authData);
-      const complete =
-        Boolean(setupData.onboardingComplete) &&
-        Boolean(authData?.loggedIn || authData?.connected || setupData.provider === "imap_smtp");
-      if (!complete) {
-        setupData.onboardingComplete = false;
-        setSetupStatus({ ...setupData, onboardingComplete: false });
+      const complete = Boolean(
+        setupData.onboardingComplete ||
+          (setupData.provider === "imap_smtp" && (authData?.loggedIn || hasStoredSession()))
+      );
+      if (!complete && hasStoredSession() && storedOnboardingComplete() && !setupData.provider && !authData?.loggedIn) {
+        setSetupStatus({ ok: true, onboardingComplete: true, provider: "imap_smtp" });
+      } else {
+        setSetupStatus({ ...setupData, onboardingComplete: complete });
       }
       try {
-        window.localStorage.setItem("fm_mail_onboarding_complete", complete ? "1" : "0");
+        if (complete) {
+          window.localStorage.setItem("fm_mail_onboarding_complete", "1");
+        } else if (!hasStoredSession()) {
+          window.localStorage.setItem("fm_mail_onboarding_complete", "0");
+        }
       } catch {
         // ignore localStorage errors
       }
@@ -95,10 +133,14 @@ export default function MailOnboardingOverlay() {
         setProvider(setupData.provider);
       }
     } catch (err) {
-      if (!isAbortLikeError(err)) {
-        setError(err instanceof Error ? err.message : "Setup konnte nicht geladen werden.");
+      if (hasStoredSession()) {
+        setSetupStatus((prev) => prev ?? { ok: true, onboardingComplete: storedOnboardingComplete() });
+      } else {
+        if (!isAbortLikeError(err)) {
+          setError(err instanceof Error ? err.message : "Setup konnte nicht geladen werden.");
+        }
+        setSetupStatus((prev) => prev ?? { ok: true, onboardingComplete: false });
       }
-      setSetupStatus((prev) => prev ?? { ok: true, onboardingComplete: false });
     } finally {
       window.clearTimeout(timeout);
       setStatusReady(true);
@@ -226,16 +268,22 @@ export default function MailOnboardingOverlay() {
       payload.smtpUseTls = smtpUseTls;
       payload.smtpUseSsl = smtpUseSsl;
     }
-    const res = await fetchWithTimeout(
-      `${backendBase()}/api/setup/mail/imap/setup`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-      25000
-    );
-    const data = await res.json().catch(() => null);
+    const runOnce = () =>
+      fetchWithTimeout(
+        `${backendBase()}/api/setup/mail/imap/setup`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        25000
+      );
+    let res = await runOnce();
+    let data = await res.json().catch(() => null);
+    if (!res.ok) {
+      res = await runOnce();
+      data = await res.json().catch(() => null);
+    }
     if (!res.ok) {
       const detail = (data && (data.detail?.message || data.detail)) || "IMAP-Setup fehlgeschlagen.";
       throw new Error(String(detail));

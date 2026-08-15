@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { warmMic } from "../../lib/micPermission";
 import { probeBackendSttHealth, requestRecorderStop } from "../../modules/stt";
 import { voice, type VoiceState } from "../../modules/voice";
 import { unlockTtsPlayback } from "../../modules/voice/tts";
@@ -25,7 +24,7 @@ function statusLabel(state: VoiceState, insecureUrl: string | null): string {
     case "acting":
       return "Führt aus…";
     case "error":
-      return "Mikrofon blockiert – bitte antippen und erlauben";
+      return "Noch einmal antippen";
     default:
       return "Antippen, sprechen, nochmal antippen";
   }
@@ -75,7 +74,6 @@ export default function MobileVoiceButton() {
       await voice.stop();
       return;
     }
-    void warmMic();
     await voice.start();
   };
 

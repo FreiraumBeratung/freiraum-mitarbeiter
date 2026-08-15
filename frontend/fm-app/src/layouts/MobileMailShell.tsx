@@ -4,7 +4,6 @@ import MailComposeForm from "../components/mail/MailComposeForm";
 import MobileVoiceButton from "../components/voice/MobileVoiceButton";
 import { backendBase } from "../lib/backendBase";
 import { clearStoredSessionToken } from "../lib/sessionToken";
-import { ensureMicPermission } from "../lib/micPermission";
 import { releaseMicSession } from "../modules/stt";
 import { voice } from "../modules/voice";
 import { unlockTtsPlayback } from "../modules/voice/tts";
@@ -265,7 +264,6 @@ export default function MobileMailShell() {
       setDetailLoading(true);
       setDetailError(null);
       unlockTtsPlayback();
-      void ensureMicPermission();
       try {
         const res = await fetch(
           `${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}?mailbox=${mailboxMode}`

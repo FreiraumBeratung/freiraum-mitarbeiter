@@ -112,6 +112,7 @@ def get_setup_status(request: Request, response: Response):
             "useSsl": bool(smtp.get("use_ssl")),
         },
         "updatedAt": state.get("updated_at"),
+        "sessionToken": sign_account_session(account_id),
     }
 
 
