@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { probeBackendSttHealth, requestRecorderStop } from "../../modules/stt";
 import { voice, type VoiceState } from "../../modules/voice";
 import { unlockTtsPlayback } from "../../modules/voice/tts";
+import { fmActionBorder, fmActionSoft } from "../../lib/fmVisual";
 
 function httpsMicUrl(): string | null {
   if (typeof window === "undefined") return null;
@@ -124,11 +125,13 @@ export default function MobileVoiceButton() {
             ? "rgba(255,115,0,.92)"
             : busy
               ? "rgba(255,140,0,.45)"
-              : "rgba(255,255,255,.12)",
-          border: listening || busy ? "1px solid rgba(255,180,80,.7)" : "1px solid rgba(255,255,255,.22)",
+              : fmActionSoft,
+          border: listening || busy ? "1px solid rgba(255,180,80,.7)" : fmActionBorder,
           color: "#fff",
           cursor: busy ? "wait" : "pointer",
-          boxShadow: listening ? "0 0 28px rgba(255,115,0,.55)" : "0 8px 18px rgba(0,0,0,.4)",
+          boxShadow: listening
+            ? "0 0 28px rgba(255,115,0,.55)"
+            : "0 0 18px rgba(255,115,0,.22), 0 8px 18px rgba(0,0,0,.4)",
           animation: listening ? "fm-mic-pulse 1.35s ease-in-out infinite" : undefined,
           display: "flex",
           alignItems: "center",

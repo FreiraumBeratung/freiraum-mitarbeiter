@@ -196,8 +196,10 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
         width: "100%",
         maxWidth: "100%",
         borderRadius: 18,
-        border: "1px solid rgba(255,255,255,0.12)",
-        background: "linear-gradient(180deg, rgba(17,20,25,0.95), rgba(9,12,16,0.95))",
+        border: compact ? "1px solid rgba(255,166,77,0.18)" : "1px solid rgba(255,255,255,0.12)",
+        background: compact
+          ? "linear-gradient(180deg, rgba(28,20,14,0.95), rgba(12,10,8,0.95))"
+          : "linear-gradient(180deg, rgba(17,20,25,0.95), rgba(9,12,16,0.95))",
         boxShadow: "0 16px 30px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.06)",
         padding: 14,
         display: "grid",

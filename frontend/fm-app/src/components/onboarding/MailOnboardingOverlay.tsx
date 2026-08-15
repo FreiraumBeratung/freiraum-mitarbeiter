@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 
 import { backendBase } from "../../lib/backendBase";
+import { fmCardBorder, fmCardGlow, fmWarmOverlay } from "../../lib/fmVisual";
 import { resetMobileZoom, storeSessionToken } from "../../lib/sessionToken";
 import { consumeMicrosoftClaimFromUrl } from "../../modules/auth/microsoftClaim";
 
@@ -553,7 +554,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: "fixed",
     inset: 0,
     zIndex: 1400,
-    background: "rgba(0,0,0,0.93)",
+    background: fmWarmOverlay,
     backdropFilter: "blur(10px)",
     display: "flex",
     justifyContent: "center",
@@ -563,9 +564,9 @@ const styles: Record<string, React.CSSProperties> = {
   card: {
     width: "min(900px, 92vw)",
     borderRadius: 28,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))",
-    boxShadow: "0 30px 80px rgba(0,0,0,0.6)",
+    border: fmCardBorder,
+    background: "linear-gradient(180deg, rgba(255,166,77,0.10), rgba(255,255,255,0.03))",
+    boxShadow: fmCardGlow,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
@@ -577,9 +578,9 @@ const styles: Record<string, React.CSSProperties> = {
     width: "min(1100px, 94vw)",
     minHeight: "min(76vh, 820px)",
     borderRadius: 28,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))",
-    boxShadow: "0 30px 80px rgba(0,0,0,0.6)",
+    border: fmCardBorder,
+    background: "linear-gradient(180deg, rgba(255,166,77,0.10), rgba(255,255,255,0.03))",
+    boxShadow: fmCardGlow,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
@@ -699,13 +700,13 @@ const styles: Record<string, React.CSSProperties> = {
   btnPrimaryBlue: {
     height: 40,
     borderRadius: 999,
-    border: "1px solid rgba(129,178,255,0.55)",
-    background: "rgba(129,178,255,0.28)",
-    color: "rgba(228,239,255,0.98)",
+    border: "1px solid rgba(255,166,77,0.7)",
+    background: "rgba(255,115,0,0.88)",
+    color: "#1a1008",
     padding: "0 16px",
     cursor: "pointer",
     fontSize: 14,
-    fontWeight: 600,
+    fontWeight: 700,
   },
   btnGhost: {
     height: 40,

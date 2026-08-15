@@ -15,6 +15,7 @@ import {
 } from "../modules/mail/selectedMailContext";
 import { type VoiceState } from "../modules/voice";
 import { getSendReviewMode, setSendReviewMode, type SendReviewMode } from "../modules/voice/send_review_mode";
+import { fmTitleFont, fmWarmPage } from "../lib/fmVisual";
 
 type InboxItem = {
   uid: string;
@@ -615,7 +616,7 @@ export default function MobileMailShell() {
         height: "100%",
         display: "flex",
         flexDirection: "column",
-        background: "#07090d",
+        background: fmWarmPage,
         color: "#fff",
       }}
     >
@@ -673,6 +674,7 @@ export default function MobileMailShell() {
                 fontSize: detailOpen ? 17 : 18,
                 fontWeight: 700,
                 lineHeight: 1.2,
+                fontFamily: fmTitleFont,
                 whiteSpace: "nowrap",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -694,9 +696,9 @@ export default function MobileMailShell() {
               flexShrink: 0,
               display: "flex",
               borderRadius: 999,
-              border: "1px solid rgba(255,255,255,0.16)",
+              border: "1px solid rgba(255,166,77,0.28)",
               overflow: "hidden",
-              background: "rgba(255,255,255,0.04)",
+              background: "rgba(255,115,0,0.08)",
             }}
           >
             {(["pruefen", "sofort"] as SendReviewMode[]).map((mode) => {
@@ -714,8 +716,8 @@ export default function MobileMailShell() {
                     height: 32,
                     padding: "0 10px",
                     border: "none",
-                    background: active ? "rgba(120, 180, 255, 0.28)" : "transparent",
-                    color: active ? "#fff" : "rgba(255,255,255,0.62)",
+                    background: active ? "rgba(255,115,0,0.86)" : "transparent",
+                    color: active ? "#111" : "rgba(255,214,170,0.88)",
                     fontSize: 11,
                     fontWeight: active ? 700 : 500,
                   }}
@@ -1104,7 +1106,7 @@ export default function MobileMailShell() {
         style={{
           flexShrink: 0,
           borderTop: "1px solid rgba(255,255,255,0.08)",
-          background: "rgba(7,9,13,0.96)",
+          background: "rgba(16,12,9,0.94)",
         }}
       >
         <MobileVoiceButton />

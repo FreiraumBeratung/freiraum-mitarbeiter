@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { backendBase } from "../lib/backendBase";
+import { fmTitleFont, fmWarmPage } from "../lib/fmVisual";
 
 type AdminAccountItem = {
   id: string;
@@ -117,16 +118,16 @@ export default function AdminAccounts() {
   };
 
   return (
-    <div style={{ padding: 24, maxWidth: 720, margin: "0 auto", color: "#fff" }}>
-      <a href="/mail/compose" style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>
+    <div style={{ padding: 24, maxWidth: 720, margin: "0 auto", color: "#fff", minHeight: "100%", background: fmWarmPage }}>
+      <a href="/mail/compose" style={{ color: "rgba(255,214,170,0.78)", fontSize: 13 }}>
         ← Zurück zur App
       </a>
-      <h1 style={{ fontSize: 22, margin: "12px 0 8px" }}>Verwaltung</h1>
+      <h1 style={{ fontSize: 22, margin: "12px 0 8px", fontFamily: fmTitleFont }}>Verwaltung</h1>
       <p style={{ color: "rgba(255,255,255,0.62)", fontSize: 13, marginBottom: 16 }}>
         Du siehst nur, wer sich angemeldet hat. Mails, Kontakte und Inhalte bleiben unsichtbar.
       </p>
       {sessionAdmin ? (
-        <div style={{ fontSize: 12, color: "rgba(180,220,255,0.9)", marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ fontSize: 12, color: "rgba(255,214,170,0.9)", marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
           <span>Angemeldet als Admin-E-Mail.</span>
           <button
             type="button"

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { backendBase } from "../../lib/backendBase";
+import { fmCardBorder, fmCardGlow, fmTitleFont, fmWarmOverlay } from "../../lib/fmVisual";
 import { clearStoredSessionToken } from "../../lib/sessionToken";
 
 const PAUSE_TEXT =
@@ -67,7 +68,7 @@ export default function LicensePausedOverlay() {
         position: "fixed",
         inset: 0,
         zIndex: 1600,
-        background: "rgba(0,0,0,0.94)",
+        background: fmWarmOverlay,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -77,15 +78,32 @@ export default function LicensePausedOverlay() {
       <div
         style={{
           width: "min(420px, 92vw)",
-          borderRadius: 20,
-          border: "1px solid rgba(255,255,255,0.16)",
-          background: "rgba(20,20,20,0.96)",
+          borderRadius: 24,
+          border: fmCardBorder,
+          background: "linear-gradient(180deg, rgba(255,166,77,0.10), rgba(20,16,12,0.96))",
+          boxShadow: fmCardGlow,
           padding: "28px 22px",
           color: "#fff",
           textAlign: "center",
         }}
       >
-        <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.4 }}>{PAUSE_TEXT}</div>
+        <img
+          src="/branding/freiraum-logo.png"
+          alt="Freiraum"
+          style={{ width: "min(180px, 52vw)", maxWidth: "100%", marginBottom: 16 }}
+        />
+        <div
+          style={{
+            height: 2,
+            width: 56,
+            margin: "0 auto 16px",
+            borderRadius: 99,
+            background: "rgba(255,115,0,0.85)",
+          }}
+        />
+        <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.4, fontFamily: fmTitleFont }}>
+          {PAUSE_TEXT}
+        </div>
         <button
           type="button"
           onClick={() => void logout()}
@@ -93,8 +111,8 @@ export default function LicensePausedOverlay() {
             marginTop: 18,
             height: 40,
             borderRadius: 999,
-            border: "1px solid rgba(255,255,255,0.22)",
-            background: "rgba(255,255,255,0.1)",
+            border: "1px solid rgba(255,166,77,0.55)",
+            background: "rgba(255,115,0,0.18)",
             color: "#fff",
             padding: "0 18px",
             cursor: "pointer",
