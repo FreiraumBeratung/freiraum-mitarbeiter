@@ -18,10 +18,12 @@ import LeadsOSMResults from "./pages/LeadsOSMResults";
 import MailCompose from "./pages/MailCompose";
 import Exports from "./pages/Exports";
 import FreiraumLayout from "./layouts/FreiraumLayout";
+import MobileMailShell from "./layouts/MobileMailShell";
 import RobotAvatar from "./components/robot/RobotAvatar";
 import MailComposeForm from "./components/mail/MailComposeForm";
 import ExchangeInboxPanel from "./components/mail/ExchangeInboxPanel";
 import MailOnboardingOverlay from "./components/onboarding/MailOnboardingOverlay";
+import { useIsMobile } from "./hooks/useIsMobile";
 
 import Backdrop from "./components/layout/Backdrop";
 import TopFeatureBar from "./components/TopFeatureBar";
@@ -115,10 +117,13 @@ function WarmVoicePrefs() {
 
 function Shell() {
   const location = useLocation();
+  const isMobile = useIsMobile();
   const path = location.pathname || "";
   const isMailWorkspace = path === "/" || path === "/mail/compose" || path.startsWith("/mail/compose/");
 
-  const mailComposeLayout = (
+  const mailComposeLayout = isMobile ? (
+    <MobileMailShell />
+  ) : (
     <FreiraumLayout
       robot={<RobotAvatar />}
       composer={<MailComposeForm />}
@@ -178,6 +183,7 @@ export default function App() {
     typeof window !== "undefined" && window.location?.protocol === "file:"
       ? HashRouter
       : BrowserRouter;
+  const isMobile = useIsMobile();
   const [transitionMessage, setTransitionMessage] = useState(null);
   const transitionTimer = useRef(null);
 
@@ -197,9 +203,11 @@ export default function App() {
   return (
     <Router>
       <div className="h-screen flex flex-col overflow-hidden bg-black text-white">
-        <div className="fixed inset-0 -z-10">
-          <HeroFloatCanvas />
-        </div>
+        {!isMobile && (
+          <div className="fixed inset-0 -z-10">
+            <HeroFloatCanvas />
+          </div>
+        )}
         {transitionMessage && <TransitionOverlay message={transitionMessage} />}
         <Shell />
       </div>
