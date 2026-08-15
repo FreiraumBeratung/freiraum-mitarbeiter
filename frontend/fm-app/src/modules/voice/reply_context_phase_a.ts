@@ -81,6 +81,37 @@ function hasContextualReplyShortcut(text: string): boolean {
   );
 }
 
+function hasCasualReplyShortcut(text: string): boolean {
+  return (
+    /^\s*(?:(?:äh+|hm+|he+|hey|hallo|also|ja)\s+)*(?:mal\s+|kurz\s+|bitte\s+)*(?:sag\s+(?:ihm|ihr|denen)\s+(?:bitte\s+|schnell\s+|mal\s+eben\s+|mal\s+|kurz\s+|direkt\s+|sofort\s+)?)/i.test(
+      text
+    ) ||
+    /^\s*(?:(?:äh+|hm+|he+|hey|hallo|also|ja)\s+)*(?:mal\s+|kurz\s+|bitte\s+)*(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+|schnell\s+|mal\s+eben\s+|mal\s+|kurz\s+|direkt\s+|sofort\s+)?wissen)/i.test(
+      text
+    ) ||
+    /^\s*(?:(?:äh+|hm+|he+|hey|hallo|also|ja)\s+)*(?:mal\s+|kurz\s+|bitte\s+)*(?:(?:kannst|könntest|kann)\s+du\s+(?:ihm|ihr|denen)\s+(?:bitte\s+|schnell\s+|mal\s+eben\s+|mal\s+|kurz\s+|direkt\s+|sofort\s+)?(?:sagen|wissen\s+lassen))/i.test(
+      text
+    )
+  );
+}
+
+function hasCasualDirectReplyTrigger(text: string): boolean {
+  return (
+    /^\s*(?:(?:äh+|hm+|he+|hey|hallo|also|ja)\s+)*(?:mal\s+|kurz\s+|bitte\s+)*(?:sag\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:schnell|mal\s+eben|direkt|sofort)\b)/i.test(
+      text
+    ) ||
+    /^\s*(?:(?:äh+|hm+|he+|hey|hallo|also|ja)\s+)*(?:mal\s+|kurz\s+|bitte\s+)*(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+)?(?:schnell|mal\s+eben|direkt|sofort)\s+wissen)/i.test(
+      text
+    ) ||
+    /^\s*(?:(?:äh+|hm+|he+|hey|hallo|also|ja)\s+)*(?:mal\s+|kurz\s+|bitte\s+)*(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+mal\s+eben\s+wissen)/i.test(
+      text
+    ) ||
+    /^\s*(?:(?:äh+|hm+|he+|hey|hallo|also|ja)\s+)*(?:mal\s+|kurz\s+|bitte\s+)*(?:(?:kannst|könntest|kann)\s+du\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:schnell|mal\s+eben|direkt|sofort)\s+(?:sagen|wissen\s+lassen))/i.test(
+      text
+    )
+  );
+}
+
 function hasContextPronounDirective(text: string): boolean {
   return /^\s*(?:äh+\s+|hm+\s+|mal\s+|kurz\s+)*(?:bitte\s+)?(?:sag|gib|lass)\s+(?:ihm|ihr|denen)\b/i.test(text);
 }
@@ -142,6 +173,19 @@ export function extractReplyBodyHint(
 
   rest = rest.replace(/^\s*(?:äh+|hm+)\s*/i, "");
   rest = rest.replace(/^\s*(?:mal|kurz)\s+/i, "");
+  rest = rest.replace(/^\s*(?:(?:he+|hey|hallo|also|ja)\s+)+/i, "");
+  rest = rest.replace(
+    /^\s*(?:bitte\s+)?(?:(?:kannst|könntest|kann)\s+du\s+(?:ihm|ihr|denen)\s+(?:bitte\s+|schnell\s+|mal\s+eben\s+|mal\s+|kurz\s+|direkt\s+|sofort\s+)*(?:sagen|wissen\s+lassen))(?:\s+(?:dass|daß))?\s*[:.,]?\s*/i,
+    ""
+  );
+  rest = rest.replace(
+    /^\s*(?:bitte\s+)?(?:sag\s+(?:ihm|ihr|denen)\s+(?:bitte\s+)?(?:schnell|mal\s+eben|mal|kurz)\b)(?:\s+bescheid)?(?:\s+(?:dass|daß))?\s*[:.,]?\s*/i,
+    ""
+  );
+  rest = rest.replace(
+    /^\s*(?:bitte\s+)?(?:la(?:ss|s)\s+(?:ihn|sie|ihm|ihr|denen)\s+(?:bitte\s+|schnell\s+|mal\s+eben\s+|mal\s+|kurz\s+)+wissen(?:\s+lassen)?)(?:\s+(?:dass|daß))?\s*[:.,]?\s*/i,
+    ""
+  );
 
   for (const alias of aliases) {
     const a = escapeRegex(alias);
@@ -234,14 +278,14 @@ export function buildReplyIntentFromSelectedMailContext(
   if (!selectedContext?.uid || !selectedContext.fromEmail) return null;
   const normalized = normalizeCommandText(transcript);
   const addressedSender = hasAddressedSenderDirective(normalized, selectedContext);
-  const directRequested = hasDirectReplyTrigger(normalized);
+  const directRequested = hasDirectReplyTrigger(normalized) || hasCasualDirectReplyTrigger(normalized);
   const hasStrongReply =
     hasLeadingReplyCommand(normalized) ||
     hasContextWriteCommand(normalized) ||
     hasContextPronounDirective(normalized) ||
     (hasReplyVerb(normalized) &&
       (hasMailTargetHint(normalized) || /\bwie\s+folgt\b/i.test(normalized) || directRequested));
-  const hasShortcut = hasContextualReplyShortcut(normalized);
+  const hasShortcut = hasContextualReplyShortcut(normalized) || hasCasualReplyShortcut(normalized);
   if (!hasStrongReply && !hasShortcut && !addressedSender) return null;
 
   let bodyHint = normalizeBodyHint(extractReplyBodyHint(normalized, selectedContext));
@@ -296,4 +340,39 @@ export function buildReplyIntentFromSelectedMailContext(
     },
   };
 }
+
+export function buildImmediateReplyIntentFromOpenMail(
+  transcript: string,
+  selectedContext: SelectedMailContext | null | undefined,
+  existingReply?: EmailComposeIntent | null
+): EmailComposeIntent | null {
+  if (!selectedContext?.uid || !selectedContext.fromEmail) return null;
+  const cancelRequested = hasCancelPhrase({
+    raw: transcript,
+    normalized: normalizeForCancelDetection(transcript),
+  });
+  if (cancelRequested) return null;
+
+  let bodyHint = normalizeBodyHint(existingReply?.bodyHint);
+  if (!bodyHint) {
+    bodyHint = normalizeBodyHint(extractReplyBodyHint(transcript, selectedContext));
+  }
+  if (!bodyHint || bodyHint.length < 2) return null;
+
+  return {
+    type: "email-compose",
+    to: selectedContext.fromEmail,
+    toRaw: selectedContext.fromName || selectedContext.fromEmail,
+    subjectHint: normalizeReplySubject(selectedContext.subject),
+    bodyHint,
+    bodyHintRaw: bodyHint,
+    meta: {
+      source: "immediate-open-mail",
+      autoSend: true,
+      forcePreviewOnly: false,
+      uiHint: "Sofort-Modus: Antwort wird direkt gesendet.",
+    },
+  };
+}
+
 

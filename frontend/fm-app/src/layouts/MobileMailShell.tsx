@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import MailComposeForm from "../components/mail/MailComposeForm";
 import MobileVoiceButton from "../components/voice/MobileVoiceButton";
+import { backendBase } from "../lib/backendBase";
+import { unlockTtsPlayback } from "../modules/voice/tts";
 import {
   clearSelectedMailContext,
   getSelectedMailContext,
@@ -9,6 +11,7 @@ import {
   type SelectedMailContext,
 } from "../modules/mail/selectedMailContext";
 import { type VoiceState } from "../modules/voice";
+import { getSendReviewMode, setSendReviewMode, type SendReviewMode } from "../modules/voice/send_review_mode";
 
 type InboxItem = {
   uid: string;
@@ -39,15 +42,24 @@ type InboxMessageDetailResponse = {
   bodyHtml?: string | null;
 };
 
-const INBOX_AUTO_REFRESH_MS = 60_000;
+type MicrosoftAuthStatus = {
+  ok: boolean;
+  connected?: boolean;
+  loggedIn?: boolean;
+  oauthConfigured?: boolean;
+  accountEmail?: string | null;
+  accountDisplayName?: string | null;
+  accountId?: string | null;
+};
 
-function backendBase(): string {
-  return (
-    (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
-    (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-    "http://127.0.0.1:30521"
-  ).replace(/\/+$/, "");
-}
+type LearnedContactItem = {
+  email: string;
+  display_name: string;
+  aliases: string[];
+  source: string;
+};
+
+const INBOX_AUTO_REFRESH_MS = 60_000;
 
 function decodeHtmlEntities(input: string): string {
   if (!input) return "";
@@ -113,29 +125,45 @@ export default function MobileMailShell() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailData, setDetailData] = useState<InboxMessageDetailResponse | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
-  const [hasDraft, setHasDraft] = useState(false);
   const [activeContext, setActiveContext] = useState<SelectedMailContext | null>(() => getSelectedMailContext());
+  const [query, setQuery] = useState("");
+  const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
+  const [msAuthLoading, setMsAuthLoading] = useState(false);
+  const [contactsOpen, setContactsOpen] = useState(false);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [contactsError, setContactsError] = useState<string | null>(null);
+  const [contacts, setContacts] = useState<LearnedContactItem[]>([]);
+  const [manualName, setManualName] = useState("");
+  const [manualEmail, setManualEmail] = useState("");
+  const [composeSheetOpen, setComposeSheetOpen] = useState(false);
+  const [composeSheetEntered, setComposeSheetEntered] = useState(false);
+  const [sendReviewMode, setSendReviewModeState] = useState<SendReviewMode>(() => getSendReviewMode());
   const inboxLoadInFlightRef = useRef(false);
   const itemsRef = useRef<InboxItem[]>([]);
   const mailboxInitRef = useRef(true);
+  const detailOpenRef = useRef(false);
 
-  const visibleItems = useMemo(
-    () =>
-      items.map((item) => ({
-        ...item,
-        subject: cut(stripHtml(item.subject) || "(ohne Betreff)", 80),
-        fromName: item.fromName ? cut(stripHtml(item.fromName), 36) : null,
-        fromEmail: item.fromEmail ? cut(stripHtml(item.fromEmail), 40) : null,
-        preview: item.preview ? cut(stripHtml(item.preview), 88) : null,
-      })),
-    [items]
-  );
+  const visibleItems = useMemo(() => {
+    const normalized = items.map((item) => ({
+      ...item,
+      subject: cut(stripHtml(item.subject) || "(ohne Betreff)", 80),
+      fromName: item.fromName ? cut(stripHtml(item.fromName), 36) : null,
+      fromEmail: item.fromEmail ? cut(stripHtml(item.fromEmail), 40) : null,
+      preview: item.preview ? cut(stripHtml(item.preview), 88) : null,
+    }));
+    const q = query.trim().toLowerCase();
+    if (!q) return normalized;
+    return normalized.filter((item) =>
+      `${item.subject} ${item.fromName || ""} ${item.fromEmail || ""} ${item.preview || ""}`.toLowerCase().includes(q)
+    );
+  }, [items, query]);
 
   const loadInbox = useCallback(async (options?: { silent?: boolean }) => {
     if (inboxLoadInFlightRef.current) return;
     inboxLoadInFlightRef.current = true;
     const silent = options?.silent === true;
-    if (!silent && itemsRef.current.length === 0) {
+    const hasExistingItems = itemsRef.current.length > 0;
+    if (!silent && !hasExistingItems) {
       setLoading(true);
       setError(null);
     }
@@ -163,11 +191,21 @@ export default function MobileMailShell() {
   const openMessage = useCallback(
     async (item: InboxItem) => {
       if (!item?.uid) return;
+      setComposeSheetOpen(false);
       setSelectedUid(item.uid);
       setSelectedMailContext(buildContext(item));
       setDetailOpen(true);
       setDetailLoading(true);
       setDetailError(null);
+      void (async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach((track) => track.stop());
+          unlockTtsPlayback();
+        } catch {
+          /* Safari-Dialog kann hier erscheinen; Aufnahme startet erst beim Mikro-Tap. */
+        }
+      })();
       try {
         const res = await fetch(
           `${backendBase()}/api/mail/inbox/${encodeURIComponent(item.uid)}?mailbox=${mailboxMode}`
@@ -185,13 +223,128 @@ export default function MobileMailShell() {
     [mailboxMode]
   );
 
+  const closeComposeSheet = useCallback(() => {
+    setComposeSheetOpen(false);
+  }, []);
+
   const closeDetail = useCallback(() => {
     setDetailOpen(false);
+    setComposeSheetOpen(false);
     setDetailData(null);
     setDetailError(null);
     setSelectedUid(null);
     clearSelectedMailContext();
+    try {
+      window.__fm_set_mail_to?.("");
+      window.__fm_set_mail_subject?.("");
+      window.__fm_set_mail_body?.("");
+    } catch {
+      // ignore
+    }
   }, []);
+
+  const loadMicrosoftAuthStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${backendBase()}/api/auth/microsoft/status`);
+      const data = (await res.json()) as MicrosoftAuthStatus;
+      if (res.ok && data?.ok) {
+        setMsAuth(data);
+      } else {
+        setMsAuth({ ok: false, connected: false, oauthConfigured: false });
+      }
+    } catch {
+      setMsAuth({ ok: false, connected: false, oauthConfigured: false });
+    }
+  }, []);
+
+  const logoutAndResetSetup = useCallback(async () => {
+    setMsAuthLoading(true);
+    try {
+      const resetRes = await fetch(`${backendBase()}/api/setup/mail/reset`, { method: "POST" });
+      if (!resetRes.ok && resetRes.status !== 401) {
+        throw new Error("Ausloggen fehlgeschlagen.");
+      }
+      try {
+        await fetch(`${backendBase()}/api/auth/microsoft/logout`, { method: "POST" });
+      } catch {
+        // no-op
+      }
+      try {
+        window.localStorage.setItem("fm_mail_onboarding_complete", "0");
+      } catch {
+        // ignore
+      }
+      window.location.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Ausloggen fehlgeschlagen.");
+    } finally {
+      setMsAuthLoading(false);
+    }
+  }, []);
+
+  const loadLearnedContacts = useCallback(async () => {
+    setContactsLoading(true);
+    setContactsError(null);
+    try {
+      const res = await fetch(`${backendBase()}/api/contacts/learned?personOnly=true&limit=250`);
+      const data = (await res.json()) as { ok?: boolean; items?: LearnedContactItem[] };
+      if (!res.ok || !data?.ok) {
+        throw new Error("Kontakte konnten nicht geladen werden.");
+      }
+      setContacts(Array.isArray(data.items) ? data.items : []);
+    } catch (err) {
+      setContactsError(err instanceof Error ? err.message : "Kontakte konnten nicht geladen werden.");
+    } finally {
+      setContactsLoading(false);
+    }
+  }, []);
+
+  const addManualContact = useCallback(async () => {
+    const name = manualName.trim();
+    const email = manualEmail.trim();
+    if (!name || !email) {
+      setContactsError("Bitte Name und E-Mail ausfüllen.");
+      return;
+    }
+    setContactsLoading(true);
+    setContactsError(null);
+    try {
+      const res = await fetch(`${backendBase()}/api/contacts/manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: name, email, aliases: [name] }),
+      });
+      if (!res.ok) {
+        throw new Error("Kontakt konnte nicht gespeichert werden.");
+      }
+      setManualName("");
+      setManualEmail("");
+      await loadLearnedContacts();
+    } catch (err) {
+      setContactsError(err instanceof Error ? err.message : "Kontakt konnte nicht gespeichert werden.");
+    } finally {
+      setContactsLoading(false);
+    }
+  }, [manualName, manualEmail, loadLearnedContacts]);
+
+  const deleteContact = useCallback(async (email: string) => {
+    if (!email) return;
+    setContactsLoading(true);
+    setContactsError(null);
+    try {
+      const res = await fetch(`${backendBase()}/api/contacts/learned?email=${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        throw new Error("Kontakt konnte nicht gelöscht werden.");
+      }
+      await loadLearnedContacts();
+    } catch (err) {
+      setContactsError(err instanceof Error ? err.message : "Kontakt konnte nicht gelöscht werden.");
+    } finally {
+      setContactsLoading(false);
+    }
+  }, [loadLearnedContacts]);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -199,7 +352,8 @@ export default function MobileMailShell() {
 
   useEffect(() => {
     void loadInbox();
-  }, [loadInbox]);
+    void loadMicrosoftAuthStatus();
+  }, [loadInbox, loadMicrosoftAuthStatus]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -212,11 +366,39 @@ export default function MobileMailShell() {
 
   useEffect(() => {
     const onSetupDone = () => {
+      void loadMicrosoftAuthStatus();
       void loadInbox({ silent: true });
     };
     window.addEventListener("fm-mail-setup-complete", onSetupDone);
     return () => window.removeEventListener("fm-mail-setup-complete", onSetupDone);
-  }, [loadInbox]);
+  }, [loadInbox, loadMicrosoftAuthStatus]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const hasResult = params.has("ms_oauth");
+    const hasCodeState = params.has("code") && params.has("state");
+    const hasAzureError = params.has("error");
+    if (hasResult || (!hasCodeState && !hasAzureError)) return;
+    const state = params.get("state") || "";
+    if (state) {
+      const stateBridgeKey = `fm_ms_oauth_bridge_${state}`;
+      if (window.sessionStorage.getItem(stateBridgeKey) === "1") return;
+      window.sessionStorage.setItem(stateBridgeKey, "1");
+    }
+    const callback = new URL(`${backendBase()}/api/auth/microsoft/callback`);
+    const passThroughKeys = ["code", "state", "error", "error_description", "session_state"];
+    for (const key of passThroughKeys) {
+      const value = params.get(key);
+      if (value) callback.searchParams.set(key, value);
+    }
+    window.location.href = callback.toString();
+  }, []);
+
+  useEffect(() => {
+    if (!contactsOpen) return;
+    void loadLearnedContacts();
+  }, [contactsOpen, loadLearnedContacts]);
 
   useEffect(() => {
     const handler = (e: CustomEvent<{ state: VoiceState }>) => {
@@ -224,17 +406,6 @@ export default function MobileMailShell() {
     };
     document.addEventListener("voice-state", handler as EventListener);
     return () => document.removeEventListener("voice-state", handler as EventListener);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const id = window.setInterval(() => {
-      const to = window.__fm_get_mail_to?.() || "";
-      const subject = window.__fm_get_mail_subject?.() || "";
-      const body = window.__fm_get_mail_body?.() || "";
-      setHasDraft(Boolean(to.trim() || subject.trim() || body.trim()));
-    }, 400);
-    return () => window.clearInterval(id);
   }, []);
 
   useEffect(() => {
@@ -254,12 +425,57 @@ export default function MobileMailShell() {
     return () => window.removeEventListener("fm-selected-mail-context", onChanged as EventListener);
   }, []);
 
+  useEffect(() => {
+    (window as any).__fm_mobile_shell = true;
+    setSendReviewMode(getSendReviewMode());
+    return () => {
+      (window as any).__fm_mobile_shell = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    detailOpenRef.current = detailOpen;
+  }, [detailOpen]);
+
+  useEffect(() => {
+    const onComposeOpen = () => {
+      if (detailOpenRef.current) return;
+      setComposeSheetOpen(true);
+      try {
+        navigator.vibrate?.(16);
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener("fm-mobile-compose-open", onComposeOpen);
+    return () => window.removeEventListener("fm-mobile-compose-open", onComposeOpen);
+  }, []);
+
+  useEffect(() => {
+    if (!composeSheetOpen || detailOpen) {
+      setComposeSheetEntered(false);
+      return;
+    }
+    setComposeSheetEntered(false);
+    let innerId = 0;
+    const outerId = window.requestAnimationFrame(() => {
+      innerId = window.requestAnimationFrame(() => setComposeSheetEntered(true));
+    });
+    return () => {
+      window.cancelAnimationFrame(outerId);
+      window.cancelAnimationFrame(innerId);
+    };
+  }, [composeSheetOpen, detailOpen]);
+
   const context = activeContext;
+  const inboxHiddenForCompose = composeSheetOpen && !detailOpen;
   const headerTitle = detailOpen
     ? cut(stripHtml(detailData?.subject || context?.subject || "Nachricht"), 42)
-    : mailboxMode === "sent"
-      ? "Gesendet"
-      : "Posteingang";
+    : inboxHiddenForCompose
+      ? "Neue Mail"
+      : mailboxMode === "sent"
+        ? "Gesendet"
+        : "Posteingang";
 
   const voiceHint =
     voiceState === "listening"
@@ -268,9 +484,15 @@ export default function MobileMailShell() {
         ? "Versteht…"
         : voiceState === "acting"
           ? "Führt aus…"
-          : context
-            ? `Antwort an ${context.fromName || context.fromEmail || "Absender"}`
-            : "Neue Mail per Sprache";
+          : inboxHiddenForCompose
+            ? "Entwurf prüfen – sag senden oder tippe Senden"
+            : context
+              ? sendReviewMode === "sofort"
+                ? `Sofort-Antwort an ${context.fromName || context.fromEmail || "Absender"}`
+                : `Antwort an ${context.fromName || context.fromEmail || "Absender"}`
+              : sendReviewMode === "sofort"
+                ? "Neue Mail per Sprache – Sofort gilt bei geöffneter Mail"
+                : "Neue Mail per Sprache";
 
   return (
     <div
@@ -290,10 +512,10 @@ export default function MobileMailShell() {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {detailOpen ? (
+          {detailOpen || inboxHiddenForCompose ? (
             <button
               type="button"
-              onClick={closeDetail}
+              onClick={detailOpen ? closeDetail : closeComposeSheet}
               style={{
                 height: 32,
                 borderRadius: 999,
@@ -320,46 +542,234 @@ export default function MobileMailShell() {
               {headerTitle}
             </div>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 2 }}>{voiceHint}</div>
+            {msAuth?.accountEmail ? (
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", marginTop: 2 }}>
+                {msAuth.accountEmail}
+              </div>
+            ) : null}
           </div>
-          {!detailOpen ? (
-            <button
-              type="button"
-              onClick={() => void loadInbox()}
+          <div
+            role="group"
+            aria-label="Senden prüfen oder sofort"
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              borderRadius: 999,
+              border: "1px solid rgba(255,255,255,0.16)",
+              overflow: "hidden",
+              background: "rgba(255,255,255,0.04)",
+            }}
+          >
+            {(["pruefen", "sofort"] as SendReviewMode[]).map((mode) => {
+              const active = sendReviewMode === mode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => {
+                    setSendReviewModeState(mode);
+                    setSendReviewMode(mode);
+                  }}
+                  style={{
+                    height: 32,
+                    padding: "0 10px",
+                    border: "none",
+                    background: active ? "rgba(120, 180, 255, 0.28)" : "transparent",
+                    color: active ? "#fff" : "rgba(255,255,255,0.62)",
+                    fontSize: 11,
+                    fontWeight: active ? 700 : 500,
+                  }}
+                >
+                  {mode === "pruefen" ? "Prüfen" : "Sofort"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        {!detailOpen && !inboxHiddenForCompose ? (
+          <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Suche in Inbox..."
               style={{
-                height: 32,
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.16)",
-                background: "rgba(255,255,255,0.08)",
-                color: "rgba(255,255,255,0.88)",
+                width: "100%",
+                height: 34,
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.06)",
+                color: "#fff",
                 padding: "0 12px",
-                fontSize: 12,
+                fontSize: 13,
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "nowrap",
+                gap: 5,
+                overflowX: "auto",
               }}
             >
-              Neu
-            </button>
-          ) : null}
-        </div>
-        {!detailOpen ? (
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-            <button
-              type="button"
-              onClick={() => setMailboxMode("inbox")}
-              style={tabStyle(mailboxMode === "inbox")}
+              <button type="button" onClick={() => setMailboxMode("inbox")} style={tabStyle(mailboxMode === "inbox")}>
+                Inbox
+              </button>
+              <button type="button" onClick={() => setMailboxMode("sent")} style={tabStyle(mailboxMode === "sent")}>
+                Gesendet
+              </button>
+              <button
+                type="button"
+                onClick={() => void loadInbox()}
+                style={tabStyle(false)}
+              >
+                Aktualisieren
+              </button>
+              <button
+                type="button"
+                onClick={() => void logoutAndResetSetup()}
+                disabled={msAuthLoading}
+                style={tabStyle(false)}
+                title="Ausloggen und Konto wechseln"
+              >
+                Ausloggen
+              </button>
+              <button
+                type="button"
+                onClick={() => setContactsOpen((v) => !v)}
+                style={tabStyle(contactsOpen)}
+              >
+                Kontakte
+              </button>
+            </div>
+            {contactsOpen ? (
+              <div
+                style={{
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(255,255,255,0.04)",
+                  padding: 10,
+                  display: "grid",
+                  gap: 8,
+                }}
+              >
+                <input
+                  value={manualName}
+                  onChange={(e) => setManualName(e.target.value)}
+                  placeholder="Name"
+                  style={fieldStyle}
+                />
+                <input
+                  value={manualEmail}
+                  onChange={(e) => setManualEmail(e.target.value)}
+                  placeholder="E-Mail"
+                  style={fieldStyle}
+                />
+                <button
+                  type="button"
+                  onClick={() => void addManualContact()}
+                  disabled={contactsLoading}
+                  style={tabStyle(false)}
+                >
+                  Kontakt hinzufügen
+                </button>
+                {contactsLoading ? (
+                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.62)" }}>Kontakte werden geladen...</div>
+                ) : null}
+                {contactsError ? (
+                  <div style={{ fontSize: 11, color: "rgba(255,170,170,0.92)" }}>{contactsError}</div>
+                ) : null}
+                {!contactsLoading && contacts.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.56)" }}>Keine Personenkontakte gespeichert.</div>
+                ) : null}
+                <div style={{ maxHeight: 140, overflowY: "auto", display: "grid", gap: 6 }}>
+                  {contacts.map((c) => (
+                    <div
+                      key={c.email}
+                      style={{
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.1)",
+                        background: "rgba(255,255,255,0.03)",
+                        padding: "6px 8px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.93)" }}>{c.display_name}</div>
+                        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.62)" }}>{c.email}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void deleteContact(c.email)}
+                        disabled={contactsLoading}
+                        style={tabStyle(false)}
+                      >
+                        Löschen
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div
+              style={{
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.04)",
+                padding: "6px 10px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
             >
-              Inbox
-            </button>
-            <button
-              type="button"
-              onClick={() => setMailboxMode("sent")}
-              style={tabStyle(mailboxMode === "sent")}
-            >
-              Gesendet
-            </button>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "rgba(255,255,255,0.74)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {context
+                  ? `Aktiver Kontext: ${context.subject || "(ohne Betreff)"}`
+                  : "Aktiver Kontext: keiner"}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedUid(null);
+                  clearSelectedMailContext();
+                }}
+                disabled={!context}
+                style={{
+                  ...tabStyle(false),
+                  opacity: context ? 1 : 0.45,
+                  cursor: context ? "pointer" : "not-allowed",
+                }}
+              >
+                Kontext lösen
+              </button>
+            </div>
           </div>
         ) : null}
       </header>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px 8px" }}>
+      <div
+        style={{
+          flex: inboxHiddenForCompose ? 0 : 1,
+          minHeight: inboxHiddenForCompose ? 0 : 0,
+          overflowY: inboxHiddenForCompose ? "hidden" : "auto",
+          padding: inboxHiddenForCompose ? 0 : "10px 12px 8px",
+          display: inboxHiddenForCompose ? "none" : "block",
+        }}
+      >
         {detailOpen ? (
           <div>
             {detailLoading ? (
@@ -484,11 +894,21 @@ export default function MobileMailShell() {
 
       <div
         style={
-          detailOpen || hasDraft
+          detailOpen
             ? { flexShrink: 0, maxHeight: "42%", overflowY: "auto", padding: "0 12px 8px" }
-            : { position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden" }
+            : inboxHiddenForCompose
+              ? {
+                  flex: 1,
+                  minHeight: 0,
+                  overflowY: "auto",
+                  padding: "10px 12px 8px",
+                  transform: composeSheetEntered ? "translateY(0)" : "translateY(28px)",
+                  opacity: composeSheetEntered ? 1 : 0,
+                  transition: "transform 280ms ease, opacity 280ms ease",
+                }
+              : { position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden" }
         }
-        aria-hidden={!(detailOpen || hasDraft)}
+        aria-hidden={!detailOpen && !inboxHiddenForCompose}
       >
         <MailComposeForm />
       </div>
@@ -508,13 +928,31 @@ export default function MobileMailShell() {
 
 function tabStyle(active: boolean): React.CSSProperties {
   return {
-    height: 30,
+    height: 26,
     borderRadius: 999,
-    border: active ? "1px solid rgba(255,170,95,0.62)" : "1px solid rgba(255,255,255,0.16)",
-    background: active ? "rgba(255,152,55,0.2)" : "rgba(255,255,255,0.08)",
-    color: "rgba(255,255,255,0.92)",
-    padding: "0 14px",
-    fontSize: 12,
+    border: active ? "1px solid rgba(255,115,0,0.95)" : "1px solid rgba(255,115,0,0.48)",
+    background: active
+      ? "linear-gradient(180deg, rgba(255,166,77,0.95), rgba(255,115,0,0.90))"
+      : "rgba(255,115,0,0.18)",
+    color: active ? "#111" : "rgba(255,214,170,0.96)",
+    padding: "0 8px",
+    fontSize: 11,
+    fontWeight: active ? 700 : 600,
     cursor: "pointer",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
   };
 }
+
+const fieldStyle: React.CSSProperties = {
+  height: 32,
+  borderRadius: 8,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(0,0,0,0.25)",
+  color: "#fff",
+  padding: "0 10px",
+  fontSize: 12,
+  outline: "none",
+  width: "100%",
+  boxSizing: "border-box",
+};

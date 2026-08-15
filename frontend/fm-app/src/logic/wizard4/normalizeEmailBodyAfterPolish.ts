@@ -1,3 +1,170 @@
+const DICTATION_NAME_STOPWORDS = new Set([
+  "der",
+  "die",
+  "das",
+  "ein",
+  "eine",
+  "einem",
+  "einen",
+  "einer",
+  "mein",
+  "meine",
+  "dein",
+  "eure",
+  "unser",
+  "unsere",
+  "zusammen",
+  "team",
+  "alle",
+  "euch",
+  "dir",
+  "uns",
+  "ihr",
+  "ihm",
+  "mir",
+  "mal",
+  "doch",
+  "auch",
+  "noch",
+  "kurz",
+  "bitte",
+  "text",
+  "termin",
+  "stand",
+  "status",
+  "update",
+  "info",
+]);
+
+function capitalizeDictationToken(token: string): string {
+  if (!token) return token;
+  return token.charAt(0).toUpperCase() + token.slice(1);
+}
+
+function isLikelyDictationName(token: string): boolean {
+  const normalized = (token || "").trim().toLowerCase();
+  if (normalized.length < 2) return false;
+  if (DICTATION_NAME_STOPWORDS.has(normalized)) return false;
+  return true;
+}
+
+const ASR_EXACT_WORD_FIXES: Record<string, string> = {
+  schones: "schönes",
+  schoenes: "schönes",
+  schoene: "schöne",
+  schoenem: "schönem",
+  schoenen: "schönen",
+  schoener: "schöner",
+  schoen: "schön",
+  schonem: "schönem",
+  schonere: "schönere",
+  schonsten: "schönsten",
+  schonste: "schönste",
+  fuer: "für",
+  ueber: "über",
+  spaet: "spät",
+  spaeter: "später",
+  naechste: "nächste",
+  naechsten: "nächsten",
+  moeglich: "möglich",
+  koennen: "können",
+  muesste: "müsste",
+  wuerde: "würde",
+  groses: "großes",
+  grosses: "großes",
+};
+
+const POSSESSIVE_NOUNS = new Set([
+  "frau",
+  "mann",
+  "sohn",
+  "tochter",
+  "kind",
+  "kinder",
+  "chef",
+  "chefin",
+  "kollege",
+  "kollegin",
+  "firma",
+  "baustelle",
+  "angebot",
+  "rechnung",
+  "projekt",
+]);
+
+function applyCasedReplacement(original: string, replacement: string): string {
+  if (!original) return replacement;
+  if (original === original.toUpperCase() && original.length > 1) return replacement.toUpperCase();
+  if (original.charAt(0) === original.charAt(0).toUpperCase()) {
+    return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+  }
+  return replacement;
+}
+
+function applyAsrDictationFixes(input: string): string {
+  if (!input) return input;
+  let out = input;
+
+  out = out.replace(/\bgeht\s+s\b/gi, (m) => (m.charAt(0) === "G" ? "Geht's" : "geht's"));
+  out = out.replace(/\bgehts\b/gi, (m) => (m.charAt(0) === "G" ? "Geht's" : "geht's"));
+
+  out = out.replace(/\b[A-Za-zÄÖÜäöüß]+/g, (word) => {
+    const lower = word.toLowerCase();
+    const fixed = ASR_EXACT_WORD_FIXES[lower];
+    if (!fixed) return word;
+    return applyCasedReplacement(word, fixed);
+  });
+
+  out = out.replace(
+    /\b(mein|meine|dein|deine|sein|seine|ihr|ihre|unser|unsere|euer|eure)\s+([a-zäöüß]+)\b/gi,
+    (full, det: string, noun: string) => {
+      if (!POSSESSIVE_NOUNS.has(noun.toLowerCase())) return full;
+      return `${det} ${capitalizeDictationToken(noun)}`;
+    }
+  );
+
+  out = out.replace(/\b(was|etwas|nichts)\s+schönes\b/gi, (_m, lead: string) => `${lead} Schönes`);
+  out = out.replace(/\bhat\s+schönes\s+gekocht\b/gi, "hat Schönes gekocht");
+
+  return out;
+}
+
+function applySpokenDictationOrthography(input: string): string {
+  if (!input) return input;
+  let out = input;
+
+  out = out.replace(
+    /\b(guten\s+(?:tag|morgen|abend)|hi|hallo|hey|moin|servus|liebe[rn]?)\s+([a-zäöüß][a-zäöüß\-']*)\b/gi,
+    (full, greet: string, name: string) => {
+      if (!isLikelyDictationName(name)) return full;
+      const greetCased = greet.replace(/(^|\s)([a-zäöüß])/g, (_m: string, sp: string, ch: string) => sp + ch.toUpperCase());
+      return `${greetCased} ${capitalizeDictationToken(name)}`;
+    }
+  );
+
+  out = out.replace(
+    /\b(hier\s+ist)\s+([a-zäöüß][a-zäöüß\-']*)\b/gi,
+    (full, prefix: string, name: string) => {
+      if (!isLikelyDictationName(name)) return full;
+      return `${prefix} ${capitalizeDictationToken(name)}`;
+    }
+  );
+
+  out = out.replace(
+    /\b(Hi|Hallo|Hey|Moin|Servus)\s+([A-ZÄÖÜ][a-zäöüß\-']*)\s+(hier\s+ist)\b/g,
+    "$1 $2, $3"
+  );
+
+  out = out.replace(
+    /\b(hier\s+ist\s+[A-ZÄÖÜ][a-zäöüß\-']*)\s+(ich|wir)\b/g,
+    "$1. $2"
+  );
+
+  out = out.replace(/([.!?]\s+)([a-zäöüß])/g, (_m, prefix: string, ch: string) => prefix + ch.toUpperCase());
+
+  return out;
+}
+
 export function normalizeEmailBodyAfterPolish(input: string): string {
   if (!input) return input;
 
@@ -26,7 +193,7 @@ export function normalizeEmailBodyAfterPolish(input: string): string {
       /^[A-ZÄÖÜ]/.test(m) ? "Dönermann" : "dönermann"
     );
 
-    return out;
+    return applySpokenDictationOrthography(applyAsrDictationFixes(out));
   };
 
   const text = String(input).replace(/\r\n/g, "\n");

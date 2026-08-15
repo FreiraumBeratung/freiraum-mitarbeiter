@@ -5,6 +5,7 @@ import {
   setSelectedMailContext,
   type SelectedMailContext,
 } from "../../modules/mail/selectedMailContext";
+import { backendBase } from "../../lib/backendBase";
 
 const OPENED_UIDS_STORAGE_KEY = "fm_exchange_opened_uids_v1";
 const INBOX_AUTO_REFRESH_MS = 60_000;
@@ -52,14 +53,6 @@ type LearnedContactItem = {
   aliases: string[];
   source: string;
 };
-
-function backendBase(): string {
-  return (
-    (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
-    (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-    "http://127.0.0.1:30521"
-  ).replace(/\/+$/, "");
-}
 
 function decodeHtmlEntities(input: string): string {
   if (!input) return "";
@@ -380,17 +373,14 @@ export default function ExchangeInboxPanel() {
   const logoutAndResetSetup = async () => {
     setMsAuthLoading(true);
     try {
-      if (msAuth?.connected) {
-        try {
-          await fetch(`${backendBase()}/api/auth/microsoft/logout`, { method: "POST" });
-        } catch {
-          // no-op
-        }
-      }
-
       const resetRes = await fetch(`${backendBase()}/api/setup/mail/reset`, { method: "POST" });
-      if (!resetRes.ok) {
+      if (!resetRes.ok && resetRes.status !== 401) {
         throw new Error("Ausloggen fehlgeschlagen.");
+      }
+      try {
+        await fetch(`${backendBase()}/api/auth/microsoft/logout`, { method: "POST" });
+      } catch {
+        // no-op
       }
 
       try {

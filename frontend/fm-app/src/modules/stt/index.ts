@@ -1,3 +1,5 @@
+import { backendBase } from "../../lib/backendBase";
+
 let cachedLocalSttHealthAtMs = 0;
 let cachedLocalSttHealthOk = false;
 const LOCAL_STT_HEALTH_CACHE_MS = 120000;
@@ -5,7 +7,8 @@ const COMMAND_MODE_MAX_RECORD_MS = 7000;
 
 export async function recordAndTranscribe(
   maxMs = 60000,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts?: { onListening?: () => void }
 ): Promise<string | null> {
   const logSttTiming = (payload: Record<string, unknown>) => {
     const parts = Object.entries(payload).map(([key, value]) => `${key}=${String(value)}`);
@@ -123,29 +126,81 @@ export async function recordAndTranscribe(
     }
   };
 
+  const pickRecorderMime = (): string => {
+    const candidates = ["audio/mp4", "audio/aac", "audio/webm;codecs=opus", "audio/webm"];
+    for (const type of candidates) {
+      try {
+        if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(type)) {
+          return type;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return "";
+  };
+
   if (signal?.aborted) return null;
+
+  const stopTracks = (media: MediaStream | null | undefined) => {
+    try {
+      media?.getTracks().forEach((track) => track.stop());
+    } catch {
+      /* ignore */
+    }
+  };
+
   // Prefer backend STT first
   try {
     const sttStartedAtMs = nowMs();
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      throw new Error("microphone-unavailable");
+    }
+    if (signal?.aborted) {
+      stopTracks(stream);
+      return null;
+    }
+    opts?.onListening?.();
+    if (signal?.aborted) {
+      stopTracks(stream);
+      return null;
+    }
+
+    const skipHealth =
+      typeof window !== "undefined" && Boolean((window as any).__fm_prefer_backend_stt);
     const healthCacheAgeMs = Date.now() - cachedLocalSttHealthAtMs;
-    const hasFreshLocalHealth = cachedLocalSttHealthOk && healthCacheAgeMs >= 0 && healthCacheAgeMs <= LOCAL_STT_HEALTH_CACHE_MS;
-    const health = hasFreshLocalHealth
-      ? { provider: "local", ok: true, cached: true }
-      : await fetchWithTimeout("http://127.0.0.1:30521/api/stt/health", {}, 1200).then((r) => r.json());
+    const hasFreshLocalHealth =
+      cachedLocalSttHealthOk && healthCacheAgeMs >= 0 && healthCacheAgeMs <= LOCAL_STT_HEALTH_CACHE_MS;
+    const health =
+      skipHealth || hasFreshLocalHealth
+        ? { provider: "local", ok: true, cached: true }
+        : await fetchWithTimeout(`${backendBase()}/api/stt/health`, {}, 1200).then((r) => r.json());
+    if (signal?.aborted) {
+      stopTracks(stream);
+      return null;
+    }
     const healthCheckedAtMs = nowMs();
     if (health?.provider === "local" && health?.ok) {
       cachedLocalSttHealthOk = true;
       cachedLocalSttHealthAtMs = Date.now();
     } else {
       cachedLocalSttHealthOk = false;
+      stopTracks(stream);
+      throw new Error("stt-unhealthy");
     }
     if (health?.provider === "local" && health?.ok) {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const mimeType = pickRecorderMime();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       const chunks: BlobPart[] = [];
+      const blobType = mimeType || "audio/webm";
       const done = new Promise<Blob>((resolve) => {
-        recorder.ondataavailable = (e) => chunks.push(e.data);
-        recorder.onstop = () => resolve(new Blob(chunks, { type: "audio/webm" }));
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) chunks.push(e.data);
+        };
+        recorder.onstop = () => resolve(new Blob(chunks, { type: blobType }));
       });
       let resolveStopRequest: (() => void) | null = null;
       const stopRequested = new Promise<void>((resolve) => {
@@ -155,8 +210,17 @@ export async function recordAndTranscribe(
         resolveStopRequest?.();
       };
       signal?.addEventListener("abort", abortHandler, { once: true });
+      if (signal?.aborted) {
+        stopTracks(stream);
+        signal.removeEventListener("abort", abortHandler);
+        return null;
+      }
       const recordStartedAtMs = nowMs();
-      recorder.start();
+      try {
+        recorder.start(250);
+      } catch {
+        recorder.start();
+      }
       await Promise.race([new Promise((res) => setTimeout(res, maxMs)), stopRequested]);
       try {
         if (recorder.state !== "inactive") recorder.stop();
@@ -164,7 +228,7 @@ export async function recordAndTranscribe(
         /* ignore */
       }
       const audioBlob = await done;
-      stream.getTracks().forEach((track) => track.stop());
+      stopTracks(stream);
       signal?.removeEventListener("abort", abortHandler);
       const recordFinishedAtMs = nowMs();
       const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
@@ -179,7 +243,7 @@ export async function recordAndTranscribe(
       form.append("mode", sttMode);
       const transcribeTimeoutMs = isLikelyCommandMode ? 30000 : 120000;
       const resp = await fetchWithTimeout(
-        "http://127.0.0.1:30521/api/stt/transcribe",
+        `${backendBase()}/api/stt/transcribe`,
         {
           method: "POST",
           body: form,
@@ -228,7 +292,12 @@ export async function recordAndTranscribe(
         emptyText: true,
       });
     }
-  } catch {
+  } catch (err) {
+    if (typeof window !== "undefined" && (window as any).__fm_prefer_backend_stt) {
+      (window as any).__fm_stt_last_error =
+        err instanceof Error ? err.message : "microphone-unavailable";
+      return null;
+    }
     // fall back to browser API
   }
 

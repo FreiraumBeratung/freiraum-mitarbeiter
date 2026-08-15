@@ -24,6 +24,9 @@ import MailComposeForm from "./components/mail/MailComposeForm";
 import ExchangeInboxPanel from "./components/mail/ExchangeInboxPanel";
 import MailOnboardingOverlay from "./components/onboarding/MailOnboardingOverlay";
 import { useIsMobile } from "./hooks/useIsMobile";
+import { installApiCredentials } from "./lib/backendBase";
+import { consumeMicrosoftClaimFromUrl } from "./modules/auth/microsoftClaim";
+import AdminAccounts from "./pages/AdminAccounts";
 
 import Backdrop from "./components/layout/Backdrop";
 import TopFeatureBar from "./components/TopFeatureBar";
@@ -33,6 +36,8 @@ import VoiceButton from "./components/VoiceButton";
 import { processVoiceCommand } from "./modules/voice";
 import { voiceUi } from "./modules/voice/state";
 import { TransitionOverlay } from "./components/TransitionOverlay";
+
+installApiCredentials();
 
 export function showTransitionMessage(msg) {
   if (typeof window === "undefined") return;
@@ -120,6 +125,11 @@ function Shell() {
   const isMobile = useIsMobile();
   const path = location.pathname || "";
   const isMailWorkspace = path === "/" || path === "/mail/compose" || path.startsWith("/mail/compose/");
+  const isAdminWorkspace = path === "/admin";
+
+  useEffect(() => {
+    void consumeMicrosoftClaimFromUrl();
+  }, [location.search]);
 
   const mailComposeLayout = isMobile ? (
     <MobileMailShell />
@@ -134,8 +144,8 @@ function Shell() {
 
   return (
     <>
-      {!isMailWorkspace && <Backdrop />}
-      {!isMailWorkspace && (
+      {!isMailWorkspace && !isAdminWorkspace && <Backdrop />}
+      {!isMailWorkspace && !isAdminWorkspace && (
         <div className="h-20 flex items-center px-6 border-b border-neutral-800">
           <TopFeatureBar />
         </div>
@@ -147,27 +157,28 @@ function Shell() {
       <div className="flex-1 min-h-0 overflow-hidden">
         <Routes>
           <Route path="/" element={<Navigate to="/mail/compose" replace />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/kontakte" element={<Leads />} />
-          <Route path="/leads" element={<Leads />} />
-          <Route path="/berichte" element={<Reports />} />
-          <Route path="/nachfassungen" element={<Followups />} />
-          <Route path="/einstellungen" element={<Settings />} />
-          <Route path="/wissensbasis" element={<KnowledgeBase />} />
-          <Route path="/ablaufplaene" element={<Sequences />} />
-          <Route path="/kalender" element={<Calendar />} />
-          <Route path="/kontakt-suche-async" element={<LeadsHunterAsync />} />
-          <Route path="/voice-diagnostics" element={<VoiceDiagnostics />} />
-          <Route path="/leads-real" element={<LeadsRealMode />} />
-          <Route path="/leads/real" element={<LeadsRealMode />} />
-          <Route path="/control-center" element={<ControlCenter />} />
-          <Route path="/lead-radar" element={<LeadRadar />} />
-          <Route path="/leads/osm/results" element={<LeadsOSMResults />} />
+          <Route path="/admin" element={<AdminAccounts />} />
+          <Route path="/dashboard" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/kontakte" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/leads" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/berichte" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/nachfassungen" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/einstellungen" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/wissensbasis" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/ablaufplaene" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/kalender" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/kontakt-suche-async" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/voice-diagnostics" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/leads-real" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/leads/real" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/control-center" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/lead-radar" element={<Navigate to="/mail/compose" replace />} />
+          <Route path="/leads/osm/results" element={<Navigate to="/mail/compose" replace />} />
           <Route path="/mail/compose" element={mailComposeLayout} />
-          <Route path="/exports" element={<Exports />} />
+          <Route path="/exports" element={<Navigate to="/mail/compose" replace />} />
         </Routes>
       </div>
-      {isMailWorkspace ? null : (
+      {isMailWorkspace || isAdminWorkspace ? null : (
         <div className="ptt-compact">
           <VoiceButton />
         </div>

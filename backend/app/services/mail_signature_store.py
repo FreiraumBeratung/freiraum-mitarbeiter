@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .account_paths import account_dir, cache_root
+from .account_session import get_current_account_id
+
 
 def _cache_dir() -> Path:
     data_dir = (os.getenv("FREIRAUM_DATA_DIR") or "").strip()
@@ -16,7 +19,10 @@ def _cache_dir() -> Path:
 
 
 def _db_path() -> Path:
-    return _cache_dir() / "mail_signatures.sqlite3"
+    account_id = get_current_account_id()
+    if account_id:
+        return account_dir(account_id) / "mail_signatures.sqlite3"
+    return cache_root() / "mail_signatures.sqlite3"
 
 
 class MailSignatureStore:
@@ -130,12 +136,15 @@ class MailSignatureStore:
         }
 
 
-_STORE: MailSignatureStore | None = None
+_STORES: dict[str, MailSignatureStore] = {}
 
 
 def get_mail_signature_store() -> MailSignatureStore:
-    global _STORE
-    if _STORE is None:
-        _STORE = MailSignatureStore()
-    return _STORE
+    account_id = get_current_account_id() or "_none"
+    existing = _STORES.get(account_id)
+    if existing is not None:
+        return existing
+    store = MailSignatureStore()
+    _STORES[account_id] = store
+    return store
 

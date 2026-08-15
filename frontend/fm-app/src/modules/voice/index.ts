@@ -1,3 +1,4 @@
+import { backendBase } from "../../lib/backendBase";
 import { parseIntentDE } from "./intent";
 import { voiceState } from "./state";
 import { recordAndTranscribe } from "../stt";
@@ -21,11 +22,18 @@ import { stripSubjectCommand } from "../../logic/wizard4/subject_command_strip";
 import { stripLeadingSubjectEcho } from "../../logic/wizard4/strip_leading_subject_echo";
 import { isFollowUpSendCurrentDraft, isUiDraftAvailable } from "../../logic/wizard4/followup_send_draft";
 import { rewriteLeadingDassClause } from "./dass_rewrite";
-import { getSelectedMailContext } from "../mail/selectedMailContext";
+import { getSelectedMailContext, type SelectedMailContext } from "../mail/selectedMailContext";
 import {
+  buildImmediateReplyIntentFromOpenMail,
   buildReplyIntentFromSelectedMailContext,
   isExplicitContextSendConfirmation,
 } from "./reply_context_phase_a";
+import {
+  isColloquialNotifySendPhrase,
+  isPoliteAssistantMailCommand,
+} from "./colloquial_notify";
+import { isImmediateSendMode } from "./send_review_mode";
+import { hasCancelPhrase } from "../../logic/wizard4/cancel_phrase";
 import {
   subjectSet,
   subjectAppend,
@@ -153,7 +161,7 @@ const WIZARD4_AUTOSEND_ENABLED = true;
 let pendingEmailSendConfirmationUntil = 0;
 let allowNextEmailSendWithoutExtraConfirmationUntil = 0;
 
-const BACKEND = "http://127.0.0.1:30521";
+const BACKEND = backendBase();
 
 function resetMailVoiceFlowState() {
   if (typeof window === "undefined") return;
@@ -585,7 +593,6 @@ function isExplicitSendNowCommand(text: string): boolean {
   const falsePositivePatterns = [
     /\b(ich|wir)\s+(sende|send|senden|schicke|schicken)\b/i,
     /\b(ich|wir)\s+(werde|wollen|wollten)\s+(senden|schicken)\b/i,
-    /\b(kannst|könntest|würdest|kann|könnte|würde)\s+du\s+.*\b(senden|schicken)\b/i,
     /\b(bitte\s+)?an\s+mich\s+(senden|schicken)\b/i,
     /\b(bitte\s+)?mir\s+(senden|schicken)\b/i,
     /\b(sende|schick|schicke)\s+(dir|mir|uns|ihr|euch)\b/i,
@@ -596,6 +603,14 @@ function isExplicitSendNowCommand(text: string): boolean {
       console.log("[autosend] excluded false-positive:", pattern);
       return false;
     }
+  }
+
+  if (
+    /\b(kannst|könntest|würdest|kann|könnte|würde)\s+du\s+.*\b(senden|schicken)\b/i.test(normalized) &&
+    !isPoliteAssistantMailCommand(normalized)
+  ) {
+    console.log("[autosend] excluded false-positive: kannst-du senden");
+    return false;
   }
 
   // ============================================================
@@ -708,6 +723,7 @@ function isExplicitSendNowCommand(text: string): boolean {
   // Imperative "sende/send/senden"
   if (isImperativeContext(normalized)) {
     const imperativeSendPatterns = [
+      /\b(sende|send|senden)\s+(?:bitte\s+)?folgende\s+(?:nachricht|mail|email|e-mail)\b/i,
       /\b(sende|send|senden)\s+bitte\s+(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\b/i,
       /\b(sende|send|senden)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
       /\b(sende|send|senden)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
@@ -725,6 +741,7 @@ function isExplicitSendNowCommand(text: string): boolean {
   // Imperative "schick/schicke"
   if (isImperativeContext(normalized)) {
     const imperativeSchickPatterns = [
+      /\b(schick|schicke)\s+(?:bitte\s+)?folgende\s+(?:nachricht|mail|email|e-mail)\b/i,
       /\b(schick|schicke)\s+bitte\s+(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\b/i,
       /\b(schick|schicke)\s+(?:bitte\s+)?(?:folgende|die)\s+(?:nachricht|mail|email|e-mail)\s+(?:direkt|sofort|jetzt)\b/i,
       /\b(schick|schicke)\b.*\b(?:direkt|sofort|jetzt)\s+(?:raus|ab|los)\b/i,
@@ -738,10 +755,14 @@ function isExplicitSendNowCommand(text: string): boolean {
     }
   }
 
-  // Pattern: "lass <name> wissen" / "lass <name> bitte wissen"
-  const lassWissenPattern = /\blass\s+([a-zäöüß]+)\s+(?:bitte\s+)?wissen\b/i;
+  // Pattern: "lass <name> wissen" / "lass <name> bitte wissen" / ASR "las"
+  const lassWissenPattern = /\bla(?:ss|s)\s+([a-zäöüß]+)\s+(?:bitte\s+|schnell\s+|mal\s+eben\s+)?wissen\b/i;
   if (lassWissenPattern.test(normalized)) {
     console.log("[autosend] matched 'lass <name> wissen' pattern");
+    return true;
+  }
+  if (isColloquialNotifySendPhrase(text) || isColloquialNotifySendPhrase(normalized)) {
+    console.log("[autosend] matched colloquial notify phrase");
     return true;
   }
 
@@ -1075,7 +1096,6 @@ function normalizeFallbackBodyForSend(rawBody: string): string {
   return out.trim();
 }
 
-const FAST_PATH_POLISH_MAX_BODY_LENGTH = 180;
 const LONG_DICTATION_POLISH_THRESHOLD = 260;
 const LONG_DICTATION_POLISH_TIMEOUT_CAP_SEND_NOW_MS = 12000;
 const LONG_DICTATION_POLISH_TIMEOUT_CAP_PREVIEW_MS = 7000;
@@ -1105,6 +1125,31 @@ function getPolishRuntimeProfile(mode: "sendNow" | "previewOnly", bodyLength: nu
     isVeryLongDictation,
     shortPrompt: isLongDictation,
   };
+}
+
+function isMobileVoiceShell(): boolean {
+  return typeof window !== "undefined" && Boolean((window as any).__fm_mobile_shell);
+}
+
+function isNamedComposeAwayFromOpenMail(
+  intent: VoiceIntent,
+  selectedContext: SelectedMailContext
+): boolean {
+  if (intent.type !== "email-compose") return false;
+  const toEmail = String((intent as any).to || "").trim().toLowerCase();
+  const openEmail = String(selectedContext.fromEmail || "").trim().toLowerCase();
+  if (toEmail && openEmail && toEmail.includes("@") && toEmail !== openEmail) return true;
+
+  const toRaw = String((intent as any).toRaw || "").trim().split(/\s+/)[0] || "";
+  if (!toRaw || isInvalidRecipientToken(toRaw)) return false;
+  const openName = String(selectedContext.fromName || "").trim().split(/\s+/)[0] || "";
+  if (!openName) return true;
+  return toRaw.toLowerCase() !== openName.toLowerCase();
+}
+
+function isHeuristicGuessedSubject(value: string): boolean {
+  const normalized = (value || "").trim().toLowerCase();
+  return normalized === "termin morgen" || normalized === "termin heute";
 }
 
 function isHardSendConfirmationPhrase(sourceText?: string): boolean {
@@ -1429,6 +1474,12 @@ let recognition: BrowserSpeechRecognition | null = null;
 let lastTranscript: string = ""; // Für Wizard4Intent-Parsing
 let latestVoiceCommandRunId = 0;
 
+function shouldUseBackendRecorder(): boolean {
+  if (typeof window === "undefined") return false;
+  const w = window as any;
+  return Boolean(w.__fm_backend_stt_ready) || Boolean(w.__fm_prefer_backend_stt);
+}
+
 function getRecognition(): BrowserSpeechRecognition | null {
   if (typeof window === "undefined") return null;
   const ctor = ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) as
@@ -1470,8 +1521,7 @@ export class VoiceController {
     if (this.listening || this.starting) {
       return;
     }
-    const forceRecorderInElectron = Boolean((window as any).__fm_backend_stt_ready);
-    const rec = forceRecorderInElectron ? null : getRecognition();
+    const rec = shouldUseBackendRecorder() ? null : getRecognition();
 
     if (!rec) {
       console.warn("[fm-voice] SpeechRecognition nicht verfügbar – fallback auf Recorder.");
@@ -1480,7 +1530,9 @@ export class VoiceController {
       const sttStartedAtMs = nowMs();
       const controller = new AbortController();
       this.recorderAbortController = controller;
-      const text = await recordAndTranscribe(60000, controller.signal);
+      const text = await recordAndTranscribe(60000, controller.signal, {
+        onListening: () => this.setState("listening"),
+      });
       if (this.recorderAbortController === controller) {
         this.recorderAbortController = null;
       }
@@ -1494,17 +1546,20 @@ export class VoiceController {
         this.setState("idle");
       } else {
         const w = typeof window !== "undefined" ? (window as any) : null;
+        const sttError = w?.__fm_stt_last_error ? String(w.__fm_stt_last_error) : "";
         if (w) {
           w.__fm_last_hint = {
             kind: "voice_retry",
-            message: "Ich habe nichts Verständliches erkannt. Bitte den Befehl kurz wiederholen.",
+            message: sttError === "microphone-unavailable"
+              ? "Mikrofon wurde blockiert. Bitte antippen und den Zugriff erlauben."
+              : "Ich habe nichts Verständliches erkannt. Bitte den Befehl kurz wiederholen.",
             ts: Date.now(),
           };
           if (typeof window.dispatchEvent === "function") {
             window.dispatchEvent(new CustomEvent("fm-hint-update"));
           }
         }
-        this.setState("idle");
+        this.setState(sttError === "microphone-unavailable" ? "error" : "idle");
       }
       return;
     }
@@ -1558,14 +1613,15 @@ export class VoiceController {
       return;
     }
 
-    const forceRecorderInElectron = Boolean((window as any).__fm_backend_stt_ready);
-    const rec = forceRecorderInElectron ? null : getRecognition();
+    const rec = shouldUseBackendRecorder() ? null : getRecognition();
     if (!rec || !this.listening) {
+      const wasListening = this.listening || this.state === "listening";
       if (!rec && this.recorderAbortController) {
         this.recorderAbortController.abort();
         this.recorderAbortController = null;
       }
-      this.setState("idle");
+      this.listening = false;
+      this.setState(wasListening ? "transcribing" : "idle");
       return;
     }
     this.listening = false;
@@ -2071,7 +2127,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         if (consumeBypass) {
           allowNextEmailSendWithoutExtraConfirmationUntil = 0;
         }
-        if (!hardConfirmation && !consumeBypass && pendingEmailSendConfirmationUntil < now) {
+        if (!hardConfirmation && !consumeBypass && pendingEmailSendConfirmationUntil < now && !isMobileVoiceShell()) {
           // 10s war bei lokaler STT zu knapp und führte zu Nachfrage-Loops.
           pendingEmailSendConfirmationUntil = now + 30000;
           PartnerBotBus.say("Sicherheitscheck: Bitte bestätige mit 'jetzt senden' oder 'sofort senden'.");
@@ -2562,7 +2618,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           console.log('[fm-voice][wizard4][contact-resolver] Versuche Kontakt aufzulösen:', finalNameForResolver);
           
           try {
-            const resolveUrl = `${BACKEND}/api/contacts/resolve?name=${encodeURIComponent(finalNameForResolver)}`;
+            const resolveUrl = `${backendBase()}/api/contacts/resolve?name=${encodeURIComponent(finalNameForResolver)}`;
             const fetchResolverWithTimeout = async (timeoutMs: number): Promise<Response> => {
               const resolverAbortController = new AbortController();
               const resolverTimeout = setTimeout(() => resolverAbortController.abort(), timeoutMs);
@@ -2571,9 +2627,11 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
               }).finally(() => clearTimeout(resolverTimeout));
             };
             const inputTokenCount = finalNameForResolver.trim().split(/\s+/).filter(Boolean).length;
+            const firstTimeoutMs = isMobileVoiceShell() ? 4500 : 1200;
+            const retryTimeoutMs = isMobileVoiceShell() ? 6000 : 2200;
             let resolveResponse: Response;
             try {
-              resolveResponse = await fetchResolverWithTimeout(1200);
+              resolveResponse = await fetchResolverWithTimeout(firstTimeoutMs);
             } catch (firstErr) {
               const firstAbort = (firstErr as any)?.name === "AbortError";
               const allowSingleRetry = firstAbort && inputTokenCount <= 2;
@@ -2582,7 +2640,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                 input: finalNameForResolver,
                 inputTokenCount,
               });
-              resolveResponse = await fetchResolverWithTimeout(2200);
+              resolveResponse = await fetchResolverWithTimeout(retryTimeoutMs);
             }
             
             if (resolveResponse.ok) {
@@ -3196,6 +3254,10 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         subject = "Kurze Info";
         console.log("[wizard4][subject] no subject provided -> forcing default 'Kurze Info'");
       }
+      if (!intentExplicitSubjectTrimmed && !hasExplicitSubject && isHeuristicGuessedSubject(subject)) {
+        subject = "Kurze Info";
+        console.log("[wizard4][subject] replaced heuristic guess with Kurze Info");
+      }
       
       // FIX: Final-Body-Zuweisung - bodyForUi MUSS hier definiert werden, damit es immer verfügbar ist
       // AUFGABE B: Guard-Condition für Status-Brain - verhindert explicit-body Überschreibung
@@ -3340,17 +3402,15 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       const shouldPolish = 
         rawBodyForPolish.trim().length > 0 && 
         wizard4Draft && 
-        !isStatusBrainForPolish && // Status-Brain Templates nicht polishen
-        !hasStatusBrainTemplateForPolish && // Doppelt sicher
-        !isMissingBodyOrTooShort; // missing_body oder Body zu kurz → kein API-Call, Body bleibt leer
-      const shouldUseFastPathLocalNormalization =
-        shouldPolish && rawBodyForPolish.trim().length <= FAST_PATH_POLISH_MAX_BODY_LENGTH;
+        !isStatusBrainForPolish &&
+        !hasStatusBrainTemplateForPolish &&
+        !isMissingBodyOrTooShort;
       
       // Starte Polish früh (parallel), speichere Promise
       let polishPromise: Promise<any> | null = null;
       let polishStartedAtMs = 0;
       let polishRuntimeProfile: ReturnType<typeof getPolishRuntimeProfile> | null = null;
-      if (shouldPolish && !shouldUseFastPathLocalNormalization) {
+      if (shouldPolish) {
         const sendMode = wizard4Draft.sendMode || 'previewOnly';
         const mode = sendMode === 'sendNow' ? 'sendNow' : 'previewOnly';
         polishRuntimeProfile = getPolishRuntimeProfile(mode, rawBodyForPolish.length);
@@ -3380,12 +3440,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
           shortPrompt: polishRuntimeProfile.shortPrompt,
         });
       } else {
-        if (shouldUseFastPathLocalNormalization) {
-          console.log('[wizard4][ai-polish] skipped (fast-path local normalization)', {
-            bodyLength: rawBodyForPolish.length,
-            threshold: FAST_PATH_POLISH_MAX_BODY_LENGTH,
-          });
-        } else if (isMissingBodyOrTooShort) {
+        if (isMissingBodyOrTooShort) {
           console.log('[wizard4][ai-polish] skipped (missing_body or too_short)');
         } else if (isStatusBrainForPolish || hasStatusBrainTemplateForPolish) {
           console.log('[wizard4][ai-polish] skipped - Status-Brain Template (kein Polish nötig)');
@@ -3395,7 +3450,6 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
       }
       if (!polishPromise) {
         timingMark("email-compose-polish-skipped", {
-          shouldUseFastPathLocalNormalization,
           longDictation: rawBodyForPolish.trim().length >= LONG_DICTATION_POLISH_THRESHOLD,
           veryLongDictation: rawBodyForPolish.trim().length >= VERY_LONG_DICTATION_POLISH_THRESHOLD,
           isMissingBodyOrTooShort,
@@ -3456,20 +3510,15 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             
             // Optionaler Retry bei sendNow + timeout (nur für kurze Bodies, um Lastspitzen zu vermeiden)
             if (!polishResult.ok && polishResult.reason === 'timeout' && isSendNow) {
-              const shouldRetryPolish = rawBodyForUi.length <= 180;
-              if (shouldRetryPolish) {
-                console.log('[wizard4][ai-polish] Timeout bei sendNow, versuche Retry mit kürzerem Prompt', { bodyLength: rawBodyForUi.length });
-                try {
-                  const retryTimeoutMs = getDynamicPolishTimeoutMs('sendNow', Math.max(40, Math.floor(rawBodyForUi.length * 0.55)));
-                  polishResult = await polishEmailBody(rawBodyForUi, { mode: 'sendNow', timeoutMs: retryTimeoutMs, shortPrompt: true });
-                } catch (retryErr) {
-                  console.warn('[wizard4][ai-polish] Retry fehlgeschlagen, verwende Original', retryErr);
-                  // polishResult bleibt beim ursprünglichen Ergebnis (ok: false)
-                }
-              } else {
-                console.log('[wizard4][ai-polish] timeout fallback without retry (body too long for safe retry)', {
-                  bodyLength: rawBodyForUi.length,
-                });
+              console.log('[wizard4][ai-polish] Timeout bei sendNow, versuche Retry mit kürzerem Prompt', { bodyLength: rawBodyForUi.length });
+              try {
+                const retryTimeoutMs = Math.min(
+                  8000,
+                  getDynamicPolishTimeoutMs('sendNow', Math.max(40, Math.floor(rawBodyForUi.length * 0.55)))
+                );
+                polishResult = await polishEmailBody(rawBodyForUi, { mode: 'sendNow', timeoutMs: retryTimeoutMs, shortPrompt: true });
+              } catch (retryErr) {
+                console.warn('[wizard4][ai-polish] Retry fehlgeschlagen, verwende Original', retryErr);
               }
             }
             
@@ -3513,24 +3562,16 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
                 polishedLength: finalBodyForUi.length
               });
             } else {
-              // Fallback: Verwende Original-Body
+              // Fallback: Original + lokale Rechtschreibung (immer, jede Länge)
               finalBodyForUi = rawBodyForUi;
-              const isLongDictationFallback =
-                !isSendNow && rawBodyForUi.length >= LONG_DICTATION_POLISH_THRESHOLD;
-              const shouldUseLocalFallbackNormalization =
-                (isSendNow || isLongDictationFallback) &&
-                (polishResult.reason === "timeout" || polishResult.reason === "error");
-              if (shouldUseLocalFallbackNormalization) {
-                const locallyNormalized = normalizeFallbackBodyForSend(finalBodyForUi);
-                if (locallyNormalized && locallyNormalized !== finalBodyForUi) {
-                  console.log("[wizard4][ai-polish] local fallback normalization applied", {
-                    reason: polishResult.reason,
-                    longDictationFallback: isLongDictationFallback,
-                    beforeLength: finalBodyForUi.length,
-                    afterLength: locallyNormalized.length,
-                  });
-                  finalBodyForUi = locallyNormalized;
-                }
+              const locallyNormalized = normalizeFallbackBodyForSend(finalBodyForUi);
+              if (locallyNormalized && locallyNormalized !== finalBodyForUi) {
+                console.log("[wizard4][ai-polish] local fallback normalization applied", {
+                  reason: polishResult.reason,
+                  beforeLength: finalBodyForUi.length,
+                  afterLength: locallyNormalized.length,
+                });
+                finalBodyForUi = locallyNormalized;
               }
               
               // Safety-Net: Entferne führendes "An <Name>." auch im no-polish Fallback
@@ -3568,17 +3609,13 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             // DEFENSIV: Bei jedem Fehler Fallback auf Original, keine Exceptions werfen
             console.error('[wizard4][ai-polish] error during polishing, using original body:', err);
             finalBodyForUi = rawBodyForUi; // Sicherstellen, dass finalBodyForUi gesetzt ist
-            const sendMode = wizard4Draft.sendMode || 'previewOnly';
-            const isSendNow = sendMode === 'sendNow';
-            if (isSendNow) {
-              const locallyNormalized = normalizeFallbackBodyForSend(finalBodyForUi);
-              if (locallyNormalized && locallyNormalized !== finalBodyForUi) {
-                finalBodyForUi = locallyNormalized;
-                console.log("[wizard4][ai-polish] local fallback normalization applied after exception", {
-                  beforeLength: rawBodyForUi.length,
-                  afterLength: finalBodyForUi.length,
-                });
-              }
+            const locallyNormalized = normalizeFallbackBodyForSend(finalBodyForUi);
+            if (locallyNormalized && locallyNormalized !== finalBodyForUi) {
+              finalBodyForUi = locallyNormalized;
+              console.log("[wizard4][ai-polish] local fallback normalization applied after exception", {
+                beforeLength: rawBodyForUi.length,
+                afterLength: finalBodyForUi.length,
+              });
             }
             
             // Safety-Net: Entferne führendes "An <Name>." auch im Error-Fallback
@@ -3589,19 +3626,27 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             ].filter(Boolean) as string[];
             
             finalBodyForUi = stripLeadingAnRecipient(finalBodyForUi, recipientHints);
+            const sendMode = wizard4Draft.sendMode || 'previewOnly';
+            const isSendNow = sendMode === 'sendNow';
             if (isSendNow) {
               console.warn('[wizard4][ai-polish] fallback -> sending without polish (sendNow=true, exception occurred):', err.message || 'unknown');
             }
           }
         }
-        if (!polishPromise && shouldUseFastPathLocalNormalization) {
-          const fastPathBody = normalizeFallbackBodyForSend(rawBodyForUi);
-          if (fastPathBody && fastPathBody !== rawBodyForUi) {
-            finalBodyForUi = fastPathBody;
-            console.log('[wizard4][ai-polish] fast-path local normalization applied', {
+        if (!polishPromise && shouldPolish) {
+          const localBody = normalizeFallbackBodyForSend(rawBodyForUi);
+          if (localBody) {
+            finalBodyForUi = localBody;
+            console.log('[wizard4][ai-polish] local spelling pass applied (no AI run)', {
               beforeLength: rawBodyForUi.length,
-              afterLength: fastPathBody.length,
+              afterLength: localBody.length,
             });
+          }
+        }
+        if (finalBodyForUi?.trim()) {
+          const spellingPass = normalizeFallbackBodyForSend(finalBodyForUi);
+          if (spellingPass) {
+            finalBodyForUi = spellingPass;
           }
         }
         if (polishPromise) {
@@ -3617,7 +3662,7 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
         } else {
           timingMark("email-compose-polish-finished", {
             polishMs: 0,
-            usedFastPath: shouldUseFastPathLocalNormalization,
+            usedFastPath: false,
             longDictation: rawBodyForPolish.trim().length >= LONG_DICTATION_POLISH_THRESHOLD,
             veryLongDictation: rawBodyForPolish.trim().length >= VERY_LONG_DICTATION_POLISH_THRESHOLD,
             shortPrompt: false,
@@ -4677,14 +4722,14 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
 
         const now = Date.now();
         const sendSourceText =
-          ((intent as any)?.sourceText ?? (intent as any)?.rawText ?? (intent as any)?.originalText ?? "").toString();
+          ((intent as any)?.sourceText ?? (intent as any)?.rawText ?? (intent as any)?.originalText ?? lastTranscript ?? "").toString();
         const hardConfirmation = isHardSendConfirmationPhrase(sendSourceText);
         const consumeBypass =
           allowNextEmailSendWithoutExtraConfirmationUntil >= now;
         if (consumeBypass) {
           allowNextEmailSendWithoutExtraConfirmationUntil = 0;
         }
-        if (!hardConfirmation && !consumeBypass && pendingEmailSendConfirmationUntil < now) {
+        if (!hardConfirmation && !consumeBypass && pendingEmailSendConfirmationUntil < now && !isMobileVoiceShell()) {
           // 10s war bei lokaler STT zu knapp und führte zu Nachfrage-Loops.
           pendingEmailSendConfirmationUntil = now + 30000;
           PartnerBotBus.say("Sicherheitscheck: Bitte bestätige mit 'jetzt senden' oder 'sofort senden'.");
@@ -5580,6 +5625,48 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     });
   }
 
+  const immediateOpenMail =
+    isMobileVoiceShell() &&
+    isImmediateSendMode() &&
+    !!selectedContext?.uid &&
+    !!selectedContext?.fromEmail;
+
+  if (
+    immediateOpenMail &&
+    selectedContext &&
+    !shouldHardBypassContext &&
+    routedIntent.type !== "email-append"
+  ) {
+    const namedAway = isNamedComposeAwayFromOpenMail(routedIntent, selectedContext);
+    const cancelRequested = hasCancelPhrase({
+      raw: routingTranscript,
+      normalized: routingTranscript.toLowerCase(),
+    });
+    if (!namedAway && !cancelRequested && !isLikelyNoiseUtterance(routingTranscript)) {
+      const immediateIntent = buildImmediateReplyIntentFromOpenMail(
+        contextRoutingTranscript,
+        selectedContext,
+        replyIntent
+      );
+      if (immediateIntent) {
+        console.log("[fm-voice][immediate-open-mail] sending spoken reply", {
+          contextUid: selectedContext.uid,
+          bodyLength: immediateIntent.bodyHint?.length ?? 0,
+        });
+        const intentWithTiming: any = {
+          ...immediateIntent,
+          meta: {
+            ...(immediateIntent.meta ?? {}),
+            __fmTiming: commandTiming,
+            __fmRunId: commandRunId,
+          },
+        };
+        applyVoiceIntent(intentWithTiming, navigate);
+        return;
+      }
+    }
+  }
+
   if (routedIntent.type === "ai-chat" && (selectedContext?.uid || hasComposerContext)) {
     const w = typeof window !== "undefined" ? (window as any) : null;
     const isNoise = isLikelyNoiseUtterance(routingTranscript);
@@ -5629,7 +5716,8 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     routedIntent.type === "email-compose" &&
     (selectedContext?.uid || hasComposerContext) &&
     isLikelyUnclearComposeFallbackInContext(routingTranscript) &&
-    !shouldSendNowFromSourceText(contextRoutingTranscript)
+    !shouldSendNowFromSourceText(contextRoutingTranscript) &&
+    !immediateOpenMail
   ) {
     const w = typeof window !== "undefined" ? (window as any) : null;
     if (w) {

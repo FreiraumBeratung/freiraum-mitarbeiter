@@ -8,11 +8,9 @@ export interface AiChatResponse {
   reply: string;
 }
 
-// Falls es bereits eine zentrale API-Base gibt, diese nutzen.
-// Ansonsten hier hart auf localhost:30521 verweisen.
-const API_BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined) ||
-  "http://127.0.0.1:30521";
+import { backendBase } from "../../lib/backendBase";
+
+const API_BASE = backendBase();
 
 export async function askAssistant(
   message: string,

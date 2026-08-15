@@ -2,20 +2,39 @@ from __future__ import annotations
 
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel
 
+from ..services.account_migrate import migrate_legacy_files_into_account
+from ..services.account_registry import get_account_registry
+from ..services.account_session import (
+    attach_session_cookie,
+    clear_session_cookie,
+    consume_claim_token,
+    create_claim_token,
+)
 from ..services.ms_oauth import (
     clear_auth_session,
     create_authorization_url,
     exchange_code_for_token,
+    fetch_graph_profile,
     get_auth_status,
     oauth_config_valid,
+    persist_bundle_for_account,
     refresh_access_token,
 )
 
 
 router = APIRouter(prefix="/api/auth/microsoft", tags=["auth"])
+
+
+class ClaimRequest(BaseModel):
+    claim: str
+
+
+def _frontend_redirect(status: dict) -> str:
+    return status.get("frontendRedirect") or "http://localhost:5173/mail/compose"
 
 
 @router.get("/status")
@@ -32,7 +51,6 @@ def microsoft_auth_start():
         )
     try:
         _, auth_url = create_authorization_url()
-        # Safety-net: Azure akzeptiert lokal robust "http://localhost" als Redirect.
         parsed = urlparse(auth_url)
         query_items = dict(parse_qsl(parsed.query, keep_blank_values=True))
         redirect_uri = (query_items.get("redirect_uri") or "").strip()
@@ -52,7 +70,7 @@ def microsoft_auth_callback(
     error_description: str | None = Query(default=None),
 ):
     status = get_auth_status()
-    frontend_redirect = status.get("frontendRedirect") or "http://localhost:5173/mail/compose"
+    frontend_redirect = _frontend_redirect(status)
 
     if error:
         query = urlencode({"ms_oauth": "error", "reason": error, "detail": (error_description or "")[:200]})
@@ -63,12 +81,42 @@ def microsoft_auth_callback(
         return RedirectResponse(url=f"{frontend_redirect}?{query}")
 
     try:
-        exchange_code_for_token(code=code, state=state)
-        query = urlencode({"ms_oauth": "connected"})
+        bundle = exchange_code_for_token(code=code, state=state)
+        profile = fetch_graph_profile(bundle.access_token)
+        account = get_account_registry().upsert_from_mailbox(
+            email=profile["email"],
+            display_name=profile.get("display_name") or "",
+            provider="microsoft",
+        )
+        persist_bundle_for_account(account["id"], bundle)
+        migrate_legacy_files_into_account(account["id"])
+        claim = create_claim_token(account["id"])
+        query = urlencode({"ms_oauth": "connected", "fm_claim": claim})
         return RedirectResponse(url=f"{frontend_redirect}?{query}")
     except Exception as exc:
         query = urlencode({"ms_oauth": "error", "reason": "token_exchange_failed", "detail": str(exc)[:200]})
         return RedirectResponse(url=f"{frontend_redirect}?{query}")
+
+
+@router.post("/claim")
+def microsoft_auth_claim(req: ClaimRequest, request: Request):
+    account_id = consume_claim_token(req.claim)
+    if not account_id:
+        raise HTTPException(status_code=401, detail="Login-Claim ungültig oder abgelaufen.")
+    account = get_account_registry().get(account_id)
+    if account is None:
+        raise HTTPException(status_code=401, detail="Konto nicht gefunden.")
+    response = JSONResponse(
+        {
+            "ok": True,
+            "connected": True,
+            "accountId": account["id"],
+            "accountEmail": account["email"],
+            "accountDisplayName": account.get("display_name"),
+        }
+    )
+    attach_session_cookie(request, response, account_id)
+    return response
 
 
 @router.post("/refresh")
@@ -88,6 +136,8 @@ def microsoft_auth_refresh():
 
 
 @router.post("/logout")
-def microsoft_auth_logout():
+def microsoft_auth_logout(request: Request):
     clear_auth_session()
-    return {"ok": True, "connected": False}
+    response = JSONResponse({"ok": True, "connected": False})
+    clear_session_cookie(request, response)
+    return response

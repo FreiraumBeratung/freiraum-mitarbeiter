@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 
+import { backendBase } from "../../lib/backendBase";
+import { consumeMicrosoftClaimFromUrl } from "../../modules/auth/microsoftClaim";
+
 type MailSetupStatus = {
   ok: boolean;
   provider?: "graph" | "imap_smtp" | null;
@@ -12,6 +15,7 @@ type MailSetupStatus = {
 type MicrosoftAuthStatus = {
   ok: boolean;
   connected?: boolean;
+  loggedIn?: boolean;
   oauthConfigured?: boolean;
 };
 
@@ -22,27 +26,10 @@ function isAbortLikeError(err: unknown): boolean {
   return e.name === "AbortError" || message.includes("aborted");
 }
 
-function backendBase(): string {
-  return (
-    (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
-    (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-    "http://127.0.0.1:30521"
-  ).replace(/\/+$/, "");
-}
-
 export default function MailOnboardingOverlay() {
   const location = useLocation();
-  const [setupStatus, setSetupStatus] = useState<MailSetupStatus | null>(() => {
-    try {
-      const cached = window.localStorage.getItem("fm_mail_onboarding_complete");
-      if (cached === "1") {
-        return { ok: true, onboardingComplete: true };
-      }
-    } catch {
-      // ignore localStorage errors
-    }
-    return null;
-  });
+  const [setupStatus, setSetupStatus] = useState<MailSetupStatus | null>(null);
+  const [statusReady, setStatusReady] = useState(false);
   const [msAuth, setMsAuth] = useState<MicrosoftAuthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [provider, setProvider] = useState<"graph" | "imap_smtp" | "">("");
@@ -69,7 +56,7 @@ export default function MailOnboardingOverlay() {
     return path === "/" || path.startsWith("/mail/compose");
   }, [location.pathname]);
 
-  const shouldShow = !!(isMailWorkspace && (!setupStatus || !setupStatus.onboardingComplete));
+  const shouldShow = !!(isMailWorkspace && statusReady && (!setupStatus || !setupStatus.onboardingComplete));
 
   const loadStatuses = useCallback(async () => {
     setError(null);
@@ -91,8 +78,15 @@ export default function MailOnboardingOverlay() {
       }
       setSetupStatus(setupData);
       setMsAuth(authData);
+      const complete =
+        Boolean(setupData.onboardingComplete) &&
+        Boolean(authData?.loggedIn || authData?.connected || setupData.provider === "imap_smtp");
+      if (!complete) {
+        setupData.onboardingComplete = false;
+        setSetupStatus({ ...setupData, onboardingComplete: false });
+      }
       try {
-        window.localStorage.setItem("fm_mail_onboarding_complete", setupData.onboardingComplete ? "1" : "0");
+        window.localStorage.setItem("fm_mail_onboarding_complete", complete ? "1" : "0");
       } catch {
         // ignore localStorage errors
       }
@@ -106,6 +100,7 @@ export default function MailOnboardingOverlay() {
       setSetupStatus((prev) => prev ?? { ok: true, onboardingComplete: false });
     } finally {
       window.clearTimeout(timeout);
+      setStatusReady(true);
     }
   }, []);
 
@@ -164,13 +159,24 @@ export default function MailOnboardingOverlay() {
   }, [shouldShow]);
 
   useEffect(() => {
+    const onSetupComplete = () => {
+      void loadStatuses();
+    };
+    window.addEventListener("fm-mail-setup-complete", onSetupComplete);
+    return () => window.removeEventListener("fm-mail-setup-complete", onSetupComplete);
+  }, [loadStatuses]);
+
+  useEffect(() => {
     const params = new URLSearchParams(location.search || "");
-    if (!params.has("ms_oauth")) return;
-    void loadStatuses();
-    if (params.get("ms_oauth") === "connected") {
-      setProvider("graph");
-      setPhase("graph");
-    }
+    if (!params.has("ms_oauth") && !params.has("fm_claim")) return;
+    void (async () => {
+      await consumeMicrosoftClaimFromUrl();
+      await loadStatuses();
+      if (params.get("ms_oauth") === "connected") {
+        setProvider("graph");
+        setPhase("graph");
+      }
+    })();
   }, [location.search, loadStatuses]);
 
   const persistProvider = useCallback(async (nextProvider: "graph" | "imap_smtp") => {

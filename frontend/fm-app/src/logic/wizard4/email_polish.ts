@@ -3,12 +3,7 @@
  * KEINE inhaltlichen Änderungen, KEINE neuen Fakten, KEIN Umschreiben.
  */
 import { normalizeEmailBodyAfterPolish as normalizeEmailBodyAfterPolishShared } from "./normalizeEmailBodyAfterPolish";
-
-// Falls es bereits eine zentrale API-Base gibt, diese nutzen.
-// Ansonsten hier hart auf localhost:30521 verweisen.
-const API_BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined) ||
-  "http://127.0.0.1:30521";
+import { backendBase } from "../../lib/backendBase";
 
 export interface PolishEmailBodyOptions {
   timeoutMs?: number; // Optional: Default basierend auf mode
@@ -128,7 +123,7 @@ Gib NUR den korrigierten E-Mail-Body zurück, ohne Erklärungen, ohne Labels, oh
       shortPrompt: opts.shortPrompt || false
     });
 
-    const res = await fetch(`${API_BASE}/api/ai/chat`, {
+    const res = await fetch(`${backendBase()}/api/ai/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

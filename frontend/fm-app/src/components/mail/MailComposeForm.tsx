@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { PartnerBotBus } from "../PartnerBot";
+import { backendBase } from "../../lib/backendBase";
 
 declare global {
   interface Window {
@@ -15,7 +16,18 @@ declare global {
     __fm_reset_mail_draft?: () => void;
     __fm_reset_mail_flow?: () => void;
     __fm_pending_body_replace?: string | null;
+    __fm_mobile_shell?: boolean;
+    __fm_subject_locked?: boolean;
+    __fm_subject_locked_value?: string | null;
+    __fm_subject_lock_context_uid?: string | null;
   }
+}
+
+function notifyMobileComposeOpen(value: string) {
+  if (typeof window === "undefined") return;
+  if (!window.__fm_mobile_shell) return;
+  if (!String(value || "").trim()) return;
+  window.dispatchEvent(new CustomEvent("fm-mobile-compose-open"));
 }
 
 export default function MailComposeForm() {
@@ -56,12 +68,7 @@ export default function MailComposeForm() {
       return;
     }
 
-    const API_BASE =
-      (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
-      (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-      "http://127.0.0.1:30521";
-
-    const url = `${API_BASE.replace(/\/+$/, "")}/api/mail/send`;
+    const url = `${backendBase()}/api/mail/send`;
 
     try {
       sendingRef.current = true;
@@ -82,6 +89,10 @@ export default function MailComposeForm() {
       }
 
       PartnerBotBus.say("Die E-Mail wurde versendet.");
+      const w = window as Window;
+      w.__fm_subject_locked = false;
+      w.__fm_subject_locked_value = null;
+      w.__fm_subject_lock_context_uid = null;
     } catch {
       PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
     } finally {
@@ -127,14 +138,17 @@ export default function MailComposeForm() {
     w.__fm_set_mail_body = (text: string) => {
       bodyRef.current = text;
       setBody(text);
+      notifyMobileComposeOpen(text);
     };
     w.__fm_set_mail_to = (addr: string) => {
       toRef.current = addr;
       setTo(addr);
+      notifyMobileComposeOpen(addr);
     };
     w.__fm_set_mail_subject = (subj: string) => {
       subjectRef.current = subj;
       setSubject(subj);
+      notifyMobileComposeOpen(subj);
     };
     w.__fm_get_mail_body = () => bodyRef.current || null;
     w.__fm_get_mail_subject = () => subjectRef.current || null;

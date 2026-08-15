@@ -19,6 +19,12 @@ import { tryParseCancelledSendToPreview } from "../../logic/wizard4/cancel_previ
 import { hasCancelPhrase, stripCancelPhraseFromBody } from "../../logic/wizard4/cancel_phrase";
 import { parseSubjectEditIntent } from "../../logic/subject_edit";
 import { getLastAction } from "./voice_action_store";
+import {
+  isColloquialNotifySendPhrase,
+  isPoliteAssistantMailCommand,
+  parseColloquialNotifyCommand,
+  stripSpokenLeadFillers,
+} from "./colloquial_notify";
 
 const VOICE_DEBUG_ENABLED =
   ((typeof import.meta !== "undefined" && Boolean((import.meta as any)?.env?.DEV)) ||
@@ -1104,19 +1110,22 @@ function setGuidedMailContext(next: GuidedMailContext | null): void {
  */
 function detectLassWissenCommand(normalized: string, original: string): VoiceIntent | null {
   const text = normalized.trim().toLowerCase();
-  const origText = original.trim();
+  const origText = stripSpokenLeadFillers(original.trim());
 
   // Pattern für "lass <name> (bitte)? folgendes wissen" oder "lass <name> wissen:"
   // Unterstützt Trennzeichen: ".", ",", ":" nach "wissen"
+  // la(?:ss|s) = ASR-Toleranz "las Sarah"; bestehende "lass"-Treffer bleiben identisch.
   const patterns = [
     // "lass <name> bitte folgendes wissen ..." (mit Punkt, Komma oder Doppelpunkt)
-    /^lass\s+([a-z0-9äöüß]+)\s+bitte\s+folgendes\s+wissen[:\s,\.]+(.+)$/i,
+    /^la(?:ss|s)\s+([a-z0-9äöüß]+)\s+bitte\s+folgendes\s+wissen[:\s,\.]+(.+)$/i,
     // "lass <name> folgendes wissen ..." (mit Punkt, Komma oder Doppelpunkt)
-    /^lass\s+([a-z0-9äöüß]+)\s+folgendes\s+wissen[:\s,\.]+(.+)$/i,
+    /^la(?:ss|s)\s+([a-z0-9äöüß]+)\s+folgendes\s+wissen[:\s,\.]+(.+)$/i,
+    // "lass <name> (schnell|mal eben|mal|kurz) wissen ..."
+    /^la(?:ss|s)\s+([a-z0-9äöüß]+)\s+(?:schnell|mal\s+eben|mal|kurz)\s+wissen[:\s,\.]+(.+)$/i,
     // "lass <name> wissen: ..." (mit Punkt, Komma oder Doppelpunkt)
-    /^lass\s+([a-z0-9äöüß]+)\s+wissen[:\s,\.]+(.+)$/i,
+    /^la(?:ss|s)\s+([a-z0-9äöüß]+)\s+wissen[:\s,\.]+(.+)$/i,
     // "lass <name> bitte wissen ..." (ohne "folgendes", mit Punkt, Komma oder Doppelpunkt)
-    /^lass\s+([a-z0-9äöüß]+)\s+bitte\s+wissen[:\s,\.]+(.+)$/i,
+    /^la(?:ss|s)\s+([a-z0-9äöüß]+)\s+bitte\s+wissen[:\s,\.]+(.+)$/i,
   ];
 
   let match: RegExpMatchArray | null = null;
@@ -1204,6 +1213,9 @@ function detectLassWissenCommand(normalized: string, original: string): VoiceInt
   } else {
     // Prüfe auf "bitte"
     const hasBitte = /\bbitte\b/i.test(origText);
+    const wissenIdx = origText.toLowerCase().search(/\bwissen\b/);
+    const commandPrefix = wissenIdx >= 0 ? origText.slice(0, wissenIdx) : origText;
+    const hasUrgency = /\b(schnell|mal\s+eben|direkt|sofort)\b/i.test(commandPrefix);
     
     // Prüfe auf Send-Phrasen (senden/schicken/abschicken/rausschicken/los)
     // Aber VORSICHT: nicht "schick dir ..." false-positive
@@ -1221,11 +1233,12 @@ function detectLassWissenCommand(normalized: string, original: string): VoiceInt
     const falsePositiveGuard = !/^(?:schick|schicke|sende|send)\s+(?:dir|mir|uns|ihr|euch)\b/i.test(origText);
     const hasSendPhrase = falsePositiveGuard && sendPhrases.some(pattern => pattern.test(origText));
 
-    if (hasBitte || hasSendPhrase) {
+    if (hasBitte || hasSendPhrase || hasUrgency) {
       autoSend = true;
       console.log('[intent-router][lass-wissen] AutoSend enabled', {
         hasBitte,
         hasSendPhrase,
+        hasUrgency,
       });
     } else {
       autoSend = false;
@@ -4751,7 +4764,6 @@ function checkFalsePositiveExclusion(normalized: string): boolean {
   const falsePositivePatterns = [
     /\b(ich|wir)\s+(sende|send|senden|schicke|schicken)\b/i,
     /\b(ich|wir)\s+(werde|wollen|wollten)\s+(senden|schicken)\b/i,
-    /\b(kannst|könntest|würdest|kann|könnte|würde)\s+du\s+.*\b(senden|schicken)\b/i,
     /\b(bitte\s+)?an\s+mich\s+(senden|schicken)\b/i,
     /\b(bitte\s+)?mir\s+(senden|schicken)\b/i,
     /\b(sende|schick|schicke)\s+(dir|mir|uns|ihr|euch)\b/i, // "sende dir", "schick mir" = not a command to send mail
@@ -4762,6 +4774,14 @@ function checkFalsePositiveExclusion(normalized: string): boolean {
       console.log('[autosend-extended] excluded false-positive:', pattern);
       return true; // false-positive detected
     }
+  }
+
+  if (
+    /\b(kannst|könntest|würdest|kann|könnte|würde)\s+du\s+.*\b(senden|schicken)\b/i.test(text) &&
+    !isPoliteAssistantMailCommand(text)
+  ) {
+    console.log('[autosend-extended] excluded false-positive: kannst-du senden');
+    return true;
   }
 
   // Negation/Preview patterns that should block AutoSend (höchste Priorität)
@@ -4916,10 +4936,17 @@ function detectExtendedAutoSend(normalized: string): boolean {
     }
   }
 
-  // Pattern C: "lass <name> wissen" / "lass <name> bitte wissen"
-  const lassWissenPattern = /\blass\s+([a-zäöüß]+)\s+(?:bitte\s+)?wissen\b/i;
+  // Pattern C: "lass <name> wissen" / "lass <name> bitte wissen" / "wissen lassen"
+  const lassWissenPattern = /\bla(?:ss|s)\s+([a-zäöüß]+)\s+(?:bitte\s+|schnell\s+|mal\s+eben\s+)?wissen\b/i;
   if (lassWissenPattern.test(text)) {
     console.log('[autosend-extended] matched "lass <name> wissen" pattern');
+    return true;
+  }
+  if (
+    isColloquialNotifySendPhrase(text) ||
+    /\b(kannst|könntest|kann)\s+du\s+(?:bitte\s+)?(?:folgende[ns]?\s+)?(?:nachricht|mail|e-?mail)\b/i.test(text)
+  ) {
+    console.log('[autosend-extended] matched polite assistant mail command');
     return true;
   }
 
@@ -6349,6 +6376,31 @@ export function routeVoiceIntent(raw: string): VoiceIntent {
     });
     // Finaler Cancel-Phrase Override
     return applyCancelPhraseOverride(applyForcedToName(lassWissenIntent), original, text);
+  }
+
+  const colloquialNotify = parseColloquialNotifyCommand(original);
+  if (colloquialNotify) {
+    let autoSend = colloquialNotify.autoSend;
+    if (autoSendExcludedByFalsePositive) {
+      autoSend = false;
+      console.log('[intent-router][colloquial-notify] AutoSend blocked - false-positive exclusion');
+    }
+    const intent: VoiceIntent = {
+      type: "email-compose",
+      toRaw: colloquialNotify.toName,
+      subjectHint: undefined,
+      bodyHintRaw: colloquialNotify.bodyRaw,
+      bodyHint: colloquialNotify.bodyRaw.toLowerCase(),
+      meta: {
+        source: "colloquial-notify",
+        autoSend,
+      },
+    };
+    console.log('[intent-router][colloquial-notify] matched:', {
+      toName: intent.toRaw,
+      autoSend,
+    });
+    return applyCancelPhraseOverride(applyForcedToName(intent), original, text);
   }
 
   // --------------------------------------------------

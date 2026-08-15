@@ -58,6 +58,33 @@ describe("normalizeEmailBodyAfterPolish", () => {
     const out = normalizeEmailBodyAfterPolish(input);
     expect(out).toBe("Vielleicht bestellen wir noch beim Dönermann etwas zu essen.");
   });
+
+  it("capitalizes greeting names and hier-ist names from spoken dictation", () => {
+    const input = "hi peter hier ist dennis ich hoffe dir geht es gut";
+    const out = normalizeEmailBodyAfterPolish(input);
+    expect(out).toBe("Hi Peter, hier ist Dennis. Ich hoffe dir geht es gut");
+  });
+
+  it("does not rewrite an already correctly capitalized greeting", () => {
+    const input = "Hi Thomas, hier ist Dennis. Ich hoffe, dir geht es gut.";
+    const out = normalizeEmailBodyAfterPolish(input);
+    expect(out).toBe(input);
+  });
+
+  it("restores geht's, Frau and Schönes from spoken ASR errors", () => {
+    const input =
+      "Hi Peter, hier ist Dennis. Ich hoffe dir geht s gut und ich hoffe du hast heute gut gegessen und deine frau hat schones gekocht.";
+    const out = normalizeEmailBodyAfterPolish(input);
+    expect(out).toBe(
+      "Hi Peter, hier ist Dennis. Ich hoffe dir geht's gut und ich hoffe du hast heute gut gegessen und deine Frau hat Schönes gekocht."
+    );
+  });
+
+  it("does not turn schon into schön", () => {
+    const input = "Hi Peter, ich bin schon unterwegs.";
+    const out = normalizeEmailBodyAfterPolish(input);
+    expect(out).toBe(input);
+  });
 });
 
 

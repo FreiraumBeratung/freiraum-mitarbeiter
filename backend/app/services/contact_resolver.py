@@ -12,6 +12,7 @@ import os
 import imaplib
 import email
 import time
+import threading
 import requests
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -80,6 +81,8 @@ class ContactResolver:
         self._mailbox_contacts_loaded_at: float = 0.0
         self._graph_contacts_loaded_at: float = 0.0
         self._learned_contacts_loaded_at: float = 0.0
+        self._remote_refresh_lock = threading.Lock()
+        self._remote_refresh_in_flight = False
         self._contact_store = get_contact_store()
         
         # Initiales Laden
@@ -539,18 +542,37 @@ class ContactResolver:
         except Exception as e:
             logger.warning(f"Fehler beim Prüfen der mtime: {e}")
 
-        # Mailbox-Sender periodisch nachziehen
-        ttl_sec = max(30, min(int(os.getenv("CONTACT_RESOLVER_INBOX_CACHE_SEC", "300")), 3600))
-        if (time.time() - self._mailbox_contacts_loaded_at) > ttl_sec:
-            self._load_mailbox_contacts()
-
-        graph_ttl_sec = max(30, min(int(os.getenv("CONTACT_RESOLVER_GRAPH_CACHE_SEC", "300")), 3600))
-        if (time.time() - self._graph_contacts_loaded_at) > graph_ttl_sec:
-            self._load_graph_contacts()
-
         learned_ttl_sec = max(20, min(int(os.getenv("CONTACT_RESOLVER_LEARNED_CACHE_SEC", "120")), 1800))
         if (time.time() - self._learned_contacts_loaded_at) > learned_ttl_sec:
             self._load_learned_contacts()
+
+        # Graph/IMAP dürfen die Sprach-Auflösung nicht blockieren (Handy bricht sonst nach ~1s ab).
+        mailbox_ttl_sec = max(30, min(int(os.getenv("CONTACT_RESOLVER_INBOX_CACHE_SEC", "300")), 3600))
+        graph_ttl_sec = max(30, min(int(os.getenv("CONTACT_RESOLVER_GRAPH_CACHE_SEC", "300")), 3600))
+        need_mailbox = (time.time() - self._mailbox_contacts_loaded_at) > mailbox_ttl_sec
+        need_graph = (time.time() - self._graph_contacts_loaded_at) > graph_ttl_sec
+        if need_mailbox or need_graph:
+            self._schedule_remote_contact_refresh(need_mailbox=need_mailbox, need_graph=need_graph)
+
+    def _schedule_remote_contact_refresh(self, need_mailbox: bool, need_graph: bool) -> None:
+        with self._remote_refresh_lock:
+            if self._remote_refresh_in_flight:
+                return
+            self._remote_refresh_in_flight = True
+
+        def worker() -> None:
+            try:
+                if need_graph:
+                    self._load_graph_contacts()
+                if need_mailbox:
+                    self._load_mailbox_contacts()
+            except Exception as exc:
+                logger.warning("Background contact refresh failed: %s", exc)
+            finally:
+                with self._remote_refresh_lock:
+                    self._remote_refresh_in_flight = False
+
+        threading.Thread(target=worker, name="fm-contact-refresh", daemon=True).start()
     
     @staticmethod
     def _normalize(text: str) -> str:
@@ -899,14 +921,23 @@ class ContactResolver:
         )
 
 
-# Singleton-Instanz
-_resolver_instance: Optional[ContactResolver] = None
+# Pro-Account-Instanzen, damit Graph/IMAP-Caches sich nicht kreuzen.
+_resolver_instances: dict[str, ContactResolver] = {}
+_resolver_lock = threading.Lock()
 
 
 def get_contact_resolver() -> ContactResolver:
-    """Gibt die Singleton-Instanz des Contact Resolvers zurück"""
-    global _resolver_instance
-    if _resolver_instance is None:
-        _resolver_instance = ContactResolver()
-    return _resolver_instance
+    from .account_paths import account_dir
+    from .account_session import get_current_account_id
+
+    account_id = get_current_account_id() or "_none"
+    with _resolver_lock:
+        existing = _resolver_instances.get(account_id)
+        if existing is not None:
+            existing._contact_store = get_contact_store()
+            return existing
+        contacts_file = account_dir(account_id) / "contacts.local.json"
+        resolver = ContactResolver(contacts_file=contacts_file)
+        _resolver_instances[account_id] = resolver
+        return resolver
 

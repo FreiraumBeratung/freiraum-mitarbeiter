@@ -22,8 +22,17 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, EmailStr
 
+from ..services.account_session import get_current_account_id
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mail", tags=["mail"])
+
+
+def _require_account() -> str:
+    account_id = get_current_account_id()
+    if not account_id:
+        raise HTTPException(status_code=401, detail="Nicht angemeldet.")
+    return account_id
 
 # Pfade für E-Mail-Assets
 # Von mail.py (backend/app/routers/mail.py) zum backend-Root: parents[2]
@@ -1251,6 +1260,7 @@ async def send_mail(req: MailSendRequest):
     Versendet eine E-Mail über SMTP.
     Erwartet ein JSON-Objekt mit {to, subject, body}.
     """
+    _require_account()
     if not req.body.strip():
         raise HTTPException(status_code=400, detail="E-Mail-Body darf nicht leer sein.")
 
@@ -1301,6 +1311,7 @@ async def send_mail(req: MailSendRequest):
 
 @router.post("/signature/import-last-sent", response_model=SignatureImportResponse)
 async def import_signature_from_last_sent(force: bool = False):
+    _require_account()
     result = _import_signature_for_active_account(force=force)
     return SignatureImportResponse(
         ok=bool(result.get("ok")),
@@ -1313,6 +1324,7 @@ async def import_signature_from_last_sent(force: bool = False):
 
 @router.get("/inbox", response_model=InboxListResponse)
 async def get_inbox(limit: int = 25, offset: int = 0, mailbox: str = Query("inbox", pattern="^(inbox|sent)$")):
+    _require_account()
     safe_limit = max(1, min(limit, 60))
     safe_offset = max(0, offset)
     mailbox_kind = (mailbox or "inbox").strip().lower()
@@ -1427,6 +1439,7 @@ async def get_inbox(limit: int = 25, offset: int = 0, mailbox: str = Query("inbo
 
 @router.get("/inbox/{uid}", response_model=InboxMessageDetailResponse)
 async def get_inbox_message(uid: str, mailbox: str = Query("inbox", pattern="^(inbox|sent)$")):
+    _require_account()
     safe_uid = (uid or "").strip()
     if not safe_uid:
         raise HTTPException(status_code=400, detail="uid ist erforderlich.")

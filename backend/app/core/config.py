@@ -31,7 +31,16 @@ def get_settings() -> Settings:
 
 def _read_origins() -> List[str]:
     raw = os.getenv("FM_CORS_ALLOW_ORIGINS")
-    defaults = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    defaults = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "https://localhost:5173",
+        "https://127.0.0.1:5173",
+        "https://localhost:5174",
+        "https://127.0.0.1:5174",
+    ]
     if not raw:
         return defaults
     entries = [item.strip() for item in raw.split(",") if item.strip()]

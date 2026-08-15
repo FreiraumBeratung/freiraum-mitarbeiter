@@ -9,6 +9,8 @@ import ctypes
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
+from .account_paths import account_dir, cache_root
+from .account_session import get_current_account_id
 
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -94,9 +96,12 @@ def _unprotect_secret(value: str) -> str:
 
 def _state_file_path() -> Path:
     configured = (os.getenv("FM_MAIL_SETUP_FILE") or "").strip()
+    account_id = get_current_account_id()
+    if account_id:
+        return account_dir(account_id) / "mail_setup_state.json"
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[2] / "data" / "cache" / "mail_setup_state.json"
+    return cache_root() / "mail_setup_state.json"
 
 
 class MailSetupStore:
@@ -205,12 +210,15 @@ class MailSetupStore:
             return self._snapshot_state_no_lock()
 
 
-_STORE: MailSetupStore | None = None
+_STORES: dict[str, MailSetupStore] = {}
 
 
 def get_mail_setup_store() -> MailSetupStore:
-    global _STORE
-    if _STORE is None:
-        _STORE = MailSetupStore()
-    return _STORE
+    account_id = get_current_account_id() or "_none"
+    existing = _STORES.get(account_id)
+    if existing is not None:
+        return existing
+    store = MailSetupStore()
+    _STORES[account_id] = store
+    return store
 

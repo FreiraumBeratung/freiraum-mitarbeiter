@@ -2,15 +2,25 @@
 API-Router für Contact Resolution
 """
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends
 from pydantic import BaseModel, EmailStr
 import logging
 
 from ..services.contact_resolver import get_contact_resolver
 from ..services.contact_store import get_contact_store
+from ..services.account_session import get_current_account_id
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/contacts", tags=["contacts"])
+
+
+def require_account() -> str:
+    account_id = get_current_account_id()
+    if not account_id:
+        raise HTTPException(status_code=401, detail="Nicht angemeldet.")
+    return account_id
+
+
+router = APIRouter(prefix="/api/contacts", tags=["contacts"], dependencies=[Depends(require_account)])
 
 
 class ManualContactCreateRequest(BaseModel):

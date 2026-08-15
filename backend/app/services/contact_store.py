@@ -201,20 +201,29 @@ class ContactStore:
         return {"email": str(row["email"]), "display_name": str(row["display_name"])}
 
 
-_store_instance: ContactStore | None = None
+from .account_paths import account_dir, cache_root
+from .account_session import get_current_account_id
+
+_stores: dict[str, ContactStore] = {}
 
 
 def _cache_dir() -> Path:
     data_dir = (os.getenv("FREIRAUM_DATA_DIR") or "").strip()
     if data_dir:
         return Path(data_dir) / "cache"
-    return Path(__file__).resolve().parents[2] / "data" / "cache"
+    return cache_root()
 
 
 def get_contact_store() -> ContactStore:
-    global _store_instance
-    if _store_instance is None:
-        db_path = _cache_dir() / "contact_store.sqlite3"
-        _store_instance = ContactStore(db_path=db_path)
-    return _store_instance
+    account_id = get_current_account_id() or "_none"
+    existing = _stores.get(account_id)
+    if existing is not None:
+        return existing
+    if account_id == "_none":
+        db_path = _cache_dir() / "contact_store._none.sqlite3"
+    else:
+        db_path = account_dir(account_id) / "contact_store.sqlite3"
+    store = ContactStore(db_path=db_path)
+    _stores[account_id] = store
+    return store
 

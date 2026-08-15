@@ -16,6 +16,9 @@ from urllib.parse import urlencode
 import requests
 
 
+from .account_paths import account_dir
+from .account_session import get_current_account_id
+
 GRAPH_AUTH_BASE = "https://login.microsoftonline.com"
 DEFAULT_SCOPES = "openid profile offline_access User.Read Contacts.Read Mail.ReadWrite Mail.Send"
 
@@ -91,8 +94,7 @@ class TokenBundle:
 _state_store: Dict[str, OAuthState] = {}
 _state_inflight: Dict[str, float] = {}
 _state_completed: Dict[str, float] = {}
-_token_bundle: TokenBundle | None = None
-_token_loaded_from_disk = False
+_token_bundles: Dict[str, TokenBundle] = {}
 _token_lock = threading.RLock()
 
 
@@ -100,15 +102,18 @@ def _now() -> float:
     return time.time()
 
 
-def _session_file_path() -> Path:
+def _session_file_path(account_id: str | None = None) -> Path:
     configured = (os.getenv("MS_OAUTH_SESSION_FILE") or "").strip()
-    if configured:
+    if configured and not account_id:
         return Path(configured)
+    current = account_id or get_current_account_id()
+    if current:
+        return account_dir(current) / "ms_oauth_session.json"
     return Path(__file__).resolve().parents[2] / "data" / "cache" / "ms_oauth_session.json"
 
 
-def _save_token_bundle_to_disk(bundle: TokenBundle) -> None:
-    path = _session_file_path()
+def _save_token_bundle_to_disk(bundle: TokenBundle, account_id: str | None = None) -> None:
+    path = _session_file_path(account_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -140,8 +145,8 @@ def _save_token_bundle_to_disk(bundle: TokenBundle) -> None:
         pass
 
 
-def _clear_token_bundle_from_disk() -> None:
-    path = _session_file_path()
+def _clear_token_bundle_from_disk(account_id: str | None = None) -> None:
+    path = _session_file_path(account_id)
     try:
         if path.exists():
             path.unlink()
@@ -149,8 +154,8 @@ def _clear_token_bundle_from_disk() -> None:
         pass
 
 
-def _load_token_bundle_from_disk() -> TokenBundle | None:
-    path = _session_file_path()
+def _load_token_bundle_from_disk(account_id: str | None = None) -> TokenBundle | None:
+    path = _session_file_path(account_id)
     if not path.exists():
         return None
     try:
@@ -174,15 +179,18 @@ def _load_token_bundle_from_disk() -> TokenBundle | None:
         return None
 
 
-def _ensure_token_loaded() -> None:
-    global _token_bundle, _token_loaded_from_disk
+def _ensure_token_loaded(account_id: str | None = None) -> TokenBundle | None:
+    current = account_id or get_current_account_id()
+    if not current:
+        return None
     with _token_lock:
-        if _token_bundle is not None or _token_loaded_from_disk:
-            return
-        _token_loaded_from_disk = True
-        persisted = _load_token_bundle_from_disk()
+        existing = _token_bundles.get(current)
+        if existing is not None:
+            return existing
+        persisted = _load_token_bundle_from_disk(current)
         if persisted is not None:
-            _token_bundle = persisted
+            _token_bundles[current] = persisted
+        return persisted
 
 
 def _cleanup_state_store(ttl_seconds: int = 600) -> None:
@@ -238,24 +246,25 @@ def _token_endpoint() -> str:
     return f"{GRAPH_AUTH_BASE}/{_tenant_id()}/oauth2/v2.0/token"
 
 
-def _store_token_payload(payload: Dict[str, Any], redirect_uri: str) -> TokenBundle:
-    global _token_bundle
-    with _token_lock:
-        expires_in = int(payload.get("expires_in") or 0)
-        expires_at = _now() + max(60, expires_in)
-        bundle = TokenBundle(
-            access_token=str(payload.get("access_token") or ""),
-            refresh_token=(str(payload.get("refresh_token")) if payload.get("refresh_token") else None),
-            expires_at=expires_at,
-            scope=str(payload.get("scope") or ""),
-            token_type=str(payload.get("token_type") or "Bearer"),
-            id_token=(str(payload.get("id_token")) if payload.get("id_token") else None),
-            user_hint=None,
-            redirect_uri=redirect_uri,
-        )
-        _token_bundle = bundle
-        _save_token_bundle_to_disk(bundle)
-        return bundle
+def _store_token_payload(payload: Dict[str, Any], redirect_uri: str, account_id: str | None = None) -> TokenBundle:
+    expires_in = int(payload.get("expires_in") or 0)
+    expires_at = _now() + max(60, expires_in)
+    bundle = TokenBundle(
+        access_token=str(payload.get("access_token") or ""),
+        refresh_token=(str(payload.get("refresh_token")) if payload.get("refresh_token") else None),
+        expires_at=expires_at,
+        scope=str(payload.get("scope") or ""),
+        token_type=str(payload.get("token_type") or "Bearer"),
+        id_token=(str(payload.get("id_token")) if payload.get("id_token") else None),
+        user_hint=None,
+        redirect_uri=redirect_uri,
+    )
+    current = account_id or get_current_account_id()
+    if current:
+        with _token_lock:
+            _token_bundles[current] = bundle
+        _save_token_bundle_to_disk(bundle, current)
+    return bundle
 
 
 def exchange_code_for_token(code: str, state: str) -> TokenBundle:
@@ -267,15 +276,9 @@ def exchange_code_for_token(code: str, state: str) -> TokenBundle:
         _cleanup_state_store()
         state_entry = _state_store.get(state)
         if state_entry is None:
-            # Idempotenz: Doppelte Callback-Aufrufe nach erfolgreichem Abschluss tolerieren.
-            if state in _state_completed and _token_bundle is not None and bool(_token_bundle.access_token):
-                return _token_bundle
             raise RuntimeError("Ungültiger oder abgelaufener OAuth state.")
         if state in _state_inflight:
-            if _token_bundle is not None and bool(_token_bundle.access_token):
-                return _token_bundle
             raise RuntimeError("OAuth state wird bereits verarbeitet.")
-
         _state_inflight[state] = _now()
 
     try:
@@ -306,82 +309,126 @@ def exchange_code_for_token(code: str, state: str) -> TokenBundle:
             _state_inflight.pop(state, None)
 
 
-def refresh_access_token() -> TokenBundle:
-    global _token_bundle
+def persist_bundle_for_account(account_id: str, bundle: TokenBundle) -> None:
+    if not account_id or not bundle:
+        return
     with _token_lock:
-        if not oauth_config_valid():
-            raise RuntimeError("OAuth Konfiguration unvollständig.")
-        if _token_bundle is None or not _token_bundle.refresh_token:
-            raise RuntimeError("Kein refresh_token vorhanden.")
-        redirect_uri = _token_bundle.redirect_uri or _authorization_redirect_uri()
-        refresh_token = _token_bundle.refresh_token
-        response = requests.post(
-            _token_endpoint(),
-            data={
-                "client_id": _client_id(),
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "redirect_uri": redirect_uri,
-                "scope": _scopes(),
-                **({"client_secret": _client_secret()} if (not _public_client_mode() and _client_secret()) else {}),
-            },
-            timeout=15,
-        )
-        if response.status_code >= 400:
-            raise RuntimeError(f"OAuth Token-Refresh fehlgeschlagen ({response.status_code}): {response.text[:220]}")
-        payload = response.json() if response.content else {}
-        bundle = _store_token_payload(payload, redirect_uri=redirect_uri)
-        if not bundle.access_token:
-            raise RuntimeError("OAuth Refresh-Antwort enthält kein access_token.")
-        return bundle
+        _token_bundles[account_id] = bundle
+    _save_token_bundle_to_disk(bundle, account_id)
+
+
+def fetch_graph_profile(access_token: str) -> Dict[str, str]:
+    response = requests.get(
+        "https://graph.microsoft.com/v1.0/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Graph /me fehlgeschlagen ({response.status_code})")
+    payload = response.json() if response.content else {}
+    email = str(payload.get("mail") or payload.get("userPrincipalName") or "").strip().lower()
+    display_name = str(payload.get("displayName") or "").strip()
+    if not email or "@" not in email:
+        raise RuntimeError("Graph /me lieferte keine Mailbox-Adresse.")
+    return {"email": email, "display_name": display_name}
+
+
+def refresh_access_token() -> TokenBundle:
+    if not oauth_config_valid():
+        raise RuntimeError("OAuth Konfiguration unvollständig.")
+    account_id = get_current_account_id()
+    bundle = _ensure_token_loaded(account_id)
+    if bundle is None or not bundle.refresh_token:
+        raise RuntimeError("Kein refresh_token vorhanden.")
+    redirect_uri = bundle.redirect_uri or _authorization_redirect_uri()
+    response = requests.post(
+        _token_endpoint(),
+        data={
+            "client_id": _client_id(),
+            "grant_type": "refresh_token",
+            "refresh_token": bundle.refresh_token,
+            "redirect_uri": redirect_uri,
+            "scope": _scopes(),
+            **({"client_secret": _client_secret()} if (not _public_client_mode() and _client_secret()) else {}),
+        },
+        timeout=15,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"OAuth Token-Refresh fehlgeschlagen ({response.status_code}): {response.text[:220]}")
+    payload = response.json() if response.content else {}
+    next_bundle = _store_token_payload(payload, redirect_uri=redirect_uri, account_id=account_id)
+    if not next_bundle.access_token:
+        raise RuntimeError("OAuth Refresh-Antwort enthält kein access_token.")
+    return next_bundle
 
 
 def get_valid_access_token(refresh_if_needed: bool = True) -> str | None:
-    global _token_bundle
-    _ensure_token_loaded()
-    with _token_lock:
-        if _token_bundle is None or not _token_bundle.access_token:
-            return None
-        # 60s Puffer
-        if _token_bundle.expires_at > (_now() + 60):
-            return _token_bundle.access_token
-        if not refresh_if_needed:
-            return None
-        try:
-            refreshed = refresh_access_token()
-            return refreshed.access_token
-        except Exception:
-            return None
+    account_id = get_current_account_id()
+    bundle = _ensure_token_loaded(account_id)
+    if bundle is None or not bundle.access_token:
+        return None
+    if bundle.expires_at > (_now() + 60):
+        return bundle.access_token
+    if not refresh_if_needed:
+        return None
+    try:
+        refreshed = refresh_access_token()
+        return refreshed.access_token
+    except Exception:
+        return None
 
 
 def get_auth_status() -> Dict[str, Any]:
-    _ensure_token_loaded()
-    if _token_bundle is None:
+    account_id = get_current_account_id()
+    email = None
+    display_name = None
+    account_provider = None
+    if account_id:
+        try:
+            from .account_registry import get_account_registry
+
+            account = get_account_registry().get(account_id)
+            if account:
+                email = account.get("email")
+                display_name = account.get("display_name")
+                account_provider = account.get("provider")
+        except Exception:
+            pass
+    bundle = _ensure_token_loaded(account_id) if account_id else None
+    if bundle is None:
         return {
             "connected": False,
-            "provider": "microsoft",
+            "loggedIn": bool(account_id),
+            "provider": account_provider or None,
             "frontendRedirect": _frontend_redirect_uri(),
             "oauthConfigured": oauth_config_valid(),
+            "accountId": account_id,
+            "accountEmail": email,
+            "accountDisplayName": display_name,
         }
-    # "connected" soll den tatsächlich nutzbaren Tokenzustand widerspiegeln.
     active_token = get_valid_access_token(refresh_if_needed=True)
-    remaining = int(max(0, _token_bundle.expires_at - _now()))
+    remaining = int(max(0, bundle.expires_at - _now()))
     return {
         "connected": bool(active_token),
+        "loggedIn": True,
         "provider": "microsoft",
         "oauthConfigured": oauth_config_valid(),
-        "scopes": _token_bundle.scope,
-        "tokenType": _token_bundle.token_type,
+        "scopes": bundle.scope,
+        "tokenType": bundle.token_type,
         "expiresInSec": remaining,
         "frontendRedirect": _frontend_redirect_uri(),
+        "accountId": account_id,
+        "accountEmail": email,
+        "accountDisplayName": display_name,
     }
 
 
 def clear_auth_session() -> None:
-    global _token_bundle
+    account_id = get_current_account_id()
     with _token_lock:
-        _token_bundle = None
+        if account_id:
+            _token_bundles.pop(account_id, None)
         _state_store.clear()
         _state_inflight.clear()
         _state_completed.clear()
-        _clear_token_bundle_from_disk()
+    # Cookie wird vom Router gelöscht. Token-Datei bleibt, damit dasselbe Konto später wieder da ist.

@@ -24,6 +24,7 @@ from .core.config import get_settings
 from .core.logging import configure_logging
 from .router_loader import load_and_include_routers
 from .routers.metrics import router as metrics_router
+from .services.account_session import COOKIE_NAME, reset_current_account_id, set_current_account_id, verify_account_session
 from .services.scheduler import shutdown_scheduler, start_scheduler
 
 configure_logging()
@@ -44,10 +45,21 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def account_session_middleware(request: Request, call_next):
+    account_id = verify_account_session(request.cookies.get(COOKIE_NAME))
+    token = set_current_account_id(account_id)
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_account_id(token)
 
 LOCALHOST_ONLY = os.getenv("FM_LOCALHOST_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
 _LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -142,6 +154,14 @@ try:
 except Exception as e:
     print(f"[fm-auth] FEHLER beim Laden des Microsoft OAuth Routers: {e}")
     pass
+try:
+    from .routers.admin_accounts import router as admin_accounts_router
+
+    app.include_router(admin_accounts_router)
+    print("[fm-admin] Admin-Accounts Router registriert")
+except Exception as e:
+    print(f"[fm-admin] FEHLER beim Laden des Admin-Routers: {e}")
+    pass
 # lead_hunter_osm will be loaded by router_loader
 load_and_include_routers(
     app,
@@ -156,6 +176,7 @@ load_and_include_routers(
         "app.routers.tts_local",
         "app.routers.ui_smoke",
         "app.routers.metrics",
+        "app.routers.admin_accounts",
     },
 )
 
