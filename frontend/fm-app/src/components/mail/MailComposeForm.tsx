@@ -30,7 +30,7 @@ function notifyMobileComposeOpen(value: string) {
   window.dispatchEvent(new CustomEvent("fm-mobile-compose-open"));
 }
 
-export default function MailComposeForm() {
+export default function MailComposeForm({ compact = false }: { compact?: boolean }) {
   const [sp] = useSearchParams();
   const [to, setTo] = useState(sp.get("to") || "");
   const [subject, setSubject] = useState(sp.get("subject") || "");
@@ -205,10 +205,18 @@ export default function MailComposeForm() {
         boxSizing: "border-box",
       }}
     >
-      <div style={{ fontSize: 19, fontWeight: 700, color: "rgba(255,255,255,0.95)", lineHeight: 1.1 }}>E-Mail-Maske</div>
-      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: -4, marginBottom: 4 }}>
-        Von Sprache zu E-Mail: prüfen, anpassen oder direkt per Sprachbefehl versenden.
-      </div>
+      {compact ? (
+        <div style={{ fontSize: 15, fontWeight: 700, color: "rgba(255,255,255,0.95)", lineHeight: 1.1 }}>
+          Entwurf
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 19, fontWeight: 700, color: "rgba(255,255,255,0.95)", lineHeight: 1.1 }}>E-Mail-Maske</div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: -4, marginBottom: 4 }}>
+            Von Sprache zu E-Mail: prüfen, anpassen oder direkt per Sprachbefehl versenden.
+          </div>
+        </>
+      )}
 
       <input
         placeholder="An"
@@ -250,7 +258,7 @@ export default function MailComposeForm() {
         onChange={(e) => setBody(e.target.value)}
         style={{
           width: "100%",
-          height: 112,
+          height: compact ? 88 : 112,
           borderRadius: 12,
           border: "1px solid rgba(255,255,255,0.12)",
           background: "rgba(0,0,0,0.32)",

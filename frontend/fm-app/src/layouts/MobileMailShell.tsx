@@ -63,6 +63,7 @@ type LearnedContactItem = {
 };
 
 const INBOX_AUTO_REFRESH_MS = 60_000;
+const INBOX_PAGE_SIZE = 80;
 
 function decodeHtmlEntities(input: string): string {
   if (!input) return "";
@@ -106,6 +107,20 @@ function fmtDate(value?: string | null): string {
   });
 }
 
+function startOfLocalDay(value: Date): number {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+}
+
+function dayGroupLabel(value?: string | null): string {
+  if (!value) return "Ohne Datum";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "Ohne Datum";
+  const diffDays = Math.round((startOfLocalDay(new Date()) - startOfLocalDay(dt)) / 86_400_000);
+  if (diffDays === 0) return "Heute";
+  if (diffDays === 1) return "Gestern";
+  return dt.toLocaleDateString("de-DE", { day: "numeric", month: "long" });
+}
+
 function buildContext(item: InboxItem): SelectedMailContext {
   return {
     uid: item.uid,
@@ -143,6 +158,9 @@ export default function MobileMailShell() {
   const [composeSheetOpen, setComposeSheetOpen] = useState(false);
   const [composeSheetEntered, setComposeSheetEntered] = useState(false);
   const [sendReviewMode, setSendReviewModeState] = useState<SendReviewMode>(() => getSendReviewMode());
+  const [inboxTotal, setInboxTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [draftHasContent, setDraftHasContent] = useState(false);
   const inboxLoadInFlightRef = useRef(false);
   const itemsRef = useRef<InboxItem[]>([]);
   const mailboxInitRef = useRef(true);
@@ -164,17 +182,24 @@ export default function MobileMailShell() {
     );
   }, [items, query]);
 
-  const loadInbox = useCallback(async (options?: { silent?: boolean }) => {
+  const loadInbox = useCallback(async (options?: { silent?: boolean; append?: boolean }) => {
     if (inboxLoadInFlightRef.current) return;
     inboxLoadInFlightRef.current = true;
     const silent = options?.silent === true;
+    const append = options?.append === true;
     const hasExistingItems = itemsRef.current.length > 0;
-    if (!silent && !hasExistingItems) {
+    if (append) {
+      setLoadingMore(true);
+    } else if (!silent && !hasExistingItems) {
       setLoading(true);
       setError(null);
     }
     try {
-      const inboxUrl = `${backendBase()}/api/mail/inbox?limit=50&offset=0&mailbox=${mailboxMode}`;
+      const offset = append ? itemsRef.current.length : 0;
+      const limit = append
+        ? INBOX_PAGE_SIZE
+        : Math.min(120, Math.max(INBOX_PAGE_SIZE, itemsRef.current.length || INBOX_PAGE_SIZE));
+      const inboxUrl = `${backendBase()}/api/mail/inbox?limit=${limit}&offset=${offset}&mailbox=${mailboxMode}`;
       let res = await fetch(inboxUrl);
       if (res.status === 503) {
         await new Promise((resolve) => setTimeout(resolve, 900));
@@ -182,7 +207,14 @@ export default function MobileMailShell() {
       }
       const data = (await res.json()) as InboxResponse;
       if (!res.ok || !data?.ok) throw new Error("Postfach konnte nicht geladen werden.");
-      setItems(data.items || []);
+      const incoming = data.items || [];
+      if (append) {
+        const seen = new Set(itemsRef.current.map((item) => item.uid));
+        setItems([...itemsRef.current, ...incoming.filter((item) => item?.uid && !seen.has(item.uid))]);
+      } else {
+        setItems(incoming);
+      }
+      setInboxTotal(typeof data.total === "number" ? data.total : incoming.length);
       setError(null);
     } catch (err) {
       if (itemsRef.current.length === 0) {
@@ -191,6 +223,7 @@ export default function MobileMailShell() {
     } finally {
       inboxLoadInFlightRef.current = false;
       setLoading(false);
+      setLoadingMore(false);
     }
   }, [mailboxMode]);
 
@@ -201,6 +234,7 @@ export default function MobileMailShell() {
       setSelectedUid(item.uid);
       setSelectedMailContext(buildContext(item));
       setDetailOpen(true);
+      setDraftHasContent(false);
       setDetailLoading(true);
       setDetailError(null);
       unlockTtsPlayback();
@@ -233,6 +267,7 @@ export default function MobileMailShell() {
     setDetailError(null);
     setSelectedUid(null);
     clearSelectedMailContext();
+    setDraftHasContent(false);
     releaseMicSession();
     void voice.stop();
     try {
@@ -462,6 +497,7 @@ export default function MobileMailShell() {
 
   useEffect(() => {
     const onComposeOpen = () => {
+      setDraftHasContent(true);
       if (detailOpenRef.current) return;
       setComposeSheetOpen(true);
       try {
@@ -492,13 +528,25 @@ export default function MobileMailShell() {
 
   const context = activeContext;
   const inboxHiddenForCompose = composeSheetOpen && !detailOpen;
+  const replyTarget = cut(
+    stripHtml(
+      detailData?.fromName ||
+        context?.fromName ||
+        detailData?.fromEmail ||
+        context?.fromEmail ||
+        "Absender"
+    ),
+    42
+  );
   const headerTitle = detailOpen
-    ? cut(stripHtml(detailData?.subject || context?.subject || "Nachricht"), 42)
+    ? `Antwort an ${replyTarget}`
     : inboxHiddenForCompose
       ? "Neue Mail"
       : mailboxMode === "sent"
         ? "Gesendet"
         : "Posteingang";
+  const showAccountEmail = Boolean(msAuth?.accountEmail) && !detailOpen && !inboxHiddenForCompose;
+  const inboxHasMore = !detailOpen && !inboxHiddenForCompose && items.length > 0 && items.length < inboxTotal;
 
   const voiceHint =
     voiceState === "listening"
@@ -511,10 +559,10 @@ export default function MobileMailShell() {
             ? voiceErrorHint
           : inboxHiddenForCompose
             ? "Entwurf prüfen – sag senden oder tippe Senden"
-            : context
+            : detailOpen
               ? sendReviewMode === "sofort"
-                ? `Sofort-Antwort an ${context.fromName || context.fromEmail || "Absender"}`
-                : `Antwort an ${context.fromName || context.fromEmail || "Absender"}`
+                ? "Sofort – sprechen sendet die Antwort"
+                : "Prüfen – Entwurf zuerst ansehen"
               : sendReviewMode === "sofort"
                 ? "Neue Mail per Sprache – Sofort gilt bei geöffneter Mail"
                 : "Neue Mail per Sprache";
@@ -580,8 +628,9 @@ export default function MobileMailShell() {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div
               style={{
-                fontSize: 18,
+                fontSize: detailOpen ? 17 : 18,
                 fontWeight: 700,
+                lineHeight: 1.2,
                 whiteSpace: "nowrap",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -590,9 +639,9 @@ export default function MobileMailShell() {
               {headerTitle}
             </div>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 2 }}>{voiceHint}</div>
-            {msAuth?.accountEmail ? (
+            {showAccountEmail ? (
               <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", marginTop: 2 }}>
-                {msAuth.accountEmail}
+                {msAuth?.accountEmail}
               </div>
             ) : null}
           </div>
@@ -671,7 +720,7 @@ export default function MobileMailShell() {
               <button
                 type="button"
                 onClick={() => void loadInbox()}
-                style={tabStyle(false)}
+                style={quietTabStyle}
               >
                 Aktualisieren
               </button>
@@ -679,7 +728,7 @@ export default function MobileMailShell() {
                 type="button"
                 onClick={() => void logoutAndResetSetup()}
                 disabled={msAuthLoading}
-                style={tabStyle(false)}
+                style={quietTabStyle}
                 title="Ausloggen und Konto wechseln"
               >
                 Ausloggen
@@ -687,7 +736,7 @@ export default function MobileMailShell() {
               <button
                 type="button"
                 onClick={() => setContactsOpen((v) => !v)}
-                style={tabStyle(contactsOpen)}
+                style={contactsOpen ? tabStyle(true) : quietTabStyle}
               >
                 Kontakte
               </button>
@@ -764,47 +813,6 @@ export default function MobileMailShell() {
                 </div>
               </div>
             ) : null}
-            <div
-              style={{
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.04)",
-                padding: "6px 10px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 8,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  color: "rgba(255,255,255,0.74)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {context
-                  ? `Aktiver Kontext: ${context.subject || "(ohne Betreff)"}`
-                  : "Aktiver Kontext: keiner"}
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedUid(null);
-                  clearSelectedMailContext();
-                }}
-                disabled={!context}
-                style={{
-                  ...tabStyle(false),
-                  opacity: context ? 1 : 0.45,
-                  cursor: context ? "pointer" : "not-allowed",
-                }}
-              >
-                Kontext lösen
-              </button>
-            </div>
           </div>
         ) : null}
       </header>
@@ -831,8 +839,10 @@ export default function MobileMailShell() {
                 style={{
                   borderRadius: 16,
                   background: "rgba(255,255,255,0.05)",
-                  padding: 14,
+                  padding: draftHasContent ? 10 : 14,
                   marginBottom: 12,
+                  maxHeight: draftHasContent ? 92 : undefined,
+                  overflow: draftHasContent ? "hidden" : "visible",
                 }}
               >
                 <div style={{ fontSize: 13, color: "rgba(255,255,255,0.72)" }}>
@@ -844,6 +854,7 @@ export default function MobileMailShell() {
                   </div>
                 ) : null}
                 <div style={{ fontSize: 15, fontWeight: 650, marginTop: 8 }}>{stripHtml(detailData.subject)}</div>
+                {draftHasContent ? null : (
                 <div
                   style={{
                     fontSize: 14,
@@ -855,6 +866,7 @@ export default function MobileMailShell() {
                 >
                   {detailData.bodyText || stripHtml(detailData.bodyHtml) || "(kein Text)"}
                 </div>
+                )}
               </div>
             ) : null}
           </div>
@@ -871,12 +883,29 @@ export default function MobileMailShell() {
                 Keine Nachrichten. Unten auf das Mikro tippen, um eine neue Mail zu diktieren.
               </div>
             ) : null}
-            {visibleItems.map((item) => {
+            {visibleItems.map((item, index) => {
               const unread = item.isRead === false;
               const active = item.uid === selectedUid;
+              const group = dayGroupLabel(item.receivedAt);
+              const prevGroup = index > 0 ? dayGroupLabel(visibleItems[index - 1]?.receivedAt) : null;
+              const showGroup = group !== prevGroup;
               return (
+                <div key={item.uid}>
+                  {showGroup ? (
+                    <div
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        letterSpacing: "0.04em",
+                        textTransform: "uppercase",
+                        color: "rgba(255,255,255,0.42)",
+                        padding: index === 0 ? "2px 4px 8px" : "12px 4px 8px",
+                      }}
+                    >
+                      {group}
+                    </div>
+                  ) : null}
                 <button
-                  key={item.uid}
                   type="button"
                   onClick={() => void openMessage(item)}
                   style={{
@@ -889,13 +918,29 @@ export default function MobileMailShell() {
                     padding: "12px 12px",
                     marginBottom: 8,
                     cursor: "pointer",
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "flex-start",
                   }}
                 >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 999,
+                      marginTop: 6,
+                      flexShrink: 0,
+                      background: unread ? "rgba(255,166,77,0.95)" : "transparent",
+                      boxShadow: unread ? "0 0 8px rgba(255,140,0,0.55)" : "none",
+                    }}
+                  />
+                  <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                     <div
                       style={{
-                        fontSize: 14,
-                        fontWeight: unread ? 700 : 600,
+                        fontSize: 15,
+                        fontWeight: unread ? 750 : 650,
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
@@ -932,9 +977,32 @@ export default function MobileMailShell() {
                       {item.preview}
                     </div>
                   ) : null}
+                  </div>
                 </button>
+                </div>
               );
             })}
+            {inboxHasMore ? (
+              <button
+                type="button"
+                onClick={() => void loadInbox({ append: true })}
+                disabled={loadingMore}
+                style={{
+                  width: "100%",
+                  height: 40,
+                  margin: "4px 0 10px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "rgba(255,255,255,0.86)",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: loadingMore ? "wait" : "pointer",
+                }}
+              >
+                {loadingMore ? "Weitere Nachrichten…" : "Weitere laden"}
+              </button>
+            ) : null}
           </div>
         )}
 
@@ -958,7 +1026,7 @@ export default function MobileMailShell() {
         }
         aria-hidden={!detailOpen && !inboxHiddenForCompose}
       >
-        <MailComposeForm />
+        <MailComposeForm compact />
       </div>
 
       <div
@@ -991,6 +1059,20 @@ function tabStyle(active: boolean): React.CSSProperties {
     flexShrink: 0,
   };
 }
+
+const quietTabStyle: React.CSSProperties = {
+  height: 26,
+  borderRadius: 999,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.06)",
+  color: "rgba(255,255,255,0.78)",
+  padding: "0 8px",
+  fontSize: 11,
+  fontWeight: 600,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  flexShrink: 0,
+};
 
 const fieldStyle: React.CSSProperties = {
   height: 32,

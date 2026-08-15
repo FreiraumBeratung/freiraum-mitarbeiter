@@ -1325,7 +1325,7 @@ async def import_signature_from_last_sent(force: bool = False):
 @router.get("/inbox", response_model=InboxListResponse)
 async def get_inbox(limit: int = 25, offset: int = 0, mailbox: str = Query("inbox", pattern="^(inbox|sent)$")):
     _require_account()
-    safe_limit = max(1, min(limit, 60))
+    safe_limit = max(1, min(limit, 120))
     safe_offset = max(0, offset)
     mailbox_kind = (mailbox or "inbox").strip().lower()
 

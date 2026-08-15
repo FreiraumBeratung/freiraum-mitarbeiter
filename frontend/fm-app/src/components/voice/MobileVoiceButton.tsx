@@ -103,6 +103,14 @@ export default function MobileVoiceButton() {
       >
         {statusLabel(state, insecureUrl)}
       </div>
+      {listening ? (
+        <style>
+          {`@keyframes fm-mic-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(255,115,0,.45), 0 0 26px rgba(255,115,0,.7); }
+            50% { box-shadow: 0 0 0 12px rgba(255,115,0,.12), 0 0 38px rgba(255,140,0,.9); }
+          }`}
+        </style>
+      ) : null}
       <button
         type="button"
         onContextMenu={(e) => e.preventDefault()}
@@ -123,6 +131,7 @@ export default function MobileVoiceButton() {
           color: "#fff",
           cursor: busy ? "wait" : "pointer",
           boxShadow: listening ? "0 0 28px rgba(255,115,0,.55)" : "0 8px 18px rgba(0,0,0,.4)",
+          animation: listening ? "fm-mic-pulse 1.35s ease-in-out infinite" : undefined,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
