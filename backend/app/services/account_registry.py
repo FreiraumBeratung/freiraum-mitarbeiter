@@ -107,6 +107,27 @@ class AccountRegistry:
             return None
         return self._row(row)
 
+    def set_license_active(self, account_id: str, active: bool) -> dict[str, Any] | None:
+        safe_id = (account_id or "").strip()
+        if not safe_id:
+            return None
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE accounts SET license_active = ? WHERE id = ?",
+                (1 if active else 0, safe_id),
+            )
+            conn.commit()
+        return self.get(safe_id)
+
+    def delete_account(self, account_id: str) -> bool:
+        safe_id = (account_id or "").strip()
+        if not safe_id:
+            return False
+        with self._lock, self._connect() as conn:
+            cur = conn.execute("DELETE FROM accounts WHERE id = ?", (safe_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
     def list_public(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

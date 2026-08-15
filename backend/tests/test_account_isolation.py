@@ -104,20 +104,21 @@ def test_admin_accounts_requires_key(monkeypatch):
 
     from app.routers.admin_accounts import _require_admin
 
+    monkeypatch.delenv("FREIRAUM_ADMIN_EMAIL", raising=False)
     monkeypatch.delenv("FM_ADMIN_KEY", raising=False)
     try:
-        _require_admin("secret")
+        _require_admin(None, "secret")
         raise AssertionError("expected 503")
     except HTTPException as exc:
         assert exc.status_code == 503
 
     monkeypatch.setenv("FM_ADMIN_KEY", "test-admin-key")
     try:
-        _require_admin("wrong")
+        _require_admin(None, "wrong")
         raise AssertionError("expected 401")
     except HTTPException as exc:
         assert exc.status_code == 401
-    _require_admin("test-admin-key")
+    _require_admin(None, "test-admin-key")
 
 
 def test_same_email_same_id():

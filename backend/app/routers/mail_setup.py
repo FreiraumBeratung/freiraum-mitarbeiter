@@ -206,6 +206,9 @@ def setup_imap(req: ImapSetupRequest, request: Request, response: Response):
             logger.warning("mail_setup.imap.smtp_fail %s", last_errors[-1])
             continue
 
+        existing = get_account_registry().get_by_email(email)
+        if existing and not existing.get("license_active"):
+            raise HTTPException(status_code=403, detail="Dieses Konto ist pausiert. Bitte den Admin kontaktieren.")
         account = get_account_registry().upsert_from_mailbox(email=email, provider="imap_smtp")
         set_current_account_id(account["id"])
         migrate_legacy_files_into_account(account["id"])

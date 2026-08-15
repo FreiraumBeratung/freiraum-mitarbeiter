@@ -395,6 +395,13 @@ def get_auth_status() -> Dict[str, Any]:
         except Exception:
             pass
     bundle = _ensure_token_loaded(account_id) if account_id else None
+    is_admin = False
+    try:
+        from .admin_access import current_account_is_admin
+
+        is_admin = current_account_is_admin()
+    except Exception:
+        is_admin = False
     if bundle is None:
         return {
             "connected": False,
@@ -405,6 +412,7 @@ def get_auth_status() -> Dict[str, Any]:
             "accountId": account_id,
             "accountEmail": email,
             "accountDisplayName": display_name,
+            "isAdmin": is_admin,
         }
     active_token = get_valid_access_token(refresh_if_needed=True)
     remaining = int(max(0, bundle.expires_at - _now()))
@@ -420,6 +428,7 @@ def get_auth_status() -> Dict[str, Any]:
         "accountId": account_id,
         "accountEmail": email,
         "accountDisplayName": display_name,
+        "isAdmin": is_admin,
     }
 
 

@@ -53,6 +53,7 @@ type MicrosoftAuthStatus = {
   accountEmail?: string | null;
   accountDisplayName?: string | null;
   accountId?: string | null;
+  isAdmin?: boolean;
 };
 
 type LearnedContactItem = {
@@ -64,6 +65,7 @@ type LearnedContactItem = {
 
 const INBOX_AUTO_REFRESH_MS = 60_000;
 const INBOX_PAGE_SIZE = 80;
+const OPENED_UIDS_STORAGE_KEY = "fm_exchange_opened_uids_v1";
 
 function decodeHtmlEntities(input: string): string {
   if (!input) return "";
@@ -161,6 +163,18 @@ export default function MobileMailShell() {
   const [inboxTotal, setInboxTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [draftHasContent, setDraftHasContent] = useState(false);
+  const [openedUids, setOpenedUids] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = window.localStorage.getItem(OPENED_UIDS_STORAGE_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set();
+      return new Set(parsed.filter((v) => typeof v === "string" && v.trim().length > 0));
+    } catch {
+      return new Set();
+    }
+  });
   const inboxLoadInFlightRef = useRef(false);
   const itemsRef = useRef<InboxItem[]>([]);
   const mailboxInitRef = useRef(true);
@@ -235,6 +249,12 @@ export default function MobileMailShell() {
       setSelectedMailContext(buildContext(item));
       setDetailOpen(true);
       setDraftHasContent(false);
+      setOpenedUids((prev) => {
+        if (prev.has(item.uid)) return prev;
+        const next = new Set(prev);
+        next.add(item.uid);
+        return next;
+      });
       setDetailLoading(true);
       setDetailError(null);
       unlockTtsPlayback();
@@ -385,6 +405,15 @@ export default function MobileMailShell() {
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(OPENED_UIDS_STORAGE_KEY, JSON.stringify(Array.from(openedUids)));
+    } catch {
+      // ignore private mode / quota
+    }
+  }, [openedUids]);
 
   useEffect(() => {
     void loadInbox();
@@ -547,6 +576,10 @@ export default function MobileMailShell() {
         : "Posteingang";
   const showAccountEmail = Boolean(msAuth?.accountEmail) && !detailOpen && !inboxHiddenForCompose;
   const inboxHasMore = !detailOpen && !inboxHiddenForCompose && items.length > 0 && items.length < inboxTotal;
+  const unreadCount = useMemo(
+    () => visibleItems.filter((item) => item.isRead === false && !openedUids.has(item.uid)).length,
+    [visibleItems, openedUids]
+  );
 
   const voiceHint =
     voiceState === "listening"
@@ -724,6 +757,18 @@ export default function MobileMailShell() {
               >
                 Aktualisieren
               </button>
+              {msAuth?.isAdmin ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.location.href = "/admin";
+                  }}
+                  style={quietTabStyle}
+                  title="Angemeldete Konten verwalten"
+                >
+                  Verwaltung
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => void logoutAndResetSetup()}
@@ -884,7 +929,7 @@ export default function MobileMailShell() {
               </div>
             ) : null}
             {visibleItems.map((item, index) => {
-              const unread = item.isRead === false;
+              const unread = item.isRead === false && !openedUids.has(item.uid);
               const active = item.uid === selectedUid;
               const group = dayGroupLabel(item.receivedAt);
               const prevGroup = index > 0 ? dayGroupLabel(visibleItems[index - 1]?.receivedAt) : null;
@@ -912,8 +957,16 @@ export default function MobileMailShell() {
                     width: "100%",
                     textAlign: "left",
                     borderRadius: 14,
-                    border: active ? "1px solid rgba(255,170,95,0.55)" : "1px solid rgba(255,255,255,0.08)",
-                    background: unread ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.04)",
+                    border: active
+                      ? "1px solid rgba(255,255,255,0.30)"
+                      : unread
+                        ? "1px solid rgba(129,178,255,0.42)"
+                        : "1px solid rgba(255,255,255,0.13)",
+                    background: active
+                      ? "rgba(255,255,255,0.15)"
+                      : unread
+                        ? "linear-gradient(180deg, rgba(56,98,160,0.24), rgba(255,255,255,0.08))"
+                        : "rgba(255,255,255,0.08)",
                     color: "#fff",
                     padding: "12px 12px",
                     marginBottom: 8,
@@ -921,6 +974,7 @@ export default function MobileMailShell() {
                     display: "flex",
                     gap: 10,
                     alignItems: "flex-start",
+                    boxSizing: "border-box",
                   }}
                 >
                   <span
@@ -931,8 +985,8 @@ export default function MobileMailShell() {
                       borderRadius: 999,
                       marginTop: 6,
                       flexShrink: 0,
-                      background: unread ? "rgba(255,166,77,0.95)" : "transparent",
-                      boxShadow: unread ? "0 0 8px rgba(255,140,0,0.55)" : "none",
+                      background: unread ? "rgba(129,178,255,0.95)" : "rgba(255,255,255,0.24)",
+                      boxShadow: unread ? "0 0 0 3px rgba(129,178,255,0.18)" : "none",
                     }}
                   />
                   <div style={{ minWidth: 0, flex: 1 }}>
@@ -940,7 +994,8 @@ export default function MobileMailShell() {
                     <div
                       style={{
                         fontSize: 15,
-                        fontWeight: unread ? 750 : 650,
+                        fontWeight: unread ? 700 : 600,
+                        color: unread ? "rgba(255,255,255,0.99)" : "rgba(255,255,255,0.94)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
@@ -1002,6 +1057,11 @@ export default function MobileMailShell() {
               >
                 {loadingMore ? "Weitere Nachrichten…" : "Weitere laden"}
               </button>
+            ) : null}
+            {!loading && visibleItems.length > 0 ? (
+              <div style={{ padding: "2px 4px 8px", fontSize: 11, color: "rgba(255,255,255,0.42)" }}>
+                {unreadCount} ungelesen · {visibleItems.length} sichtbar
+              </div>
             ) : null}
           </div>
         )}
