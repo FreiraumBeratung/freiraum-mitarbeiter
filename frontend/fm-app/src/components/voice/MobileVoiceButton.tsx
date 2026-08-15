@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
+import { warmMic } from "../../lib/micPermission";
 import { probeBackendSttHealth, requestRecorderStop } from "../../modules/stt";
 import { voice, type VoiceState } from "../../modules/voice";
 import { unlockTtsPlayback } from "../../modules/voice/tts";
@@ -74,6 +75,7 @@ export default function MobileVoiceButton() {
       await voice.stop();
       return;
     }
+    void warmMic();
     await voice.start();
   };
 

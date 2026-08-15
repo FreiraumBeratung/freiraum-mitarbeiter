@@ -1,4 +1,5 @@
 import { backendBase } from "../../lib/backendBase";
+import { getWarmMicStream, releaseWarmMic, warmMic } from "../../lib/micPermission";
 
 let cachedLocalSttHealthAtMs = 0;
 let cachedLocalSttHealthOk = false;
@@ -28,11 +29,23 @@ export async function probeBackendSttHealth(): Promise<boolean> {
     lastHealthProbeOk = false;
   }
   lastHealthProbeAtMs = Date.now();
+  if (lastHealthProbeOk) {
+    cachedLocalSttHealthOk = true;
+    cachedLocalSttHealthAtMs = Date.now();
+  }
   if (typeof window !== "undefined") {
     (window as any).__fm_backend_stt_ready = lastHealthProbeOk;
     (window as any).__fm_prefer_backend_stt = lastHealthProbeOk;
   }
   return lastHealthProbeOk;
+}
+
+function isBackendSttReady(): boolean {
+  if (typeof window !== "undefined" && (window as any).__fm_backend_stt_ready) return true;
+  const now = Date.now();
+  if (lastHealthProbeOk && now - lastHealthProbeAtMs < STT_HEALTH_PROBE_MS) return true;
+  if (cachedLocalSttHealthOk && now - cachedLocalSttHealthAtMs < LOCAL_STT_HEALTH_CACHE_MS) return true;
+  return false;
 }
 
 let activeMicStream: MediaStream | null = null;
@@ -54,12 +67,15 @@ export function requestRecorderStop(): void {
 export function releaseMicSession(): void {
   requestRecorderStop();
   try {
-    activeMicStream?.getTracks().forEach((track) => track.stop());
+    if (activeMicStream && activeMicStream !== getWarmMicStream()) {
+      activeMicStream.getTracks().forEach((track) => track.stop());
+    }
   } catch {
     /* ignore */
   }
   activeRecorder = null;
   activeMicStream = null;
+  releaseWarmMic();
 }
 
 export async function recordAndTranscribe(
@@ -211,169 +227,163 @@ export async function recordAndTranscribe(
   let usedBackendRecorder = false;
   try {
     const sttStartedAtMs = nowMs();
-    const healthCacheAgeMs = Date.now() - cachedLocalSttHealthAtMs;
-    const hasFreshLocalHealth =
-      cachedLocalSttHealthOk && healthCacheAgeMs >= 0 && healthCacheAgeMs <= LOCAL_STT_HEALTH_CACHE_MS;
-    const health = hasFreshLocalHealth
-      ? { provider: "local", ok: true, cached: true }
-      : await fetchWithTimeout(`${backendBase()}/api/stt/health`, {}, 1200)
-          .then((r) => r.json())
-          .catch(() => ({ ok: false }));
+    const stream = getWarmMicStream() ?? (await warmMic());
+    const usedWarmStream = stream === getWarmMicStream();
     if (signal?.aborted) return null;
-    const healthCheckedAtMs = nowMs();
-    if (!health?.ok) {
-      cachedLocalSttHealthOk = false;
-      throw new Error("stt-unhealthy");
-    }
-    cachedLocalSttHealthOk = true;
-    cachedLocalSttHealthAtMs = Date.now();
-
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
+    if (!stream) {
       throw new Error("microphone-unavailable");
     }
+    const healthAlreadyReady = isBackendSttReady();
+    const healthPromise = healthAlreadyReady
+      ? Promise.resolve({ provider: "local", ok: true, cached: true })
+      : fetchWithTimeout(`${backendBase()}/api/stt/health`, {}, 1200)
+          .then((r) => r.json())
+          .catch(() => ({ ok: false }));
     usedBackendRecorder = true;
     activeMicStream = stream;
     if (typeof window !== "undefined") {
       (window as any).__fm_mic_granted = true;
     }
     if (signal?.aborted) {
-      stopTracks(stream);
-      releaseMicSession();
+      activeMicStream = null;
       return null;
+    }
+    const mimeType = pickRecorderMime();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    activeRecorder = recorder;
+    const chunks: BlobPart[] = [];
+    const blobType = mimeType || "audio/webm";
+    const keepWarmStream = stream === getWarmMicStream();
+    const done = new Promise<Blob>((resolve) => {
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+      recorder.onstop = () => {
+        if (!keepWarmStream) {
+          stopTracks(stream);
+        }
+        activeRecorder = null;
+        activeMicStream = null;
+        resolve(new Blob(chunks, { type: blobType }));
+      };
+    });
+    let resolveStopRequest: (() => void) | null = null;
+    const stopRequested = new Promise<void>((resolve) => {
+      resolveStopRequest = resolve;
+    });
+    const abortHandler = () => {
+      resolveStopRequest?.();
+    };
+    signal?.addEventListener("abort", abortHandler, { once: true });
+    if (signal?.aborted) {
+      if (!keepWarmStream) stopTracks(stream);
+      signal.removeEventListener("abort", abortHandler);
+      return null;
+    }
+    const recordStartedAtMs = nowMs();
+    try {
+      recorder.start(100);
+    } catch {
+      recorder.start();
     }
     opts?.onListening?.();
-    if (signal?.aborted) {
-      stopTracks(stream);
-      releaseMicSession();
-      return null;
+    const healthCheckedAtMs = nowMs();
+    await Promise.race([new Promise((res) => setTimeout(res, maxMs)), stopRequested]);
+    try {
+      if (recorder.state !== "inactive") recorder.stop();
+    } catch {
+      /* ignore */
     }
-    if (health?.ok) {
-      const mimeType = pickRecorderMime();
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      activeRecorder = recorder;
-      const chunks: BlobPart[] = [];
-      const blobType = mimeType || "audio/webm";
-      const done = new Promise<Blob>((resolve) => {
-        recorder.ondataavailable = (e) => {
-          if (e.data && e.data.size > 0) chunks.push(e.data);
-        };
-        recorder.onstop = () => {
-          try {
-            stream.getTracks().forEach((track) => track.stop());
-          } catch {
-            /* ignore */
-          }
-          activeRecorder = null;
-          activeMicStream = null;
-          resolve(new Blob(chunks, { type: blobType }));
-        };
-      });
-      let resolveStopRequest: (() => void) | null = null;
-      const stopRequested = new Promise<void>((resolve) => {
-        resolveStopRequest = resolve;
-      });
-      const abortHandler = () => {
-        resolveStopRequest?.();
-      };
-      signal?.addEventListener("abort", abortHandler, { once: true });
-      if (signal?.aborted) {
-        stopTracks(stream);
-        signal.removeEventListener("abort", abortHandler);
-        return null;
-      }
-      const recordStartedAtMs = nowMs();
-      try {
-        recorder.start(250);
-      } catch {
-        recorder.start();
-      }
-      await Promise.race([new Promise((res) => setTimeout(res, maxMs)), stopRequested]);
-      try {
-        if (recorder.state !== "inactive") recorder.stop();
-      } catch {
-        /* ignore */
-      }
-      const audioBlob = await done;
-      stopTracks(stream);
-      activeRecorder = null;
-      activeMicStream = null;
-      signal?.removeEventListener("abort", abortHandler);
-      const recordFinishedAtMs = nowMs();
-      const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
-      if (!audioBlob || audioBlob.size < 200) {
-        if (typeof window !== "undefined") {
-          (window as any).__fm_stt_last_error = "stt-empty";
-        }
-        return null;
-      }
-
-      const backendBlob = await toBackendWav(audioBlob);
-      const wavReadyAtMs = nowMs();
-      const filename = backendBlob.type === "audio/wav" ? "voice.wav" : "voice.webm";
-      const form = new FormData();
-      form.append("file", backendBlob, filename);
-      const isLikelyCommandMode = recordedMs <= COMMAND_MODE_MAX_RECORD_MS;
-      const sttMode = isLikelyCommandMode ? "command" : "dictation";
-      form.append("mode", sttMode);
-      const transcribeTimeoutMs = isLikelyCommandMode ? 30000 : 120000;
-      const resp = await fetchWithTimeout(
-        `${backendBase()}/api/stt/transcribe`,
-        {
-          method: "POST",
-          body: form,
-          credentials: "include",
-        },
-        transcribeTimeoutMs
-      );
-      const transcribeDoneAtMs = nowMs();
-      if (resp.ok) {
-        const j = await resp.json();
-        const jsonParsedAtMs = nowMs();
-        const text = (j?.text || "").trim();
-        const backendFastProfileUsed =
-          typeof j?.fast_profile_used === "boolean" ? j.fast_profile_used : null;
-        const backendFallbackUsed =
-          typeof j?.fallback_used === "boolean" ? j.fallback_used : null;
-        const backendCommandExeUsed =
-          typeof j?.command_exe_used === "boolean" ? j.command_exe_used : null;
-        logSttTiming({
-          mode: sttMode,
-          backendFastProfileUsed,
-          backendFallbackUsed,
-          backendCommandExeUsed,
-          healthCached: !!(health as any)?.cached,
-          healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
-          recordMs: recordedMs,
-          wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),
-          transcribeMs: Math.max(0, Math.round(transcribeDoneAtMs - wavReadyAtMs)),
-          jsonMs: Math.max(0, Math.round(jsonParsedAtMs - transcribeDoneAtMs)),
-          totalMs: Math.max(0, Math.round(jsonParsedAtMs - sttStartedAtMs)),
-          textLength: text.length,
-        });
-        if (text) return text;
-      }
-      logSttTiming({
-        mode: sttMode,
-        backendFastProfileUsed: null,
-        backendFallbackUsed: null,
-        backendCommandExeUsed: null,
-        healthCached: !!(health as any)?.cached,
-        healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
-        recordMs: recordedMs,
-        wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),
-        transcribeMs: Math.max(0, Math.round(transcribeDoneAtMs - wavReadyAtMs)),
-        totalMs: Math.max(0, Math.round(transcribeDoneAtMs - sttStartedAtMs)),
-        textLength: 0,
-        emptyText: true,
-      });
+    const audioBlob = await done;
+    if (!keepWarmStream) stopTracks(stream);
+    activeRecorder = null;
+    activeMicStream = null;
+    signal?.removeEventListener("abort", abortHandler);
+    const recordFinishedAtMs = nowMs();
+    const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
+    const health = await healthPromise;
+    if (!health?.ok) {
+      cachedLocalSttHealthOk = false;
+      throw new Error("stt-unhealthy");
+    }
+    cachedLocalSttHealthOk = true;
+    cachedLocalSttHealthAtMs = Date.now();
+    if (typeof window !== "undefined") {
+      (window as any).__fm_backend_stt_ready = true;
+      (window as any).__fm_prefer_backend_stt = true;
+    }
+    if (!audioBlob || audioBlob.size < 200) {
       if (typeof window !== "undefined") {
         (window as any).__fm_stt_last_error = "stt-empty";
       }
       return null;
     }
+
+    const backendBlob = await toBackendWav(audioBlob);
+    const wavReadyAtMs = nowMs();
+    const filename = backendBlob.type === "audio/wav" ? "voice.wav" : "voice.webm";
+    const form = new FormData();
+    form.append("file", backendBlob, filename);
+    const isLikelyCommandMode = recordedMs <= COMMAND_MODE_MAX_RECORD_MS;
+    const sttMode = isLikelyCommandMode ? "command" : "dictation";
+    form.append("mode", sttMode);
+    const transcribeTimeoutMs = isLikelyCommandMode ? 30000 : 120000;
+    const resp = await fetchWithTimeout(
+      `${backendBase()}/api/stt/transcribe`,
+      {
+        method: "POST",
+        body: form,
+        credentials: "include",
+      },
+      transcribeTimeoutMs
+    );
+    const transcribeDoneAtMs = nowMs();
+    if (resp.ok) {
+      const j = await resp.json();
+      const jsonParsedAtMs = nowMs();
+      const text = (j?.text || "").trim();
+      const backendFastProfileUsed =
+        typeof j?.fast_profile_used === "boolean" ? j.fast_profile_used : null;
+      const backendFallbackUsed =
+        typeof j?.fallback_used === "boolean" ? j.fallback_used : null;
+      const backendCommandExeUsed =
+        typeof j?.command_exe_used === "boolean" ? j.command_exe_used : null;
+      logSttTiming({
+        mode: sttMode,
+        backendFastProfileUsed,
+        backendFallbackUsed,
+        backendCommandExeUsed,
+        healthCached: !!(health as any)?.cached,
+        warmed: usedWarmStream,
+        healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
+        recordMs: recordedMs,
+        wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),
+        transcribeMs: Math.max(0, Math.round(transcribeDoneAtMs - wavReadyAtMs)),
+        jsonMs: Math.max(0, Math.round(jsonParsedAtMs - transcribeDoneAtMs)),
+        totalMs: Math.max(0, Math.round(jsonParsedAtMs - sttStartedAtMs)),
+        textLength: text.length,
+      });
+      if (text) return text;
+    }
+    logSttTiming({
+      mode: sttMode,
+      backendFastProfileUsed: null,
+      backendFallbackUsed: null,
+      backendCommandExeUsed: null,
+      healthCached: !!(health as any)?.cached,
+      warmed: usedWarmStream,
+      healthMs: Math.max(0, Math.round(healthCheckedAtMs - sttStartedAtMs)),
+      recordMs: recordedMs,
+      wavConvertMs: Math.max(0, Math.round(wavReadyAtMs - recordFinishedAtMs)),
+      transcribeMs: Math.max(0, Math.round(transcribeDoneAtMs - wavReadyAtMs)),
+      totalMs: Math.max(0, Math.round(transcribeDoneAtMs - sttStartedAtMs)),
+      textLength: 0,
+      emptyText: true,
+    });
+    if (typeof window !== "undefined") {
+      (window as any).__fm_stt_last_error = "stt-empty";
+    }
+    return null;
   } catch (err) {
     if (usedBackendRecorder || (typeof window !== "undefined" && (window as any).__fm_prefer_backend_stt)) {
       (window as any).__fm_stt_last_error =

@@ -248,6 +248,36 @@ describe("reply_context_phase_a", () => {
     }
   });
 
+  it("sendet bei 'antworte direkt es läuft sehr gut' mit offener Mail", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "antworte direkt es läuft sehr gut",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.source).toBe("exchange-context-reply-direct");
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.to).toBe("thomas@example.com");
+      expect(intent.bodyHint?.toLowerCase()).toContain("läuft sehr gut");
+      expect(intent.bodyHint?.toLowerCase()).not.toContain("antworte");
+      expect(intent.bodyHint?.toLowerCase()).not.toContain("direkt");
+    }
+  });
+
+  it("bleibt in der Vorschau wenn 'direkt' fehlt (Prüfen-Pfad)", () => {
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "antworte es läuft sehr gut",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(false);
+      expect(intent.meta?.forcePreviewOnly).toBe(true);
+      expect(intent.bodyHint?.toLowerCase()).toContain("läuft sehr gut");
+    }
+  });
+
   it("handles ASR variant 'Antwortet direkt. ...' without body leak", () => {
     const intent = buildReplyIntentFromSelectedMailContext(
       "Antwortet direkt. Ich komme übermorgen.",
