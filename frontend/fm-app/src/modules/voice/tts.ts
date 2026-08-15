@@ -10,7 +10,7 @@ let primedAudio: HTMLAudioElement | null = null;
 
 function piperUrls(): string[] {
   const base = backendBase();
-  return [`${base}/api/voice/tts`, `${base}/api/tts/speak`];
+  return [`${base}/api/tts/speak`, `${base}/api/voice/tts`];
 }
 
 function emitTtsEvent(
@@ -55,17 +55,6 @@ export function unlockTtsPlayback() {
   } catch {
     /* ignore */
   }
-
-  try {
-    if ("speechSynthesis" in window) {
-      const utter = new SpeechSynthesisUtterance(" ");
-      utter.volume = 0.01;
-      utter.rate = 1;
-      window.speechSynthesis.speak(utter);
-    }
-  } catch {
-    /* ignore */
-  }
 }
 
 async function playPcmViaUnlockedContext(data: ArrayBuffer, text: string): Promise<boolean> {
@@ -93,6 +82,7 @@ async function tryPiperTts(text: string): Promise<boolean> {
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ text, voice: DEFAULT_VOICE }),
       });
 
@@ -159,8 +149,17 @@ function fallbackWebSpeech(text: string) {
   utterance.volume = 1.0;
 
   const pickVoice = () => {
-    const germanVoices = synth.getVoices().filter((v) => v.lang?.toLowerCase().startsWith("de"));
-    if (germanVoices.length > 0) utterance.voice = germanVoices[0];
+    const voices = synth.getVoices();
+    const germanVoices = voices.filter((v) => v.lang?.toLowerCase().startsWith("de"));
+    const maleHint = /male|männlich|martin|stefan|andreas|yannick|nils|thorsten|google deutsch/i;
+    const male = germanVoices.find((v) => maleHint.test(`${v.name} ${v.voiceURI}`));
+    if (male) {
+      utterance.voice = male;
+      return;
+    }
+    const notFemale = germanVoices.find((v) => !/anna|helena|siri|female|weiblich|petra|marlene/i.test(v.name));
+    if (notFemale) utterance.voice = notFemale;
+    else if (germanVoices.length > 0) utterance.voice = germanVoices[0];
   };
   pickVoice();
 

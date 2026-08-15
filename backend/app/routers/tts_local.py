@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from ..core.tts_settings import tts_settings
+from ..services.openai_speech import openai_api_key, tts_wav
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])
 
@@ -26,30 +27,38 @@ def health():
     root = _backend_root()
     exe = root / tts_settings.local.piper_exe
     voice = root / tts_settings.local.piper_voice
-    ok = tts_settings.provider == "local" and exe.exists() and voice.exists()
+    piper_ok = tts_settings.provider == "local" and exe.exists() and voice.exists()
+    openai_ok = bool(openai_api_key())
+    ok = piper_ok or openai_ok
     return {
         "ok": ok,
-        "provider": tts_settings.provider,
+        "provider": "local" if piper_ok else ("openai" if openai_ok else tts_settings.provider),
         "engine": tts_settings.local.engine,
         "exe": str(exe),
         "voice": str(voice),
+        "openai": openai_ok,
     }
 
 
 @router.post("/speak", response_class=Response)
-def speak(inp: SpeakIn):
+async def speak(inp: SpeakIn):
     if not inp.text.strip():
         raise HTTPException(status_code=400, detail="empty text")
-    if tts_settings.provider != "local":
-        raise HTTPException(status_code=501, detail="local tts not active")
 
     root = _backend_root()
     exe = root / tts_settings.local.piper_exe
     voice = root / tts_settings.local.piper_voice
     cfg = root / tts_settings.local.piper_cfg
+    piper_ready = tts_settings.provider == "local" and exe.exists() and voice.exists()
 
-    if not exe.exists() or not voice.exists():
-        raise HTTPException(status_code=500, detail="piper not installed")
+    if not piper_ready:
+        if not openai_api_key():
+            raise HTTPException(status_code=500, detail="piper not installed")
+        try:
+            audio = await tts_wav(inp.text)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"openai tts error: {exc}") from exc
+        return Response(content=audio, media_type="audio/wav")
 
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as txt_file:
         txt_file.write(inp.text)
