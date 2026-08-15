@@ -8,7 +8,12 @@ from pydantic import BaseModel, EmailStr, Field
 
 from ..services.account_migrate import migrate_legacy_files_into_account
 from ..services.account_registry import get_account_registry
-from ..services.account_session import attach_session_cookie, get_current_account_id, set_current_account_id
+from ..services.account_session import (
+    attach_session_cookie,
+    get_current_account_id,
+    set_current_account_id,
+    sign_account_session,
+)
 from ..services.mail_autodiscover import discover_mail_servers, verify_imap, verify_smtp
 from ..services.mail_setup_store import get_mail_setup_store
 from ..services.ms_oauth import get_auth_status
@@ -63,10 +68,12 @@ def _empty_setup_status(oauth: dict) -> dict:
 
 
 @router.get("/status")
-def get_setup_status():
+def get_setup_status(request: Request, response: Response):
     oauth = get_auth_status() or {}
-    if not get_current_account_id():
+    account_id = get_current_account_id()
+    if not account_id:
         return _empty_setup_status(oauth)
+    attach_session_cookie(request, response, account_id)
     store = get_mail_setup_store()
     state = store.get_state()
     imap = state.get("imap") or {}
@@ -231,6 +238,7 @@ def setup_imap(req: ImapSetupRequest, request: Request, response: Response):
             "ok": True,
             "provider": state.get("provider"),
             "onboardingComplete": bool(state.get("onboarding_complete")),
+            "sessionToken": sign_account_session(account["id"]),
             "config": {
                 "imapHost": candidate["imap_host"],
                 "imapPort": int(candidate["imap_port"]),

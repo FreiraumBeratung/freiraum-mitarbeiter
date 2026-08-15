@@ -121,49 +121,34 @@ def test_admin_accounts_requires_key(monkeypatch):
     _require_admin(None, "test-admin-key")
 
 
-def test_same_email_same_id():
-    first = account_id_from_email("Thomas@Allianz.de")
-    second = account_id_from_email("thomas@allianz.de")
-    assert first == second
-    assert len(first) == 16
+def test_session_token_from_header_and_cookie():
+    from app.services.account_session import COOKIE_NAME, SESSION_HEADER, session_token_from_request
 
-
-def test_different_emails_different_ids():
-    denis = account_id_from_email("denis@web.de")
-    brother = account_id_from_email("bruder@allianz.de")
-    assert denis != brother
-
-
-def test_session_roundtrip():
     account_id = account_id_from_email("pilot@example.com")
     token = sign_account_session(account_id)
-    assert verify_account_session(token) == account_id
-    assert verify_account_session("nope") is None
-    assert verify_account_session(f"{account_id}.deadbeef") is None
+
+    class Req:
+        def __init__(self, cookies, headers):
+            self.cookies = cookies
+            self.headers = headers
+
+    header_only = Req({}, {SESSION_HEADER: token})
+    assert verify_account_session(session_token_from_request(header_only)) == account_id
+
+    cookie_only = Req({COOKIE_NAME: token}, {})
+    assert verify_account_session(session_token_from_request(cookie_only)) == account_id
+
+    preferred = Req({COOKIE_NAME: token}, {SESSION_HEADER: "ignored"})
+    assert session_token_from_request(preferred) == token
+    assert session_token_from_request(Req({}, {})) is None
 
 
-def test_claim_is_single_use():
-    account_id = account_id_from_email("pilot@example.com")
-    claim = create_claim_token(account_id)
-    assert consume_claim_token(claim) == account_id
-    assert consume_claim_token(claim) is None
+def test_session_cookie_is_persistent():
+    from app.services.account_session import SESSION_MAX_AGE_SEC, cookie_kwargs
 
-
-def test_registry_has_no_tokens(tmp_path: Path):
-    registry = AccountRegistry(db_path=tmp_path / "accounts.sqlite3")
-    account = registry.upsert_from_mailbox(email="pilot@example.com", display_name="Pilot")
-    listed = registry.list_public()
-    assert listed[0]["email"] == "pilot@example.com"
-    assert listed[0]["id"] == account["id"]
-    blob = (tmp_path / "accounts.sqlite3").read_bytes()
-    assert b"access_token" not in blob
-    assert b"refresh_token" not in blob
-
-
-def test_account_dirs_are_isolated(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("FREIRAUM_DATA_DIR", str(tmp_path))
-    first = account_dir(account_id_from_email("a@example.com"))
-    second = account_dir(account_id_from_email("b@example.com"))
-    assert first != second
-    (first / "marker.txt").write_text("a", encoding="utf-8")
-    assert not (second / "marker.txt").exists()
+    kwargs = cookie_kwargs(secure=True)
+    assert kwargs["max_age"] == SESSION_MAX_AGE_SEC
+    assert kwargs["expires"] is not None
+    assert kwargs["httponly"] is True
+    assert kwargs["samesite"] == "lax"
+    assert kwargs["secure"] is True

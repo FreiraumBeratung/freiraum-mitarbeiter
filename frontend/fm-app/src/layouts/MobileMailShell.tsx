@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import MailComposeForm from "../components/mail/MailComposeForm";
 import MobileVoiceButton from "../components/voice/MobileVoiceButton";
 import { backendBase } from "../lib/backendBase";
+import { clearStoredSessionToken } from "../lib/sessionToken";
 import { ensureMicPermission } from "../lib/micPermission";
 import { releaseMicSession } from "../modules/stt";
 import { voice } from "../modules/voice";
@@ -327,6 +328,7 @@ export default function MobileMailShell() {
       }
       try {
         window.localStorage.setItem("fm_mail_onboarding_complete", "0");
+        clearStoredSessionToken();
       } catch {
         // ignore
       }

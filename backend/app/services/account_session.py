@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import contextvars
 import hmac
 import hashlib
@@ -13,6 +14,8 @@ from .account_paths import cache_root
 
 
 COOKIE_NAME = "fm_sid"
+SESSION_HEADER = "X-FM-Session"
+SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 30
 CLAIM_TTL_SEC = 180
 
 _current_account_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -109,9 +112,25 @@ def cookie_kwargs(secure: bool) -> dict[str, Any]:
         "httponly": True,
         "samesite": "lax",
         "secure": secure,
-        "max_age": 60 * 60 * 24 * 30,
+        "max_age": SESSION_MAX_AGE_SEC,
+        "expires": datetime.now(timezone.utc) + timedelta(seconds=SESSION_MAX_AGE_SEC),
         "path": "/",
     }
+
+
+def session_token_from_request(request) -> str | None:
+    raw = ""
+    try:
+        raw = str(request.cookies.get(COOKIE_NAME) or "").strip()
+    except Exception:
+        raw = ""
+    if raw:
+        return raw
+    try:
+        raw = str(request.headers.get(SESSION_HEADER) or "").strip()
+    except Exception:
+        raw = ""
+    return raw or None
 
 
 def request_is_secure(request) -> bool:

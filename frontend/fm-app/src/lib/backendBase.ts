@@ -28,6 +28,19 @@ export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   return fetch(input, { ...init, credentials: init?.credentials ?? "include" });
 }
 
+function withSessionHeader(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers || undefined);
+  try {
+    const token = window.localStorage.getItem("fm_sid") || "";
+    if (token.trim() && !headers.has("X-FM-Session")) {
+      headers.set("X-FM-Session", token.trim());
+    }
+  } catch {
+    /* ignore */
+  }
+  return { ...init, credentials: init?.credentials ?? "include", headers };
+}
+
 export function installApiCredentials(): void {
   if (typeof window === "undefined") return;
   if ((window as any).__fm_fetch_patched) return;
@@ -46,6 +59,6 @@ export function installApiCredentials(): void {
       url.startsWith(backendBase()) ||
       url.includes(":30521/");
     if (!looksLikeAppApi) return originalFetch(input, init);
-    return originalFetch(input, { ...init, credentials: init?.credentials ?? "include" });
+    return originalFetch(input, withSessionHeader(init));
   };
 }

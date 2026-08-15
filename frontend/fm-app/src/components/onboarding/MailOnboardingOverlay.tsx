@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 
 import { backendBase } from "../../lib/backendBase";
+import { resetMobileZoom, storeSessionToken } from "../../lib/sessionToken";
 import { consumeMicrosoftClaimFromUrl } from "../../modules/auth/microsoftClaim";
 
 type MailSetupStatus = {
@@ -149,7 +150,7 @@ export default function MailOnboardingOverlay() {
     setSplashVisible(false);
     window.setTimeout(() => setSplashVisible(true), 40);
     if (splashTimer.current) window.clearTimeout(splashTimer.current);
-    splashTimer.current = window.setTimeout(() => setPhase("provider"), 1400);
+    splashTimer.current = window.setTimeout(() => setPhase("imap"), 1400);
     return () => {
       if (splashTimer.current) {
         window.clearTimeout(splashTimer.current);
@@ -239,6 +240,8 @@ export default function MailOnboardingOverlay() {
       const detail = (data && (data.detail?.message || data.detail)) || "IMAP-Setup fehlgeschlagen.";
       throw new Error(String(detail));
     }
+    const token = typeof data?.sessionToken === "string" ? data.sessionToken.trim() : "";
+    if (token) storeSessionToken(token);
   }, [imapEmail, imapPassword, useAdvanced, imapHost, imapPort, smtpHost, smtpPort, smtpUseTls, smtpUseSsl, fetchWithTimeout]);
 
   const startSubmittingGuard = useCallback(() => {
@@ -264,7 +267,7 @@ export default function MailOnboardingOverlay() {
 
   return createPortal(
     <div style={styles.overlay}>
-      <div style={styles.cardLarge}>
+      <div style={phase === "splash" ? styles.cardLarge : styles.card}>
         {phase === "splash" ? (
           <div style={styles.splashWrap}>
             <img
@@ -282,10 +285,6 @@ export default function MailOnboardingOverlay() {
           <div style={styles.contentWrap}>
             <div style={styles.headerWrap}>
               <img src="/branding/freiraum-logo.png" alt="Freiraum" style={styles.logoMedium} />
-              <h2 style={styles.heading}>Womit möchten Sie sich verbinden?</h2>
-              <p style={styles.subHeading}>
-                
-              </p>
             </div>
 
             {phase === "provider" && (
@@ -353,6 +352,7 @@ export default function MailOnboardingOverlay() {
                       try {
                         await persistProvider("graph");
                         await completeGraphSetup();
+                        resetMobileZoom();
                         await loadStatuses();
                         window.dispatchEvent(new CustomEvent("fm-mail-setup-complete"));
                       } catch (err) {
@@ -374,7 +374,7 @@ export default function MailOnboardingOverlay() {
                       abortActiveRequest();
                       setSubmitting(false);
                       stopSubmittingGuard();
-                      setPhase("provider");
+                      setPhase("imap");
                     }}
                     style={styles.btnGhost}
                   >
@@ -441,6 +441,21 @@ export default function MailOnboardingOverlay() {
                     <input value={smtpPort} onChange={(e) => setSmtpPort(e.target.value)} placeholder="SMTP Port" style={styles.inputSmall} />
                     <label style={styles.checkboxSmall}><input type="checkbox" checked={smtpUseTls} onChange={(e) => setSmtpUseTls(e.target.checked)} /> STARTTLS</label>
                     <label style={styles.checkboxSmall}><input type="checkbox" checked={smtpUseSsl} onChange={(e) => setSmtpUseSsl(e.target.checked)} /> SSL</label>
+                    {msAuth?.oauthConfigured ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          abortActiveRequest();
+                          setSubmitting(false);
+                          stopSubmittingGuard();
+                          setProvider("graph");
+                          setPhase("graph");
+                        }}
+                        style={styles.btnGhost}
+                      >
+                        Microsoft 365
+                      </button>
+                    ) : null}
                   </div>
                 )}
                 <div style={styles.actionRow}>
@@ -454,6 +469,7 @@ export default function MailOnboardingOverlay() {
                       try {
                         await persistProvider("imap_smtp");
                         await runImapSetup();
+                        resetMobileZoom();
                         await loadStatuses();
                         window.dispatchEvent(new CustomEvent("fm-mail-setup-complete"));
                       } catch (err) {
@@ -473,17 +489,6 @@ export default function MailOnboardingOverlay() {
                     }}
                   >
                     Anmelden
-                  </button>
-                  <button
-                    onClick={() => {
-                      abortActiveRequest();
-                      setSubmitting(false);
-                      stopSubmittingGuard();
-                      setPhase("provider");
-                    }}
-                    style={styles.btnGhost}
-                  >
-                    Zurück
                   </button>
                 </div>
               </form>
@@ -559,7 +564,7 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "transform 0.75s ease, opacity 0.75s ease",
   },
   logoMedium: {
-    width: "min(360px, 72vw)",
+    width: "min(220px, 58vw)",
     maxWidth: "100%",
     marginBottom: 14,
   },
@@ -685,7 +690,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(0,0,0,0.3)",
     color: "white",
     padding: "0 12px",
-    fontSize: 14,
+    fontSize: 16,
     outline: "none",
   },
   inputWithIcon: {
@@ -718,7 +723,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(0,0,0,0.3)",
     color: "white",
     padding: "0 10px",
-    fontSize: 13,
+    fontSize: 16,
     outline: "none",
   },
   checkboxRow: {

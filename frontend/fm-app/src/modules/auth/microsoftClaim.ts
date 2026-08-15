@@ -1,4 +1,5 @@
 import { backendBase } from "../../lib/backendBase";
+import { storeSessionToken } from "../../lib/sessionToken";
 
 export async function consumeMicrosoftClaimFromUrl(): Promise<boolean> {
   if (typeof window === "undefined") return false;
@@ -13,6 +14,10 @@ export async function consumeMicrosoftClaimFromUrl(): Promise<boolean> {
       body: JSON.stringify({ claim }),
     });
     if (!res.ok) return false;
+    const data = await res.json().catch(() => null);
+    if (typeof data?.sessionToken === "string" && data.sessionToken.trim()) {
+      storeSessionToken(data.sessionToken);
+    }
     params.delete("fm_claim");
     const next = params.toString();
     const path = `${window.location.pathname}${next ? `?${next}` : ""}${window.location.hash || ""}`;

@@ -232,6 +232,7 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
           padding: "0 12px",
           outline: "none",
           boxSizing: "border-box",
+          fontSize: 16,
         }}
       />
 
@@ -249,6 +250,7 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
           padding: "0 12px",
           outline: "none",
           boxSizing: "border-box",
+          fontSize: 16,
         }}
       />
 
@@ -265,6 +267,7 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
           color: "#fff",
           padding: 12,
           outline: "none",
+          fontSize: 16,
           resize: "none",
           boxSizing: "border-box",
         }}

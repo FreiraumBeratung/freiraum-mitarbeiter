@@ -6,6 +6,7 @@ import {
   type SelectedMailContext,
 } from "../../modules/mail/selectedMailContext";
 import { backendBase } from "../../lib/backendBase";
+import { clearStoredSessionToken } from "../../lib/sessionToken";
 
 const OPENED_UIDS_STORAGE_KEY = "fm_exchange_opened_uids_v1";
 const INBOX_AUTO_REFRESH_MS = 60_000;
@@ -385,6 +386,7 @@ export default function ExchangeInboxPanel() {
 
       try {
         window.localStorage.setItem("fm_mail_onboarding_complete", "0");
+        clearStoredSessionToken();
       } catch {
         // ignore localStorage errors
       }

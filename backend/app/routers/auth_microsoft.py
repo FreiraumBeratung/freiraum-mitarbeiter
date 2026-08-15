@@ -13,6 +13,7 @@ from ..services.account_session import (
     clear_session_cookie,
     consume_claim_token,
     create_claim_token,
+    sign_account_session,
 )
 from ..services.ms_oauth import (
     clear_auth_session,
@@ -113,6 +114,7 @@ def microsoft_auth_claim(req: ClaimRequest, request: Request):
             "accountId": account["id"],
             "accountEmail": account["email"],
             "accountDisplayName": account.get("display_name"),
+            "sessionToken": sign_account_session(account_id),
         }
     )
     attach_session_cookie(request, response, account_id)

@@ -24,7 +24,12 @@ from .core.config import get_settings
 from .core.logging import configure_logging
 from .router_loader import load_and_include_routers
 from .routers.metrics import router as metrics_router
-from .services.account_session import COOKIE_NAME, reset_current_account_id, set_current_account_id, verify_account_session
+from .services.account_session import (
+    reset_current_account_id,
+    session_token_from_request,
+    set_current_account_id,
+    verify_account_session,
+)
 from .services.scheduler import shutdown_scheduler, start_scheduler
 
 configure_logging()
@@ -54,7 +59,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def account_session_middleware(request: Request, call_next):
-    account_id = verify_account_session(request.cookies.get(COOKIE_NAME))
+    account_id = verify_account_session(session_token_from_request(request))
     token = set_current_account_id(account_id)
     try:
         return await call_next(request)
