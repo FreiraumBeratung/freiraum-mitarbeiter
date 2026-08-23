@@ -196,6 +196,22 @@ class MailSetupStore:
             payload["smtp"]["password"] = _protect_secret(str(payload["smtp"]["password"]))
         self._path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
+    def set_imap_sent_folder(self, folder_name: str) -> dict[str, Any]:
+        cleaned = (folder_name or "").strip()
+        if not cleaned or len(cleaned) > 200 or any(ch in cleaned for ch in ("\n", "\r", "\x00")):
+            return self.get_state()
+        with self._lock:
+            imap = dict(self._state.get("imap") or {})
+            if not imap.get("host"):
+                return self._snapshot_state_no_lock()
+            if str(imap.get("sent_folder") or "") == cleaned:
+                return self._snapshot_state_no_lock()
+            imap["sent_folder"] = cleaned
+            self._state["imap"] = imap
+            self._state["updated_at"] = int(time.time())
+            self._save()
+            return self._snapshot_state_no_lock()
+
     def set_onboarding_complete(self, complete: bool) -> dict[str, Any]:
         with self._lock:
             self._state["onboarding_complete"] = bool(complete)

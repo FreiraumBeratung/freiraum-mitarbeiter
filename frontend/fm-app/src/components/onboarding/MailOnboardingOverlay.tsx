@@ -47,6 +47,27 @@ function storedOnboardingComplete(): boolean {
   }
 }
 
+function loginHintForEmail(emailAddress: string): string {
+  const email = (emailAddress || "").trim().toLowerCase();
+  if (email.endsWith("@gmail.com") || email.endsWith("@googlemail.com")) {
+    return "Gmail: IMAP muss an sein. Bei Zwei-Faktor bitte ein App-Passwort verwenden.";
+  }
+  if (
+    email.endsWith("@outlook.com") ||
+    email.endsWith("@outlook.de") ||
+    email.endsWith("@hotmail.com") ||
+    email.endsWith("@hotmail.de") ||
+    email.endsWith("@live.com") ||
+    email.endsWith("@office365.com")
+  ) {
+    return "Microsoft-Konto: Wenn IMAP blockiert ist, unter Erweiterte Einstellungen „Microsoft 365“ nutzen.";
+  }
+  if (email.endsWith("@icloud.com") || email.endsWith("@me.com") || email.endsWith("@mac.com")) {
+    return "iCloud: Bitte ein app-spezifisches Passwort verwenden.";
+  }
+  return "";
+}
+
 export default function MailOnboardingOverlay() {
   const location = useLocation();
   const [setupStatus, setSetupStatus] = useState<MailSetupStatus | null>(null);
@@ -71,6 +92,8 @@ export default function MailOnboardingOverlay() {
   const [splashVisible, setSplashVisible] = useState(false);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
   const submittingFailsafeTimerRef = useRef<number | null>(null);
+
+  const providerLoginHint = useMemo(() => loginHintForEmail(imapEmail), [imapEmail]);
 
   const isMailWorkspace = useMemo(() => {
     const path = location.pathname || "";
@@ -286,8 +309,13 @@ export default function MailOnboardingOverlay() {
       data = await res.json().catch(() => null);
     }
     if (!res.ok) {
-      const detail = (data && (data.detail?.message || data.detail)) || "IMAP-Setup fehlgeschlagen.";
-      throw new Error(String(detail));
+      const detail = data?.detail;
+      const message =
+        typeof detail === "string"
+          ? detail
+          : (detail && (detail.message || detail.hint)) || "IMAP-Setup fehlgeschlagen.";
+      const hint = typeof detail === "object" && detail?.hint && detail?.message ? String(detail.hint) : "";
+      throw new Error([String(message), hint].filter(Boolean).join(" "));
     }
     const token = typeof data?.sessionToken === "string" ? data.sessionToken.trim() : "";
     if (token) storeSessionToken(token);
@@ -474,6 +502,7 @@ export default function MailOnboardingOverlay() {
                     {showImapPassword ? "🙈" : "👁"}
                   </button>
                 </div>
+                {providerLoginHint ? <div style={styles.hintText}>{providerLoginHint}</div> : null}
                 <label style={styles.checkboxRow}>
                   <input type="checkbox" checked={useAdvanced} onChange={(e) => setUseAdvanced(e.target.checked)} />
                   Erweiterte Einstellungen
@@ -788,6 +817,11 @@ const styles: Record<string, React.CSSProperties> = {
   errorText: {
     color: "rgba(255,174,174,0.95)",
     fontSize: 13,
+  },
+  hintText: {
+    color: "rgba(255,255,255,0.72)",
+    fontSize: 12,
+    lineHeight: 1.4,
   },
   progressText: {
     color: "rgba(255,255,255,0.8)",

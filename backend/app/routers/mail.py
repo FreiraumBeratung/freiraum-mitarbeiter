@@ -293,6 +293,7 @@ SIGNATURE_MARKERS = [
 ]
 
 _GRAPH_ACCOUNT_EMAIL_CACHE: dict[str, str | float] = {"value": "", "expires_at": 0.0}
+_IMAP_SENT_FOLDER_CACHE: dict[str, str] = {}
 
 
 def _mail_signature_store():
@@ -303,13 +304,128 @@ def _mail_signature_store():
 
 def _imap_sent_folder_candidates() -> list[str]:
     return [
+        "INBOX.Gesendet",
+        "INBOX.Sent",
+        "Gesendet",
         "Sent",
         "Sent Items",
-        "Gesendet",
-        "INBOX.Sent",
-        "INBOX.Gesendet",
         "INBOX.Sent Items",
     ]
+
+
+def _safe_imap_folder_name(value: str | None) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned or len(cleaned) > 200 or any(ch in cleaned for ch in ("\n", "\r", "\x00")):
+        return ""
+    return cleaned
+
+
+def _stored_imap_sent_folder() -> str:
+    setup = _mail_setup_state()
+    imap = setup.get("imap") if isinstance(setup, dict) else {}
+    if not isinstance(imap, dict):
+        return ""
+    return _safe_imap_folder_name(str(imap.get("sent_folder") or ""))
+
+
+def _remember_imap_sent_folder(folder_name: str) -> None:
+    cleaned = _safe_imap_folder_name(folder_name)
+    if not cleaned:
+        return
+    account_id = get_current_account_id() or ""
+    if account_id:
+        _IMAP_SENT_FOLDER_CACHE[account_id] = cleaned
+    try:
+        from ..services.mail_setup_store import get_mail_setup_store
+
+        get_mail_setup_store().set_imap_sent_folder(cleaned)
+    except Exception:
+        return
+
+
+def _parse_imap_list_mailbox_name(line: str) -> str:
+    text = (line or "").strip()
+    if not text:
+        return ""
+    match = re.search(r'\s"([^"]+)"\s*$', text)
+    if match:
+        return _safe_imap_folder_name(match.group(1))
+    parts = text.split()
+    if not parts:
+        return ""
+    return _safe_imap_folder_name(parts[-1].strip('"'))
+
+
+def _imap_list_sent_folder(client: imaplib.IMAP4_SSL) -> str | None:
+    rows: list = []
+    for args in ((), ("", "*")):
+        try:
+            status, data = client.list(*args) if args else client.list()
+        except Exception:
+            continue
+        if status != "OK" or not data:
+            continue
+        rows.extend(data)
+    for raw in rows:
+        if not raw:
+            continue
+        line = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        lowered = line.lower()
+        if "\\sent" not in lowered:
+            continue
+        name = _parse_imap_list_mailbox_name(line)
+        if name:
+            return name
+    return None
+
+
+def _try_select_imap_folder(client: imaplib.IMAP4_SSL, folder_name: str) -> bool:
+    cleaned = _safe_imap_folder_name(folder_name)
+    if not cleaned:
+        return False
+    for name in (cleaned, f'"{cleaned}"'):
+        try:
+            status, _ = client.select(name, readonly=True)
+            if status == "OK":
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _parse_imap_fetch_payload(fetch_data) -> tuple[bytes | None, bool]:
+    is_read = False
+    raw_email = None
+    for part in fetch_data or []:
+        if not (isinstance(part, tuple) and len(part) > 1):
+            continue
+        meta = part[0]
+        payload = part[1]
+        if isinstance(meta, (bytes, bytearray)) and b"FLAGS" in meta and b"\\Seen" in meta:
+            is_read = True
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8", "replace")
+        if isinstance(payload, (bytes, bytearray)) and payload:
+            raw_email = bytes(payload)
+            break
+    return raw_email, is_read
+
+
+def _fetch_imap_list_headers(client: imaplib.IMAP4_SSL, uid: str) -> tuple[bytes | None, bool]:
+    safe_uid = "".join(ch for ch in (uid or "") if ch.isdigit())
+    if not safe_uid:
+        return None, False
+    for spec in ("(FLAGS BODY.PEEK[HEADER])", "(FLAGS RFC822.HEADER)", "(FLAGS RFC822)"):
+        try:
+            fetch_status, fetch_data = client.uid("FETCH", safe_uid, spec)
+        except Exception:
+            continue
+        if fetch_status != "OK" or not fetch_data:
+            continue
+        raw_email, is_read = _parse_imap_fetch_payload(fetch_data)
+        if raw_email:
+            return raw_email, is_read
+    return None, False
 
 
 def _normalize_account_key(value: str | None) -> str:
@@ -846,34 +962,25 @@ def _extract_message_content(msg: email.message.Message) -> tuple[str, str]:
 def _latest_sent_message_content_from_imap() -> tuple[str, str]:
     client = _open_imap_client_with_retry()
     try:
-        for folder_name in _imap_sent_folder_candidates():
-            try:
-                status, _ = client.select(folder_name, readonly=True)
-                if status != "OK":
-                    status, _ = client.select(f'"{folder_name}"', readonly=True)
-            except Exception:
-                continue
-            if status != "OK":
-                continue
-            try:
-                search_status, data = client.uid("SEARCH", None, "ALL")
-            except Exception:
-                continue
-            if search_status != "OK" or not data or not data[0]:
-                continue
-            latest_uid = data[0].split()[-1].decode("utf-8", errors="replace")
-            fetch_status, fetch_data = client.uid("FETCH", latest_uid, "(RFC822)")
-            if fetch_status != "OK" or not fetch_data:
-                continue
-            raw_email = None
-            for part in fetch_data:
-                if isinstance(part, tuple) and len(part) > 1:
-                    raw_email = part[1]
-                    break
-            if not raw_email:
-                continue
-            msg = email.message_from_bytes(raw_email)
-            return _extract_message_content(msg)
+        try:
+            _resolve_imap_mailbox(client, "sent")
+        except Exception:
+            return "", ""
+        try:
+            search_status, data = client.uid("SEARCH", None, "ALL")
+        except Exception:
+            return "", ""
+        if search_status != "OK" or not data or not data[0]:
+            return "", ""
+        latest_uid = data[0].split()[-1].decode("utf-8", errors="replace")
+        fetch_status, fetch_data = client.uid("FETCH", latest_uid, "(RFC822)")
+        if fetch_status != "OK" or not fetch_data:
+            return "", ""
+        raw_email, _is_read = _parse_imap_fetch_payload(fetch_data)
+        if not raw_email:
+            return "", ""
+        msg = email.message_from_bytes(raw_email)
+        return _extract_message_content(msg)
     finally:
         try:
             client.logout()
@@ -1029,20 +1136,24 @@ def _open_imap_client_with_retry(max_attempts: int = 2, delay_seconds: float = 0
 
 def _resolve_imap_mailbox(client: imaplib.IMAP4_SSL, mailbox: str) -> str:
     wanted = (mailbox or "inbox").strip().lower()
-    candidates = ["INBOX"] if wanted != "sent" else _imap_sent_folder_candidates()
+    if wanted != "sent":
+        if _try_select_imap_folder(client, "INBOX"):
+            return "INBOX"
+        raise HTTPException(status_code=503, detail="INBOX konnte nicht geöffnet werden.")
+
+    account_id = get_current_account_id() or ""
+    remembered = _safe_imap_folder_name(_IMAP_SENT_FOLDER_CACHE.get(account_id) or "") or _stored_imap_sent_folder()
+    listed = _imap_list_sent_folder(client)
+    candidates: list[str] = []
+    for name in (remembered, listed, *_imap_sent_folder_candidates()):
+        cleaned = _safe_imap_folder_name(name)
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
     for folder_name in candidates:
-        try:
-            status, _ = client.select(folder_name, readonly=True)
-            if status == "OK":
-                return folder_name
-            status, _ = client.select(f'"{folder_name}"', readonly=True)
-            if status == "OK":
-                return folder_name
-        except Exception:
-            continue
-    if wanted == "sent":
-        raise HTTPException(status_code=503, detail="Gesendet-Ordner konnte nicht geöffnet werden.")
-    raise HTTPException(status_code=503, detail="INBOX konnte nicht geöffnet werden.")
+        if _try_select_imap_folder(client, folder_name):
+            _remember_imap_sent_folder(folder_name)
+            return folder_name
+    raise HTTPException(status_code=503, detail="Gesendet-Ordner konnte nicht geöffnet werden.")
 
 
 def _build_smtp_client() -> smtplib.SMTP:
@@ -1457,20 +1568,7 @@ async def get_inbox(limit: int = 25, offset: int = 0, mailbox: str = Query("inbo
         items: list[InboxMessageItem] = []
         for uid_bytes in selected_uids:
             uid = uid_bytes.decode("utf-8", errors="replace")
-            fetch_status, fetch_data = client.uid("FETCH", uid, "(FLAGS RFC822)")
-            if fetch_status != "OK" or not fetch_data:
-                continue
-
-            raw_email = None
-            is_read = False
-            for part in fetch_data:
-                if isinstance(part, tuple) and len(part) > 1:
-                    if isinstance(part[0], bytes):
-                        head_blob = part[0]
-                        if b"FLAGS" in head_blob and b"\\Seen" in head_blob:
-                            is_read = True
-                    raw_email = part[1]
-                    break
+            raw_email, is_read = _fetch_imap_list_headers(client, uid)
             if not raw_email:
                 continue
 
@@ -1483,8 +1581,6 @@ async def get_inbox(limit: int = 25, offset: int = 0, mailbox: str = Query("inbo
                 from_name, from_email = _extract_email_parts(msg.get("From"))
             message_id = (msg.get("Message-ID") or "").strip() or None
             received_at = (msg.get("Date") or "").strip() or None
-            body_text = _extract_text_from_message(msg)
-            preview = _normalize_preview(body_text) if body_text else None
 
             items.append(
                 InboxMessageItem(
@@ -1494,7 +1590,7 @@ async def get_inbox(limit: int = 25, offset: int = 0, mailbox: str = Query("inbo
                     fromName=from_name,
                     fromEmail=from_email,
                     receivedAt=received_at,
-                    preview=preview,
+                    preview=None,
                     isRead=is_read,
                 )
             )

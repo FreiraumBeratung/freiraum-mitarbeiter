@@ -181,6 +181,8 @@ export default function MobileMailShell() {
   const inboxReloadQueuedRef = useRef(false);
   const loadInboxRef = useRef<(options?: { silent?: boolean; append?: boolean }) => Promise<void>>(async () => {});
   const itemsRef = useRef<InboxItem[]>([]);
+  const mailboxModeRef = useRef(mailboxMode);
+  mailboxModeRef.current = mailboxMode;
   const mailboxInitRef = useRef(true);
   const detailOpenRef = useRef(false);
   const sendBannerTimerRef = useRef<number | null>(null);
@@ -201,10 +203,14 @@ export default function MobileMailShell() {
   }, [items, query]);
 
   const loadInbox = useCallback(async (options?: { silent?: boolean; append?: boolean }) => {
-    if (inboxLoadInFlightRef.current) return;
+    if (inboxLoadInFlightRef.current) {
+      inboxReloadQueuedRef.current = true;
+      return;
+    }
     inboxLoadInFlightRef.current = true;
     const silent = options?.silent === true;
     const append = options?.append === true;
+    const requestedMailbox = mailboxMode;
     const hasExistingItems = itemsRef.current.length > 0;
     if (append) {
       setLoadingMore(true);
@@ -217,7 +223,7 @@ export default function MobileMailShell() {
       const limit = append
         ? INBOX_PAGE_SIZE
         : Math.min(120, Math.max(INBOX_PAGE_SIZE, itemsRef.current.length || INBOX_PAGE_SIZE));
-      const inboxUrl = `${backendBase()}/api/mail/inbox?limit=${limit}&offset=${offset}&mailbox=${mailboxMode}`;
+      const inboxUrl = `${backendBase()}/api/mail/inbox?limit=${limit}&offset=${offset}&mailbox=${requestedMailbox}`;
       let res = await fetch(inboxUrl);
       if ((res.status === 401 || res.status === 503) && !append) {
         await new Promise((resolve) => setTimeout(resolve, 800));
@@ -229,6 +235,10 @@ export default function MobileMailShell() {
       }
       const data = (await res.json()) as InboxResponse;
       if (!res.ok || !data?.ok) throw new Error("inbox_pending");
+      if (mailboxModeRef.current !== requestedMailbox) {
+        inboxReloadQueuedRef.current = true;
+        return;
+      }
       const incoming = data.items || [];
       if (append) {
         const seen = new Set(itemsRef.current.map((item) => item.uid));
@@ -249,7 +259,7 @@ export default function MobileMailShell() {
       setLoadingMore(false);
       if (inboxReloadQueuedRef.current) {
         inboxReloadQueuedRef.current = false;
-        void loadInbox({ silent: true });
+        void loadInboxRef.current({ silent: itemsRef.current.length > 0 });
       }
     }
   }, [mailboxMode]);
@@ -539,6 +549,11 @@ export default function MobileMailShell() {
   }, []);
 
   useEffect(() => {
+    setItems([]);
+    setInboxTotal(0);
+    setInboxReady(false);
+    setLoading(true);
+    setError(null);
     if (mailboxInitRef.current) {
       mailboxInitRef.current = false;
       return;

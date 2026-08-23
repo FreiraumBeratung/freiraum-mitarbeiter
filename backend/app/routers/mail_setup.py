@@ -14,7 +14,7 @@ from ..services.account_session import (
     set_current_account_id,
     sign_account_session,
 )
-from ..services.mail_autodiscover import discover_mail_servers, verify_imap, verify_smtp
+from ..services.mail_autodiscover import discover_mail_servers, login_setup_hint, verify_imap, verify_smtp
 from ..services.mail_setup_store import get_mail_setup_store
 from ..services.ms_oauth import get_auth_status
 
@@ -172,8 +172,9 @@ def setup_imap(req: ImapSetupRequest, request: Request, response: Response):
                 status_code=400,
                 detail="Keine Auto-Discovery Treffer. Bitte über Erweiterte Einstellungen Host/Port manuell setzen.",
             )
-        # Keep auto-discovery snappy: first best candidates only.
-        candidates = candidates[:2]
+        # Preset/MX zuerst, dann höchstens ein paar Host-Raten.
+        has_preset = any(str(item.get("source") or "") == "known_preset" for item in candidates)
+        candidates = candidates[:4] if has_preset else candidates[:2]
 
     last_errors: list[str] = []
     started_at = time.monotonic()
@@ -261,6 +262,7 @@ def setup_imap(req: ImapSetupRequest, request: Request, response: Response):
             "message": "Auto-Setup fehlgeschlagen. Bitte Erweiterte Einstellungen verwenden.",
             "requiresAdvanced": True,
             "errors": last_errors[-4:],
+            "hint": login_setup_hint(email, last_errors),
         },
     )
 
