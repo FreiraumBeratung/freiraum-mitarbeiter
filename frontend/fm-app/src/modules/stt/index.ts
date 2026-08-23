@@ -64,10 +64,18 @@ export function requestRecorderStop(): void {
   }
 }
 
-export function releaseMicSession(): void {
-  requestRecorderStop();
+function stopTracks(media: MediaStream | null | undefined): void {
   try {
-    if (activeMicStream && activeMicStream !== getWarmMicStream()) {
+    media?.getTracks().forEach((track) => track.stop());
+  } catch {
+    /* ignore */
+  }
+}
+
+function endMicCapture(media?: MediaStream | null): void {
+  stopTracks(media);
+  try {
+    if (activeMicStream && activeMicStream !== media) {
       activeMicStream.getTracks().forEach((track) => track.stop());
     }
   } catch {
@@ -76,6 +84,11 @@ export function releaseMicSession(): void {
   activeRecorder = null;
   activeMicStream = null;
   releaseWarmMic();
+}
+
+export function releaseMicSession(): void {
+  requestRecorderStop();
+  endMicCapture(activeMicStream);
 }
 
 export async function recordAndTranscribe(
@@ -215,21 +228,16 @@ export async function recordAndTranscribe(
 
   if (signal?.aborted) return null;
 
-  const stopTracks = (media: MediaStream | null | undefined) => {
-    try {
-      media?.getTracks().forEach((track) => track.stop());
-    } catch {
-      /* ignore */
-    }
-  };
-
   // Prefer backend STT first
   let usedBackendRecorder = false;
   try {
     const sttStartedAtMs = nowMs();
     const stream = getWarmMicStream() ?? (await warmMic());
     const usedWarmStream = stream === getWarmMicStream();
-    if (signal?.aborted) return null;
+    if (signal?.aborted) {
+      endMicCapture(stream);
+      return null;
+    }
     if (!stream) {
       throw new Error("microphone-unavailable");
     }
@@ -245,7 +253,7 @@ export async function recordAndTranscribe(
       (window as any).__fm_mic_granted = true;
     }
     if (signal?.aborted) {
-      activeMicStream = null;
+      endMicCapture(stream);
       return null;
     }
     const mimeType = pickRecorderMime();
@@ -253,17 +261,13 @@ export async function recordAndTranscribe(
     activeRecorder = recorder;
     const chunks: BlobPart[] = [];
     const blobType = mimeType || "audio/webm";
-    const keepWarmStream = stream === getWarmMicStream();
     const done = new Promise<Blob>((resolve) => {
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) chunks.push(e.data);
       };
       recorder.onstop = () => {
-        if (!keepWarmStream) {
-          stopTracks(stream);
-        }
-        activeRecorder = null;
-        activeMicStream = null;
+        // Tracks erst hier stoppen – vorher ist die iOS-Aufnahme oft leer.
+        endMicCapture(stream);
         resolve(new Blob(chunks, { type: blobType }));
       };
     });
@@ -276,7 +280,7 @@ export async function recordAndTranscribe(
     };
     signal?.addEventListener("abort", abortHandler, { once: true });
     if (signal?.aborted) {
-      if (!keepWarmStream) stopTracks(stream);
+      endMicCapture(stream);
       signal.removeEventListener("abort", abortHandler);
       return null;
     }
@@ -295,9 +299,7 @@ export async function recordAndTranscribe(
       /* ignore */
     }
     const audioBlob = await done;
-    if (!keepWarmStream) stopTracks(stream);
-    activeRecorder = null;
-    activeMicStream = null;
+    endMicCapture(stream);
     signal?.removeEventListener("abort", abortHandler);
     const recordFinishedAtMs = nowMs();
     const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
@@ -385,6 +387,7 @@ export async function recordAndTranscribe(
     }
     return null;
   } catch (err) {
+    endMicCapture(activeMicStream);
     if (usedBackendRecorder || (typeof window !== "undefined" && (window as any).__fm_prefer_backend_stt)) {
       (window as any).__fm_stt_last_error =
         err instanceof Error ? err.message : "microphone-unavailable";
@@ -441,6 +444,27 @@ export async function recordAndTranscribe(
       }
       signal?.removeEventListener?.("abort", abortHandler);
     }, maxMs + 1500);
+  });
+}
+
+function releaseIdleMic(): void {
+  if (activeRecorder && activeRecorder.state !== "inactive") return;
+  if (!activeMicStream && !getWarmMicStream()) return;
+  endMicCapture(activeMicStream);
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    releaseMicSession();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) releaseIdleMic();
+  });
+  document.addEventListener("voice-state", (event) => {
+    const next = (event as CustomEvent<{ state?: string }>).detail?.state;
+    if (next === "idle" || next === "error" || next === "done") {
+      releaseIdleMic();
+    }
   });
 }
 

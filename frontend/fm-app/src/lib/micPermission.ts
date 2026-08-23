@@ -80,7 +80,6 @@ export async function ensureMicPermission(): Promise<void> {
     if (perm.state === "denied") return;
     if (perm.state === "granted") {
       markGranted();
-      void warmMic();
       return;
     }
   } catch {
@@ -88,9 +87,10 @@ export async function ensureMicPermission(): Promise<void> {
   }
 
   if (getWarmMicStream() || w.__fm_mic_granted === true) {
-    void warmMic();
+    markGranted();
     return;
   }
 
-  await warmMic();
+  const stream = await warmMic();
+  if (stream) releaseWarmMic();
 }
