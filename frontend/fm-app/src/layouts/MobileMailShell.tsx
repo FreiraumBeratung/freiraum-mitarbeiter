@@ -862,7 +862,13 @@ export default function MobileMailShell() {
                 textOverflow: "ellipsis",
               }}
             >
-              {headerTitle}
+              {detailOpen ? (
+                <>
+                  Antwort an <span style={{ color: "rgba(255,166,77,0.98)" }}>{replyTarget}</span>
+                </>
+              ) : (
+                headerTitle
+              )}
             </div>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 3 }}>{voiceHint}</div>
             {showAccountEmail ? (
@@ -1053,29 +1059,67 @@ export default function MobileMailShell() {
             {detailData ? (
               <div
                 style={{
-                  borderRadius: 16,
-                  background: "rgba(255,255,255,0.05)",
-                  padding: draftHasContent ? 10 : 14,
-                  marginBottom: 12,
-                  maxHeight: draftHasContent ? 92 : undefined,
-                  overflow: draftHasContent ? "hidden" : "visible",
+                  borderRadius: 18,
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  background: "rgba(255,255,255,0.045)",
+                  padding: 14,
+                  marginBottom: 4,
+                  maxHeight: draftHasContent ? "34vh" : "58vh",
+                  overflow: "auto",
                 }}
               >
-                <div style={{ fontSize: 13, color: "rgba(255,255,255,0.72)" }}>
-                  {detailData.fromName || detailData.fromEmail || "Unbekannt"}
-                </div>
-                {detailData.receivedAt ? (
-                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 2 }}>
-                    {fmtDate(detailData.receivedAt)}
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 38,
+                      height: 38,
+                      borderRadius: 999,
+                      flexShrink: 0,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 15,
+                      fontWeight: 700,
+                      color: "#fff",
+                      background: senderAvatarColor(detailData.fromEmail || detailData.fromName || detailData.uid),
+                    }}
+                  >
+                    {senderInitial(detailData.fromName, detailData.fromEmail)}
+                  </span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div
+                          style={{
+                            fontSize: 15,
+                            fontWeight: 700,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {detailData.fromName || detailData.fromEmail || "Unbekannt"}
+                        </div>
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.48)", marginTop: 2 }}>
+                          {mailboxMode === "sent" ? "Gesendet" : "an: mich"}
+                        </div>
+                      </div>
+                      {detailData.receivedAt ? (
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", flexShrink: 0 }}>
+                          {fmtDate(detailData.receivedAt)}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                ) : null}
-                <div style={{ fontSize: 15, fontWeight: 650, marginTop: 8 }}>{stripHtml(detailData.subject)}</div>
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 650, marginTop: 12 }}>{stripHtml(detailData.subject)}</div>
                 <div
                   style={{
                     fontSize: 14,
                     lineHeight: 1.45,
                     color: "rgba(255,255,255,0.86)",
-                    marginTop: 12,
+                    marginTop: 10,
                     whiteSpace: "pre-wrap",
                   }}
                 >
@@ -1272,7 +1316,7 @@ export default function MobileMailShell() {
         }
         aria-hidden={!detailOpen && !inboxHiddenForCompose}
       >
-        <MailComposeForm compact />
+        <MailComposeForm compact mode={detailOpen ? "reply" : "compose"} />
       </div>
 
       <div

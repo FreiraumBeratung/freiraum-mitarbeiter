@@ -40,7 +40,13 @@ function isEchoOfLastSent(text: string): boolean {
   return Boolean(last && next && last === next);
 }
 
-export default function MailComposeForm({ compact = false }: { compact?: boolean }) {
+export default function MailComposeForm({
+  compact = false,
+  mode = "compose",
+}: {
+  compact?: boolean;
+  mode?: "compose" | "reply";
+}) {
   const [sp] = useSearchParams();
   const [to, setTo] = useState(sp.get("to") || "");
   const [subject, setSubject] = useState(sp.get("subject") || "");
@@ -210,17 +216,21 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
     };
   }, [handlePreview, handleSendNow, handleResetDraft]);
 
+  const readyToSend = Boolean(to.trim() && body.trim());
+
   return (
     <div
       style={{
         width: "100%",
         maxWidth: "100%",
         borderRadius: 18,
-        border: compact ? "1px solid rgba(255,166,77,0.18)" : "1px solid rgba(255,255,255,0.12)",
+        border: compact ? "1px solid rgba(255,166,77,0.28)" : "1px solid rgba(255,255,255,0.12)",
         background: compact
           ? "linear-gradient(180deg, rgba(28,20,14,0.95), rgba(12,10,8,0.95))"
           : "linear-gradient(180deg, rgba(17,20,25,0.95), rgba(9,12,16,0.95))",
-        boxShadow: "0 16px 30px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.06)",
+        boxShadow: compact
+          ? "0 16px 30px rgba(0,0,0,0.42), 0 0 24px rgba(255,115,0,0.08), inset 0 1px 0 rgba(255,255,255,0.06)"
+          : "0 16px 30px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.06)",
         padding: 14,
         display: "grid",
         gap: 8,
@@ -228,8 +238,26 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
       }}
     >
       {compact ? (
-        <div style={{ fontSize: 15, fontWeight: 700, color: "rgba(255,255,255,0.95)", lineHeight: 1.1 }}>
-          Entwurf
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "rgba(255,255,255,0.95)", lineHeight: 1.1 }}>
+            {mode === "reply" ? "Entwurf deiner Antwort" : "Neue Mail"}
+          </div>
+          {readyToSend ? (
+            <span
+              style={{
+                flexShrink: 0,
+                borderRadius: 999,
+                border: "1px solid rgba(120, 210, 160, 0.35)",
+                background: "rgba(46, 140, 90, 0.22)",
+                color: "rgba(210, 255, 226, 0.96)",
+                fontSize: 10,
+                fontWeight: 700,
+                padding: "4px 8px",
+              }}
+            >
+              Bereit zum Senden
+            </span>
+          ) : null}
         </div>
       ) : (
         <>
@@ -282,9 +310,9 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
         onChange={(e) => setBody(e.target.value)}
         style={{
           width: "100%",
-          height: compact ? 88 : 112,
+          height: compact ? 120 : 112,
           borderRadius: 12,
-          border: "1px solid rgba(255,255,255,0.12)",
+          border: compact ? "1px solid rgba(255,166,77,0.62)" : "1px solid rgba(255,255,255,0.12)",
           background: "rgba(0,0,0,0.32)",
           color: "#fff",
           padding: 12,
@@ -292,11 +320,13 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
           fontSize: 16,
           resize: "none",
           boxSizing: "border-box",
+          boxShadow: compact ? "inset 0 0 0 1px rgba(255,115,0,0.08)" : "none",
         }}
       />
 
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
         <div style={{ display: "flex", gap: 8 }}>
+          {compact ? null : (
           <button
             onClick={handlePreview}
             style={{
@@ -311,6 +341,7 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
           >
             Vorschau
           </button>
+          )}
           <button
             onClick={handleResetDraft}
             style={{
