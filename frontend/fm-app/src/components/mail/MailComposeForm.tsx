@@ -27,7 +27,16 @@ function notifyMobileComposeOpen(value: string) {
   if (typeof window === "undefined") return;
   if (!window.__fm_mobile_shell) return;
   if (!String(value || "").trim()) return;
+  const ignoreUntil = Number((window as any).__fm_ignore_compose_open_until || 0);
+  if (ignoreUntil && Date.now() < ignoreUntil) return;
   window.dispatchEvent(new CustomEvent("fm-mobile-compose-open"));
+}
+
+function isEchoOfLastSent(text: string): boolean {
+  if (typeof window === "undefined") return false;
+  const last = String((window as any).__fm_last_sent_body || "").trim().toLowerCase();
+  const next = String(text || "").trim().toLowerCase();
+  return Boolean(last && next && last === next);
 }
 
 export default function MailComposeForm({ compact = false }: { compact?: boolean }) {
@@ -101,6 +110,8 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
       w.__fm_subject_locked = false;
       w.__fm_subject_locked_value = null;
       w.__fm_subject_lock_context_uid = null;
+      (w as any).__fm_last_sent_body = safeBody.toLowerCase();
+      (w as any).__fm_ignore_compose_open_until = Date.now() + 1600;
       bodyRef.current = "";
       setBody("");
       w.__fm_pending_body_replace = null;
@@ -148,6 +159,7 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
     const w = window as Window;
 
     w.__fm_set_mail_body = (text: string) => {
+      if (isEchoOfLastSent(text)) return;
       bodyRef.current = text;
       setBody(text);
       notifyMobileComposeOpen(text);

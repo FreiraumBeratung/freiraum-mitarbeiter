@@ -2617,6 +2617,28 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             console.log('[wizard4][safety-pronoun] AutoSend cancelled (final check): pronoun detected:', finalToName);
           }
         }
+        if (
+          sendMode !== "sendNow" &&
+          isMobileVoiceShell() &&
+          isImmediateSendMode() &&
+          emailIntent?.meta?.cancelled !== true &&
+          forcePreviewReasonText !== "missing_body" &&
+          forcePreviewReasonText !== "cancel_phrase"
+        ) {
+          const openCtx = getSelectedMailContext();
+          const openEmail = String(openCtx?.fromEmail || "").trim().toLowerCase();
+          const draftTo = String((wizard4Draft as any)?.to || emailIntent?.to || "").trim().toLowerCase();
+          const targetsOpenMail =
+            !!openCtx?.uid &&
+            !!openEmail &&
+            (!draftTo || !draftTo.includes("@") || draftTo === openEmail);
+          const hasBody =
+            String((wizard4Draft as any)?.body || emailIntent?.bodyHint || lastTranscript || "").trim().length >= 2;
+          if (targetsOpenMail && hasBody) {
+            sendMode = "sendNow";
+            console.log("[autosend] sendMode = sendNow (Sofort + offene Mail, final)");
+          }
+        }
         if (sendMode === "sendNow") {
           const truncationCandidate =
             String((intent as any)?.bodyHint ?? "").trim() ||

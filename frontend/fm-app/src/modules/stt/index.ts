@@ -90,6 +90,11 @@ function stopTracks(media: MediaStream | null | undefined): void {
 }
 
 function endMicCapture(media?: MediaStream | null): void {
+  try {
+    if (activeRecorder?.stream) stopTracks(activeRecorder.stream);
+  } catch {
+    /* ignore */
+  }
   stopTracks(media);
   if (activeMicStream && activeMicStream !== media) {
     stopTracks(activeMicStream);

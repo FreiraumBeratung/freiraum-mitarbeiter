@@ -264,6 +264,13 @@ export default function MobileMailShell() {
       });
       setDetailLoading(true);
       setDetailError(null);
+      try {
+        window.__fm_set_mail_body?.("");
+        window.__fm_set_mail_to?.("");
+        window.__fm_set_mail_subject?.("");
+      } catch {
+        /* ignore */
+      }
       unlockTtsPlayback();
       try {
         const res = await fetch(
@@ -547,6 +554,8 @@ export default function MobileMailShell() {
 
   useEffect(() => {
     const onComposeOpen = () => {
+      const ignoreUntil = Number((window as any).__fm_ignore_compose_open_until || 0);
+      if (ignoreUntil && Date.now() < ignoreUntil) return;
       setDraftHasContent(true);
       if (detailOpenRef.current) return;
       setComposeSheetOpen(true);
@@ -921,7 +930,6 @@ export default function MobileMailShell() {
                   </div>
                 ) : null}
                 <div style={{ fontSize: 15, fontWeight: 650, marginTop: 8 }}>{stripHtml(detailData.subject)}</div>
-                {draftHasContent ? null : (
                 <div
                   style={{
                     fontSize: 14,
@@ -933,7 +941,6 @@ export default function MobileMailShell() {
                 >
                   {detailData.bodyText || stripHtml(detailData.bodyHtml) || "(kein Text)"}
                 </div>
-                )}
               </div>
             ) : null}
           </div>

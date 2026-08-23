@@ -1,5 +1,6 @@
 let warmStream: MediaStream | null = null;
 let warmPromise: Promise<MediaStream | null> | null = null;
+let micGeneration = 0;
 
 function markGranted(): void {
   if (typeof window !== "undefined") {
@@ -64,9 +65,14 @@ export async function warmMic(): Promise<MediaStream | null> {
   if (existing) return existing;
   if (warmPromise) return warmPromise;
 
+  const generation = micGeneration;
   warmPromise = (async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (generation !== micGeneration) {
+        hardStopStream(stream);
+        return null;
+      }
       warmStream = stream;
       markGranted();
       void waitTrackUnmuted(stream);
@@ -74,7 +80,7 @@ export async function warmMic(): Promise<MediaStream | null> {
     } catch {
       return null;
     } finally {
-      warmPromise = null;
+      if (warmPromise) warmPromise = null;
     }
   })();
 
@@ -87,6 +93,7 @@ export async function acquireMicStream(): Promise<MediaStream | null> {
 }
 
 export function releaseWarmMic(): void {
+  micGeneration += 1;
   warmPromise = null;
   if (!warmStream) return;
   hardStopStream(warmStream);
