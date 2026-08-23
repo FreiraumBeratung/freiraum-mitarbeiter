@@ -1,5 +1,5 @@
 import { backendBase } from "../../lib/backendBase";
-import { acquireMicStream, releaseWarmMic, warmMic } from "../../lib/micPermission";
+import { acquireMicStream, releaseWarmMic } from "../../lib/micPermission";
 
 let cachedLocalSttHealthAtMs = 0;
 let cachedLocalSttHealthOk = false;
@@ -317,7 +317,6 @@ export async function recordAndTranscribe(
     }
     const audioBlob = await done;
     endMicCapture(stream);
-    void warmMic();
     signal?.removeEventListener("abort", abortHandler);
     const recordFinishedAtMs = nowMs();
     const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
