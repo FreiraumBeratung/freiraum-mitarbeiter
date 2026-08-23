@@ -816,7 +816,7 @@ export default function MobileMailShell() {
       <header
         style={{
           flexShrink: 0,
-          padding: "12px 16px 10px",
+          padding: "calc(12px + env(safe-area-inset-top, 0px)) 16px 10px",
           borderBottom: "1px solid rgba(255,255,255,0.08)",
         }}
       >
@@ -947,18 +947,22 @@ export default function MobileMailShell() {
             </div>
             <div style={statGridStyle}>
               <button type="button" onClick={toggleUnreadFilter} style={statCardStyle(unreadOnly && mailboxMode === "inbox", true)}>
+                <StatGlyph kind="unread" />
                 <span style={statValueStyle}>{heldInboxUnread}</span>
                 <span style={statLabelStyle}>Ungelesen</span>
               </button>
               <div style={statCardStyle(false)}>
+                <StatGlyph kind="sent" />
                 <span style={statValueStyle}>{sentFolderTotal}</span>
                 <span style={statLabelStyle}>Gesendet</span>
               </div>
               <div style={statCardStyle(false)}>
+                <StatGlyph kind="today" />
                 <span style={statValueStyle}>{dailyStats.sentToday}</span>
                 <span style={statLabelStyle}>Heute</span>
               </div>
               <div style={statCardStyle(false)}>
+                <StatGlyph kind="done" />
                 <span style={{ ...statValueStyle, fontSize: 13 }}>{answeredOfOpen}</span>
                 <span style={statLabelStyle}>Beantwortet</span>
               </div>
@@ -1041,8 +1045,9 @@ export default function MobileMailShell() {
 
       <div
         style={{
-          flex: inboxHiddenForCompose ? 0 : 1,
+          flex: inboxHiddenForCompose ? 0 : detailOpen ? "0 1 auto" : 1,
           minHeight: inboxHiddenForCompose ? 0 : 0,
+          maxHeight: detailOpen ? "36vh" : undefined,
           overflowY: inboxHiddenForCompose ? "hidden" : "auto",
           padding: inboxHiddenForCompose ? 0 : "10px 12px 8px",
           display: inboxHiddenForCompose ? "none" : "block",
@@ -1064,7 +1069,7 @@ export default function MobileMailShell() {
                   background: "rgba(255,255,255,0.045)",
                   padding: 14,
                   marginBottom: 4,
-                  maxHeight: draftHasContent ? "34vh" : "58vh",
+                  maxHeight: "100%",
                   overflow: "auto",
                 }}
               >
@@ -1301,7 +1306,7 @@ export default function MobileMailShell() {
       <div
         style={
           detailOpen
-            ? { flexShrink: 0, maxHeight: "42%", overflowY: "auto", padding: "0 12px 8px" }
+            ? { flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 8px" }
             : inboxHiddenForCompose
               ? {
                   flex: 1,
@@ -1329,6 +1334,54 @@ export default function MobileMailShell() {
         <MobileVoiceButton />
       </div>
     </div>
+  );
+}
+
+function StatGlyph({ kind }: { kind: "unread" | "sent" | "today" | "done" }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      style={{ flexShrink: 0 }}
+    >
+      {kind === "unread" ? (
+        <path
+          fill="none"
+          stroke="rgba(255,166,77,0.95)"
+          strokeWidth="2"
+          strokeLinejoin="round"
+          d="M3.5 7.5h17v11h-17zM3.5 8.2l8.5 6.2 8.5-6.2"
+        />
+      ) : null}
+      {kind === "sent" ? (
+        <path
+          fill="rgba(255,166,77,0.95)"
+          d="M3.2 11.2l16.8-7.4-6.2 16.6-2.6-6.4-8-2.8z"
+        />
+      ) : null}
+      {kind === "today" ? (
+        <path
+          fill="none"
+          stroke="rgba(255,166,77,0.95)"
+          strokeWidth="2"
+          strokeLinejoin="round"
+          d="M6 5.5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2zM8 4v3M16 4v3M4 10h16"
+        />
+      ) : null}
+      {kind === "done" ? (
+        <path
+          fill="none"
+          stroke="rgba(120,210,160,0.95)"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M5 12.5l5 5 9-10"
+        />
+      ) : null}
+    </svg>
   );
 }
 
@@ -1401,7 +1454,7 @@ function statCardStyle(active: boolean, clickable = false): React.CSSProperties 
     background: active ? "rgba(255,115,0,0.16)" : "rgba(255,255,255,0.045)",
     boxShadow: active ? "0 0 16px rgba(255,115,0,0.14)" : "none",
     padding: "8px 6px 7px",
-    minHeight: 54,
+    minHeight: 58,
     display: "flex",
     flexDirection: "column",
     alignItems: "flex-start",
