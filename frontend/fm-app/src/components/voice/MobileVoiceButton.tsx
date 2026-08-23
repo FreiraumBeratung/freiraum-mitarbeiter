@@ -92,11 +92,11 @@ export default function MobileVoiceButton() {
   return (
     <div
       style={{
-        display: "flex",
-        flexDirection: "column",
+        display: "grid",
+        gridTemplateColumns: "1fr auto 1fr",
         alignItems: "center",
         gap: 8,
-        padding: "10px 16px calc(88px + env(safe-area-inset-bottom, 0px))",
+        padding: "10px 16px calc(12px + env(safe-area-inset-bottom, 0px))",
         WebkitUserSelect: "none",
         userSelect: "none",
       }}
@@ -106,18 +106,26 @@ export default function MobileVoiceButton() {
           fontSize: 12,
           color: "rgba(255,255,255,0.62)",
           minHeight: 16,
-          textAlign: "center",
+          textAlign: "left",
           WebkitUserSelect: "none",
           userSelect: "none",
         }}
       >
-        {statusLabel(state, insecureUrl)}
+        {listening
+          ? "Hört zu…"
+          : state === "idle" && !insecureUrl
+            ? "Antippen, sprechen, fertig."
+            : statusLabel(state, insecureUrl)}
       </div>
       {listening ? (
         <style>
           {`@keyframes fm-mic-pulse {
             0%, 100% { box-shadow: 0 0 0 0 rgba(255,115,0,.45), 0 0 26px rgba(255,115,0,.7); }
             50% { box-shadow: 0 0 0 12px rgba(255,115,0,.12), 0 0 38px rgba(255,140,0,.9); }
+          }
+          @keyframes fm-wave {
+            0%, 100% { transform: scaleY(0.35); }
+            50% { transform: scaleY(1); }
           }`}
         </style>
       ) : null}
@@ -155,6 +163,31 @@ export default function MobileVoiceButton() {
       >
         <MicIcon />
       </button>
+      <div
+        aria-hidden="true"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 3,
+          height: 28,
+          opacity: listening ? 1 : 0,
+        }}
+      >
+        {[0, 1, 2, 3, 4, 5, 6].map((index) => (
+          <span
+            key={index}
+            style={{
+              width: 3,
+              height: 22,
+              borderRadius: 99,
+              background: "rgba(255,140,40,0.95)",
+              transformOrigin: "center",
+              animation: listening ? `fm-wave 0.9s ease-in-out ${index * 0.08}s infinite` : undefined,
+            }}
+          />
+        ))}
+      </div>
     </div>
   );
 }

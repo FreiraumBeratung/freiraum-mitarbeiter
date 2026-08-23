@@ -15,6 +15,12 @@ import {
 } from "../modules/mail/selectedMailContext";
 import { type VoiceState } from "../modules/voice";
 import { getSendReviewMode, setSendReviewMode, type SendReviewMode } from "../modules/voice/send_review_mode";
+import {
+  bumpDailyMailStats,
+  readDailyMailStats,
+  senderAvatarColor,
+  senderInitial,
+} from "../lib/fmInboxChrome";
 import { fmTitleFont, fmWarmPage } from "../lib/fmVisual";
 
 type InboxItem = {
@@ -98,6 +104,16 @@ function cut(input: string, maxLen: number): string {
   return `${input.slice(0, maxLen - 1).trimEnd()}…`;
 }
 
+function fmtListTime(value?: string | null): string {
+  if (!value) return "";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "";
+  if (startOfLocalDay(new Date()) === startOfLocalDay(dt)) {
+    return dt.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  }
+  return dt.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+}
+
 function fmtDate(value?: string | null): string {
   if (!value) return "";
   const dt = new Date(value);
@@ -165,6 +181,11 @@ export default function MobileMailShell() {
   const [inboxTotal, setInboxTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [draftHasContent, setDraftHasContent] = useState(false);
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const [dailyStats, setDailyStats] = useState(() => readDailyMailStats());
+  const [sentFolderTotal, setSentFolderTotal] = useState(0);
+  const [heldInboxUnread, setHeldInboxUnread] = useState(0);
+  const [heldInboxTotal, setHeldInboxTotal] = useState(0);
   const [openedUids, setOpenedUids] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set();
     try {
@@ -196,11 +217,15 @@ export default function MobileMailShell() {
       preview: item.preview ? cut(stripHtml(item.preview), 88) : null,
     }));
     const q = query.trim().toLowerCase();
-    if (!q) return normalized;
-    return normalized.filter((item) =>
+    let next = normalized;
+    if (unreadOnly && mailboxMode === "inbox") {
+      next = next.filter((item) => item.isRead === false && !openedUids.has(item.uid));
+    }
+    if (!q) return next;
+    return next.filter((item) =>
       `${item.subject} ${item.fromName || ""} ${item.fromEmail || ""} ${item.preview || ""}`.toLowerCase().includes(q)
     );
-  }, [items, query]);
+  }, [items, query, unreadOnly, mailboxMode, openedUids]);
 
   const loadInbox = useCallback(async (options?: { silent?: boolean; append?: boolean }) => {
     if (inboxLoadInFlightRef.current) {
@@ -531,6 +556,10 @@ export default function MobileMailShell() {
       }
       releaseMicSession();
       void voice.stop();
+      setDailyStats(bumpDailyMailStats("sent"));
+      if (detailOpenRef.current) {
+        setDailyStats(bumpDailyMailStats("replied"));
+      }
       window.setTimeout(() => {
         if (inboxLoadInFlightRef.current) {
           inboxReloadQueuedRef.current = true;
@@ -554,12 +583,55 @@ export default function MobileMailShell() {
     setInboxReady(false);
     setLoading(true);
     setError(null);
+    if (mailboxMode !== "inbox") {
+      setUnreadOnly(false);
+    }
     if (mailboxInitRef.current) {
       mailboxInitRef.current = false;
       return;
     }
     closeDetail();
   }, [mailboxMode, closeDetail]);
+
+  useEffect(() => {
+    if (mailboxMode !== "inbox") return;
+    setHeldInboxUnread(items.filter((item) => item.isRead === false && !openedUids.has(item.uid)).length);
+    if (inboxTotal > 0) setHeldInboxTotal(inboxTotal);
+  }, [mailboxMode, items, openedUids, inboxTotal]);
+
+  useEffect(() => {
+    if (mailboxMode === "sent" && inboxTotal > 0) {
+      setSentFolderTotal(inboxTotal);
+    }
+  }, [mailboxMode, inboxTotal]);
+
+  useEffect(() => {
+    const syncDay = () => setDailyStats(readDailyMailStats());
+    const id = window.setInterval(syncDay, 60_000);
+    document.addEventListener("visibilitychange", syncDay);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", syncDay);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadSentTotal = async () => {
+      try {
+        const res = await fetch(`${backendBase()}/api/mail/inbox?limit=1&offset=0&mailbox=sent`);
+        const data = (await res.json()) as InboxResponse;
+        if (cancelled || !res.ok || !data?.ok || typeof data.total !== "number") return;
+        setSentFolderTotal(Math.max(0, data.total));
+      } catch {
+        // Zahl bleibt 0, bis Gesendet einmal geladen wurde.
+      }
+    };
+    void loadSentTotal();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const onChanged = (event: Event) => {
@@ -636,10 +708,17 @@ export default function MobileMailShell() {
         : "Posteingang";
   const showAccountEmail = Boolean(msAuth?.accountEmail) && !detailOpen && !inboxHiddenForCompose;
   const inboxHasMore = !detailOpen && !inboxHiddenForCompose && items.length > 0 && items.length < inboxTotal;
-  const unreadCount = useMemo(
-    () => visibleItems.filter((item) => item.isRead === false && !openedUids.has(item.uid)).length,
-    [visibleItems, openedUids]
-  );
+  const unreadCount = heldInboxUnread;
+  const answeredOfOpen = `${dailyStats.repliedToday} von ${heldInboxUnread + dailyStats.repliedToday}`;
+
+  const toggleUnreadFilter = () => {
+    if (mailboxMode !== "inbox") {
+      setMailboxMode("inbox");
+      setUnreadOnly(true);
+      return;
+    }
+    setUnreadOnly((prev) => !prev);
+  };
 
   const voiceHint =
     voiceState === "listening"
@@ -659,6 +738,47 @@ export default function MobileMailShell() {
               : sendReviewMode === "sofort"
                 ? "Neue Mail per Sprache – Sofort gilt bei geöffneter Mail"
                 : "Neue Mail per Sprache";
+
+  const reviewModeToggle = (
+    <div
+      role="group"
+      aria-label="Senden prüfen oder sofort"
+      style={{
+        flexShrink: 0,
+        display: "flex",
+        borderRadius: 999,
+        border: "1px solid rgba(255,166,77,0.28)",
+        overflow: "hidden",
+        background: "rgba(255,115,0,0.08)",
+      }}
+    >
+      {(["pruefen", "sofort"] as SendReviewMode[]).map((mode) => {
+        const active = sendReviewMode === mode;
+        return (
+          <button
+            key={mode}
+            type="button"
+            aria-pressed={active}
+            onClick={() => {
+              setSendReviewModeState(mode);
+              setSendReviewMode(mode);
+            }}
+            style={{
+              height: 32,
+              padding: "0 10px",
+              border: "none",
+              background: active ? "rgba(255,115,0,0.86)" : "transparent",
+              color: active ? "#111" : "rgba(255,214,170,0.88)",
+              fontSize: 11,
+              fontWeight: active ? 700 : 500,
+            }}
+          >
+            {mode === "pruefen" ? "Prüfen" : "Sofort"}
+          </button>
+        );
+      })}
+    </div>
+  );
 
   return (
     <div
@@ -700,6 +820,18 @@ export default function MobileMailShell() {
           borderBottom: "1px solid rgba(255,255,255,0.08)",
         }}
       >
+        {!detailOpen && !inboxHiddenForCompose ? (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span aria-hidden="true" style={sparkStyle} />
+              <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: "0.01em", whiteSpace: "nowrap" }}>
+                <span style={{ color: "#fff" }}>Freiraum</span>{" "}
+                <span style={{ color: "rgba(255,166,77,0.98)" }}>Mitarbeiter</span>
+              </div>
+            </div>
+            {reviewModeToggle}
+          </div>
+        ) : null}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {detailOpen || inboxHiddenForCompose ? (
             <button
@@ -721,9 +853,9 @@ export default function MobileMailShell() {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div
               style={{
-                fontSize: detailOpen ? 17 : 18,
+                fontSize: detailOpen ? 17 : 26,
                 fontWeight: 700,
-                lineHeight: 1.2,
+                lineHeight: 1.15,
                 fontFamily: fmTitleFont,
                 whiteSpace: "nowrap",
                 overflow: "hidden",
@@ -732,71 +864,28 @@ export default function MobileMailShell() {
             >
               {headerTitle}
             </div>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 2 }}>{voiceHint}</div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 3 }}>{voiceHint}</div>
             {showAccountEmail ? (
               <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", marginTop: 2 }}>
                 {msAuth?.accountEmail}
               </div>
             ) : null}
           </div>
-          <div
-            role="group"
-            aria-label="Senden prüfen oder sofort"
-            style={{
-              flexShrink: 0,
-              display: "flex",
-              borderRadius: 999,
-              border: "1px solid rgba(255,166,77,0.28)",
-              overflow: "hidden",
-              background: "rgba(255,115,0,0.08)",
-            }}
-          >
-            {(["pruefen", "sofort"] as SendReviewMode[]).map((mode) => {
-              const active = sendReviewMode === mode;
-              return (
-                <button
-                  key={mode}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => {
-                    setSendReviewModeState(mode);
-                    setSendReviewMode(mode);
-                  }}
-                  style={{
-                    height: 32,
-                    padding: "0 10px",
-                    border: "none",
-                    background: active ? "rgba(255,115,0,0.86)" : "transparent",
-                    color: active ? "#111" : "rgba(255,214,170,0.88)",
-                    fontSize: 11,
-                    fontWeight: active ? 700 : 500,
-                  }}
-                >
-                  {mode === "pruefen" ? "Prüfen" : "Sofort"}
-                </button>
-              );
-            })}
-          </div>
+          {detailOpen || inboxHiddenForCompose ? reviewModeToggle : null}
         </div>
         {!detailOpen && !inboxHiddenForCompose ? (
-          <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Suche in Inbox..."
-              style={{
-                width: "100%",
-                height: 34,
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.06)",
-                color: "#fff",
-                padding: "0 12px",
-                fontSize: 13,
-                outline: "none",
-                boxSizing: "border-box",
-              }}
-            />
+          <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+            <label style={searchWrapStyle}>
+              <span aria-hidden="true" style={searchIconStyle}>
+                ⌕
+              </span>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="In Mails suchen..."
+                style={searchInputStyle}
+              />
+            </label>
             <div
               style={{
                 display: "flex",
@@ -807,6 +896,9 @@ export default function MobileMailShell() {
             >
               <button type="button" onClick={() => setMailboxMode("inbox")} style={tabStyle(mailboxMode === "inbox")}>
                 Inbox
+                {heldInboxTotal > 0 ? (
+                  <span style={{ marginLeft: 5, fontSize: 10, fontWeight: 600, opacity: 0.72 }}>{heldInboxTotal}</span>
+                ) : null}
               </button>
               <button type="button" onClick={() => setMailboxMode("sent")} style={tabStyle(mailboxMode === "sent")}>
                 Gesendet
@@ -846,6 +938,24 @@ export default function MobileMailShell() {
               >
                 Kontakte
               </button>
+            </div>
+            <div style={statGridStyle}>
+              <button type="button" onClick={toggleUnreadFilter} style={statCardStyle(unreadOnly && mailboxMode === "inbox", true)}>
+                <span style={statValueStyle}>{heldInboxUnread}</span>
+                <span style={statLabelStyle}>Ungelesen</span>
+              </button>
+              <div style={statCardStyle(false)}>
+                <span style={statValueStyle}>{sentFolderTotal}</span>
+                <span style={statLabelStyle}>Gesendet</span>
+              </div>
+              <div style={statCardStyle(false)}>
+                <span style={statValueStyle}>{dailyStats.sentToday}</span>
+                <span style={statLabelStyle}>Heute</span>
+              </div>
+              <div style={statCardStyle(false)}>
+                <span style={{ ...statValueStyle, fontSize: 13 }}>{answeredOfOpen}</span>
+                <span style={statLabelStyle}>Beantwortet</span>
+              </div>
             </div>
             {contactsOpen ? (
               <div
@@ -986,7 +1096,9 @@ export default function MobileMailShell() {
             ) : null}
             {inboxReady && !loading && !error && visibleItems.length === 0 ? (
               <div style={{ padding: 16, color: "rgba(255,255,255,0.55)", fontSize: 14 }}>
-                Keine Nachrichten. Unten auf das Mikro tippen, um eine neue Mail zu diktieren.
+                {unreadOnly
+                  ? "Keine ungelesenen Nachrichten."
+                  : "Keine Nachrichten. Unten auf das Mikro tippen, um eine neue Mail zu diktieren."}
               </div>
             ) : null}
             {visibleItems.map((item, index) => {
@@ -1017,23 +1129,16 @@ export default function MobileMailShell() {
                   style={{
                     width: "100%",
                     textAlign: "left",
-                    borderRadius: 14,
-                    border: active
-                      ? "1px solid rgba(255,255,255,0.30)"
-                      : unread
-                        ? "1px solid rgba(129,178,255,0.42)"
-                        : "1px solid rgba(255,255,255,0.13)",
-                    background: active
-                      ? "rgba(255,255,255,0.15)"
-                      : unread
-                        ? "linear-gradient(180deg, rgba(56,98,160,0.24), rgba(255,255,255,0.08))"
-                        : "rgba(255,255,255,0.08)",
+                    borderRadius: 16,
+                    border: active ? "1px solid rgba(255,166,77,0.72)" : "1px solid rgba(255,255,255,0.08)",
+                    background: active ? "rgba(255,115,0,0.10)" : "rgba(255,255,255,0.045)",
+                    boxShadow: active ? "0 0 22px rgba(255,115,0,0.16)" : "none",
                     color: "#fff",
                     padding: "12px 12px",
                     marginBottom: 8,
                     cursor: "pointer",
                     display: "flex",
-                    gap: 10,
+                    gap: 12,
                     alignItems: "flex-start",
                     boxSizing: "border-box",
                   }}
@@ -1041,15 +1146,21 @@ export default function MobileMailShell() {
                   <span
                     aria-hidden="true"
                     style={{
-                      width: 8,
-                      height: 8,
+                      width: 38,
+                      height: 38,
                       borderRadius: 999,
-                      marginTop: 6,
                       flexShrink: 0,
-                      background: unread ? "rgba(129,178,255,0.95)" : "rgba(255,255,255,0.24)",
-                      boxShadow: unread ? "0 0 0 3px rgba(129,178,255,0.18)" : "none",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 15,
+                      fontWeight: 700,
+                      color: "#fff",
+                      background: senderAvatarColor(item.fromEmail || item.fromName || item.uid),
                     }}
-                  />
+                  >
+                    {senderInitial(item.fromName, item.fromEmail)}
+                  </span>
                   <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                     <div
@@ -1064,8 +1175,21 @@ export default function MobileMailShell() {
                     >
                       {item.fromName || item.fromEmail || "Unbekannt"}
                     </div>
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.48)", flexShrink: 0 }}>
-                      {fmtDate(item.receivedAt)}
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.48)" }}>
+                        {fmtListTime(item.receivedAt)}
+                      </div>
+                      {unread ? (
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: 999,
+                            background: "rgba(255,140,40,0.95)",
+                          }}
+                        />
+                      ) : null}
                     </div>
                   </div>
                   <div
@@ -1122,6 +1246,7 @@ export default function MobileMailShell() {
             {!loading && visibleItems.length > 0 ? (
               <div style={{ padding: "2px 4px 8px", fontSize: 11, color: "rgba(255,255,255,0.42)" }}>
                 {unreadCount} ungelesen · {visibleItems.length} sichtbar
+                {unreadOnly ? " · Filter an" : ""}
               </div>
             ) : null}
           </div>
@@ -1165,21 +1290,97 @@ export default function MobileMailShell() {
 
 function tabStyle(active: boolean): React.CSSProperties {
   return {
-    height: 26,
+    height: 28,
     borderRadius: 999,
-    border: active ? "1px solid rgba(255,115,0,0.95)" : "1px solid rgba(255,115,0,0.48)",
+    border: active ? "1px solid rgba(255,115,0,0.95)" : "1px solid rgba(255,255,255,0.12)",
     background: active
       ? "linear-gradient(180deg, rgba(255,166,77,0.95), rgba(255,115,0,0.90))"
-      : "rgba(255,115,0,0.18)",
-    color: active ? "#111" : "rgba(255,214,170,0.96)",
-    padding: "0 8px",
+      : "rgba(255,255,255,0.06)",
+    color: active ? "#111" : "rgba(255,255,255,0.86)",
+    padding: "0 10px",
     fontSize: 11,
     fontWeight: active ? 700 : 600,
     cursor: "pointer",
     whiteSpace: "nowrap",
     flexShrink: 0,
+    display: "inline-flex",
+    alignItems: "center",
   };
 }
+
+const sparkStyle: React.CSSProperties = {
+  width: 14,
+  height: 14,
+  flexShrink: 0,
+  background: "rgba(255,140,40,0.98)",
+  clipPath: "polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%)",
+};
+
+const searchWrapStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  height: 40,
+  borderRadius: 14,
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "rgba(255,255,255,0.05)",
+  padding: "0 12px",
+};
+
+const searchIconStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.45)",
+  fontSize: 16,
+  lineHeight: 1,
+};
+
+const searchInputStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  height: 38,
+  border: "none",
+  background: "transparent",
+  color: "#fff",
+  fontSize: 16,
+  outline: "none",
+};
+
+const statGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: 6,
+};
+
+function statCardStyle(active: boolean, clickable = false): React.CSSProperties {
+  return {
+    borderRadius: 12,
+    border: active ? "1px solid rgba(255,166,77,0.7)" : "1px solid rgba(255,255,255,0.08)",
+    background: active ? "rgba(255,115,0,0.16)" : "rgba(255,255,255,0.045)",
+    boxShadow: active ? "0 0 16px rgba(255,115,0,0.14)" : "none",
+    padding: "8px 6px 7px",
+    minHeight: 54,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    justifyContent: "center",
+    gap: 2,
+    color: "#fff",
+    cursor: clickable ? "pointer" : "default",
+    textAlign: "left",
+  };
+}
+
+const statValueStyle: React.CSSProperties = {
+  fontSize: 16,
+  fontWeight: 700,
+  lineHeight: 1.1,
+  color: "rgba(255,255,255,0.96)",
+};
+
+const statLabelStyle: React.CSSProperties = {
+  fontSize: 9,
+  letterSpacing: "0.02em",
+  color: "rgba(255,255,255,0.52)",
+};
 
 const quietTabStyle: React.CSSProperties = {
   height: 26,
