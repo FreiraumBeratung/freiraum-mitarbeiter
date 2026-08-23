@@ -101,6 +101,10 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
       w.__fm_subject_locked = false;
       w.__fm_subject_locked_value = null;
       w.__fm_subject_lock_context_uid = null;
+      bodyRef.current = "";
+      setBody("");
+      w.__fm_pending_body_replace = null;
+      w.__fm_wizard4_last_draft = null;
     } catch {
       PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
     } finally {

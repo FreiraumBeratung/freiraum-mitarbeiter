@@ -11,14 +11,35 @@ function liveAudioTracks(stream: MediaStream | null | undefined): MediaStreamTra
   return (stream?.getAudioTracks() ?? []).filter((track) => track.readyState === "live");
 }
 
+function hardStopStream(stream: MediaStream | null | undefined): void {
+  if (!stream) return;
+  try {
+    stream.getTracks().forEach((track) => {
+      try {
+        track.enabled = false;
+      } catch {
+        /* ignore */
+      }
+      try {
+        track.stop();
+      } catch {
+        /* ignore */
+      }
+      try {
+        stream.removeTrack(track);
+      } catch {
+        /* ignore */
+      }
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 export function getWarmMicStream(): MediaStream | null {
   if (warmStream && liveAudioTracks(warmStream).length > 0) return warmStream;
   if (warmStream) {
-    try {
-      warmStream.getTracks().forEach((track) => track.stop());
-    } catch {
-      /* ignore */
-    }
+    hardStopStream(warmStream);
     warmStream = null;
   }
   return null;
@@ -60,14 +81,15 @@ export async function warmMic(): Promise<MediaStream | null> {
   return warmPromise;
 }
 
+export async function acquireMicStream(): Promise<MediaStream | null> {
+  releaseWarmMic();
+  return warmMic();
+}
+
 export function releaseWarmMic(): void {
   warmPromise = null;
   if (!warmStream) return;
-  try {
-    warmStream.getTracks().forEach((track) => track.stop());
-  } catch {
-    /* ignore */
-  }
+  hardStopStream(warmStream);
   warmStream = null;
 }
 

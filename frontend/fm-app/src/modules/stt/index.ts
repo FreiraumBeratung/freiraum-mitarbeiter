@@ -1,5 +1,5 @@
 import { backendBase } from "../../lib/backendBase";
-import { getWarmMicStream, releaseWarmMic, warmMic } from "../../lib/micPermission";
+import { acquireMicStream, getWarmMicStream, releaseWarmMic } from "../../lib/micPermission";
 
 let cachedLocalSttHealthAtMs = 0;
 let cachedLocalSttHealthOk = false;
@@ -65,8 +65,25 @@ export function requestRecorderStop(): void {
 }
 
 function stopTracks(media: MediaStream | null | undefined): void {
+  if (!media) return;
   try {
-    media?.getTracks().forEach((track) => track.stop());
+    media.getTracks().forEach((track) => {
+      try {
+        track.enabled = false;
+      } catch {
+        /* ignore */
+      }
+      try {
+        track.stop();
+      } catch {
+        /* ignore */
+      }
+      try {
+        media.removeTrack(track);
+      } catch {
+        /* ignore */
+      }
+    });
   } catch {
     /* ignore */
   }
@@ -74,12 +91,8 @@ function stopTracks(media: MediaStream | null | undefined): void {
 
 function endMicCapture(media?: MediaStream | null): void {
   stopTracks(media);
-  try {
-    if (activeMicStream && activeMicStream !== media) {
-      activeMicStream.getTracks().forEach((track) => track.stop());
-    }
-  } catch {
-    /* ignore */
+  if (activeMicStream && activeMicStream !== media) {
+    stopTracks(activeMicStream);
   }
   activeRecorder = null;
   activeMicStream = null;
@@ -232,8 +245,8 @@ export async function recordAndTranscribe(
   let usedBackendRecorder = false;
   try {
     const sttStartedAtMs = nowMs();
-    const stream = getWarmMicStream() ?? (await warmMic());
-    const usedWarmStream = stream === getWarmMicStream();
+    const stream = await acquireMicStream();
+    const usedWarmStream = false;
     if (signal?.aborted) {
       endMicCapture(stream);
       return null;

@@ -1,7 +1,7 @@
 import { backendBase } from "../../lib/backendBase";
 import { parseIntentDE } from "./intent";
 import { voiceState } from "./state";
-import { recordAndTranscribe } from "../stt";
+import { recordAndTranscribe, releaseMicSession } from "../stt";
 import { PartnerBotBus } from "../partnerbot";
 import { triggerEmotion } from "../partnerbot/partnerbot_emotion";
 import { showTransitionMessage } from "../../App";
@@ -1532,6 +1532,14 @@ export class VoiceController {
     if (this.listening || this.starting) {
       return;
     }
+    if (typeof window !== "undefined") {
+      try {
+        (window as any).__fm_last_hint = null;
+        window.dispatchEvent(new CustomEvent("fm-hint-update"));
+      } catch {
+        /* ignore */
+      }
+    }
 
     const tryBackend = shouldUseBackendRecorder();
     if (tryBackend) {
@@ -1548,6 +1556,7 @@ export class VoiceController {
       if (this.recorderAbortController === controller) {
         this.recorderAbortController = null;
       }
+      releaseMicSession();
       console.log(
         `[fm-voice][timing] stage=stt-fallback-finished elapsedMs=${Math.max(0, Math.round(nowMs() - sttStartedAtMs))} textLength=${(text ?? "").length}`
       );
@@ -1597,6 +1606,7 @@ export class VoiceController {
       if (this.recorderAbortController === controller) {
         this.recorderAbortController = null;
       }
+      releaseMicSession();
       console.log(
         `[fm-voice][timing] stage=stt-fallback-finished elapsedMs=${Math.max(0, Math.round(nowMs() - sttStartedAtMs))} textLength=${(text ?? "").length}`
       );
@@ -1668,6 +1678,7 @@ export class VoiceController {
       if (this.recorderAbortController === controller) {
         this.recorderAbortController = null;
       }
+      releaseMicSession();
       this.listening = false;
       this.captureMode = "none";
       if (text) {
@@ -1693,6 +1704,13 @@ export class VoiceController {
       }
       this.listening = false;
       this.setState(wasListening ? "transcribing" : "idle");
+      if (recognition) {
+        try {
+          recognition.stop();
+        } catch {
+          /* ignore */
+        }
+      }
       return;
     }
 

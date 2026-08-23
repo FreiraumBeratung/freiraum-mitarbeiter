@@ -495,6 +495,17 @@ export default function MobileMailShell() {
       setSendBanner(message);
       if (sendBannerTimerRef.current) window.clearTimeout(sendBannerTimerRef.current);
       sendBannerTimerRef.current = window.setTimeout(() => setSendBanner(null), 4200);
+      setDraftHasContent(false);
+      setComposeSheetOpen(false);
+      setVoiceErrorHint(null);
+      try {
+        const w = window as any;
+        if (w.__fm_last_hint) w.__fm_last_hint = null;
+      } catch {
+        /* ignore */
+      }
+      releaseMicSession();
+      void voice.stop();
     };
     window.addEventListener("fm-mail-sent", onMailSent);
     return () => {

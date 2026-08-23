@@ -63,7 +63,6 @@ export default function MobileVoiceButton() {
 
   const toggle = async (event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
-    unlockTtsPlayback();
     const now = Date.now();
     if (now - lastToggleAtRef.current < 350) return;
     lastToggleAtRef.current = now;
@@ -71,10 +70,17 @@ export default function MobileVoiceButton() {
     if (listening) {
       // Nur Recorder stoppen, Tracks erst nach onstop – sonst ist die iOS-Aufnahme leer.
       requestRecorderStop();
-      unlockTtsPlayback();
       await voice.stop();
       return;
     }
+    try {
+      const w = window as any;
+      if (w.__fm_last_hint) w.__fm_last_hint = null;
+      window.dispatchEvent(new CustomEvent("fm-hint-update"));
+    } catch {
+      /* ignore */
+    }
+    unlockTtsPlayback();
     await voice.start();
   };
 
