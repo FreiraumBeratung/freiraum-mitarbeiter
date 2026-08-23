@@ -14,6 +14,7 @@ declare global {
     __fm_preview_mail?: () => void;
     __fm_send_mail_now?: () => void;
     __fm_reset_mail_draft?: () => void;
+    __fm_begin_next_dictation?: () => void;
     __fm_reset_mail_flow?: () => void;
     __fm_pending_body_replace?: string | null;
     __fm_mobile_shell?: boolean;
@@ -111,11 +112,6 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
       w.__fm_subject_locked_value = null;
       w.__fm_subject_lock_context_uid = null;
       (w as any).__fm_last_sent_body = safeBody.toLowerCase();
-      (w as any).__fm_ignore_compose_open_until = Date.now() + 1600;
-      bodyRef.current = "";
-      setBody("");
-      w.__fm_pending_body_replace = null;
-      w.__fm_wizard4_last_draft = null;
     } catch {
       PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
     } finally {
@@ -184,6 +180,13 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
     w.__fm_reset_mail_draft = () => {
       handleResetDraft();
     };
+    w.__fm_begin_next_dictation = () => {
+      bodyRef.current = "";
+      setBody("");
+      (w as any).__fm_last_sent_body = "";
+      w.__fm_pending_body_replace = null;
+      w.__fm_wizard4_last_draft = null;
+    };
 
     const pending = w.__fm_pending_body_replace;
     if (typeof pending === "string") {
@@ -203,6 +206,7 @@ export default function MailComposeForm({ compact = false }: { compact?: boolean
       delete w.__fm_preview_mail;
       delete w.__fm_send_mail_now;
       delete w.__fm_reset_mail_draft;
+      delete w.__fm_begin_next_dictation;
     };
   }, [handlePreview, handleSendNow, handleResetDraft]);
 

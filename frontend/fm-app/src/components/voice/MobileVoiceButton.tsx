@@ -80,6 +80,11 @@ export default function MobileVoiceButton() {
     } catch {
       /* ignore */
     }
+    try {
+      window.__fm_begin_next_dictation?.();
+    } catch {
+      /* ignore */
+    }
     unlockTtsPlayback();
     await voice.start();
   };

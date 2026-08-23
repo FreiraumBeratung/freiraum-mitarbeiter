@@ -178,6 +178,8 @@ export default function MobileMailShell() {
     }
   });
   const inboxLoadInFlightRef = useRef(false);
+  const inboxReloadQueuedRef = useRef(false);
+  const loadInboxRef = useRef<(options?: { silent?: boolean; append?: boolean }) => Promise<void>>(async () => {});
   const itemsRef = useRef<InboxItem[]>([]);
   const mailboxInitRef = useRef(true);
   const detailOpenRef = useRef(false);
@@ -245,6 +247,10 @@ export default function MobileMailShell() {
       inboxLoadInFlightRef.current = false;
       setLoading(false);
       setLoadingMore(false);
+      if (inboxReloadQueuedRef.current) {
+        inboxReloadQueuedRef.current = false;
+        void loadInbox({ silent: true });
+      }
     }
   }, [mailboxMode]);
 
@@ -421,6 +427,10 @@ export default function MobileMailShell() {
   }, [items]);
 
   useEffect(() => {
+    loadInboxRef.current = loadInbox;
+  }, [loadInbox]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       window.localStorage.setItem(OPENED_UIDS_STORAGE_KEY, JSON.stringify(Array.from(openedUids)));
@@ -502,8 +512,6 @@ export default function MobileMailShell() {
       setSendBanner(message);
       if (sendBannerTimerRef.current) window.clearTimeout(sendBannerTimerRef.current);
       sendBannerTimerRef.current = window.setTimeout(() => setSendBanner(null), 4200);
-      setDraftHasContent(false);
-      setComposeSheetOpen(false);
       setVoiceErrorHint(null);
       try {
         const w = window as any;
@@ -513,6 +521,13 @@ export default function MobileMailShell() {
       }
       releaseMicSession();
       void voice.stop();
+      window.setTimeout(() => {
+        if (inboxLoadInFlightRef.current) {
+          inboxReloadQueuedRef.current = true;
+          return;
+        }
+        void loadInboxRef.current({ silent: true });
+      }, 900);
     };
     window.addEventListener("fm-mail-sent", onMailSent);
     return () => {
