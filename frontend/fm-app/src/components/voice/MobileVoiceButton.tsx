@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { probeBackendSttHealth, requestRecorderStop } from "../../modules/stt";
 import { voice, type VoiceState } from "../../modules/voice";
-import { unlockTtsPlayback } from "../../modules/voice/tts";
 import { fmActionBorder, fmActionFill } from "../../lib/fmVisual";
 
 function httpsMicUrl(): string | null {
@@ -85,7 +84,6 @@ export default function MobileVoiceButton() {
     } catch {
       /* ignore */
     }
-    unlockTtsPlayback();
     await voice.start();
   };
 
@@ -96,7 +94,7 @@ export default function MobileVoiceButton() {
         gridTemplateColumns: "1fr auto 1fr",
         alignItems: "center",
         gap: 8,
-        padding: "10px 16px calc(12px + env(safe-area-inset-bottom, 0px))",
+        padding: "8px 16px calc(36px + env(safe-area-inset-bottom, 24px))",
         WebkitUserSelect: "none",
         userSelect: "none",
       }}

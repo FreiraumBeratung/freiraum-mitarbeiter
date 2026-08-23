@@ -33,6 +33,71 @@ function notifyMobileComposeOpen(value: string) {
   window.dispatchEvent(new CustomEvent("fm-mobile-compose-open"));
 }
 
+const ATTACH_ACCEPT =
+  "image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain,.doc,.docx,.xls,.xlsx,.ppt,.pptx";
+const ATTACH_MAX_FILES = 3;
+const ATTACH_MAX_BYTES = 4 * 1024 * 1024;
+const ATTACH_ALLOWED_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "text/plain",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+]);
+
+type OutgoingAttachment = {
+  id: string;
+  filename: string;
+  contentType: string;
+  contentBase64: string;
+  size: number;
+};
+
+function safeAttachName(name: string): string {
+  const base = String(name || "anhang").split(/[/\\]/).pop() || "anhang";
+  const cleaned = base.replace(/[^A-Za-z0-9._\- äöüÄÖÜß()]/g, "_").replace(/^[.\s_]+|[.\s_]+$/g, "");
+  return (cleaned || "anhang").slice(0, 120);
+}
+
+function guessAttachType(file: File): string {
+  const type = String(file.type || "").toLowerCase().split(";")[0];
+  if (ATTACH_ALLOWED_TYPES.has(type)) return type;
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "pdf") return "application/pdf";
+  if (ext === "txt") return "text/plain";
+  if (ext === "doc") return "application/msword";
+  if (ext === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (ext === "xls") return "application/vnd.ms-excel";
+  if (ext === "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (ext === "ppt") return "application/vnd.ms-powerpoint";
+  if (ext === "pptx") return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  return "";
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(new Error("read-failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function isEchoOfLastSent(text: string): boolean {
   if (typeof window === "undefined") return false;
   const last = String((window as any).__fm_last_sent_body || "").trim().toLowerCase();
@@ -52,10 +117,14 @@ export default function MailComposeForm({
   const [subject, setSubject] = useState(sp.get("subject") || "");
   const [body, setBody] = useState(sp.get("body") || "");
   const [sending, setSending] = useState(false);
+  const [attachments, setAttachments] = useState<OutgoingAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const toRef = useRef(to);
   const subjectRef = useRef(subject);
   const bodyRef = useRef(body);
   const sendingRef = useRef(false);
+  const attachmentsRef = useRef<OutgoingAttachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     toRef.current = to;
@@ -69,6 +138,10 @@ export default function MailComposeForm({
     bodyRef.current = body;
   }, [body]);
 
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
   const handlePreview = useCallback(() => {
     window.print();
   }, []);
@@ -79,7 +152,8 @@ export default function MailComposeForm({
     }
     const safeTo = toRef.current.trim();
     const safeBody = bodyRef.current.trim();
-    if (!safeTo || !safeBody) {
+    const files = attachmentsRef.current.slice(0, ATTACH_MAX_FILES);
+    if (!safeTo || (!safeBody && files.length === 0)) {
       PartnerBotBus.say("Zum Senden fehlen Empfänger oder Inhalt. Ich bleibe in der Vorschau.");
       return;
     }
@@ -95,7 +169,12 @@ export default function MailComposeForm({
         body: JSON.stringify({
           to: safeTo,
           subject: subjectRef.current?.trim() || null,
-          body: safeBody,
+          body: safeBody || " ",
+          attachments: files.map((file) => ({
+            filename: file.filename,
+            contentType: file.contentType,
+            contentBase64: file.contentBase64,
+          })),
         }),
       });
 
@@ -118,6 +197,9 @@ export default function MailComposeForm({
       w.__fm_subject_locked_value = null;
       w.__fm_subject_lock_context_uid = null;
       (w as any).__fm_last_sent_body = safeBody.toLowerCase();
+      attachmentsRef.current = [];
+      setAttachments([]);
+      setAttachError(null);
     } catch {
       PartnerBotBus.say("Mailversand fehlgeschlagen (Verbindung).");
     } finally {
@@ -133,6 +215,9 @@ export default function MailComposeForm({
     setTo("");
     setSubject("");
     setBody("");
+    attachmentsRef.current = [];
+    setAttachments([]);
+    setAttachError(null);
     sendingRef.current = false;
     setSending(false);
 
@@ -154,6 +239,46 @@ export default function MailComposeForm({
     }
 
     PartnerBotBus.say("Entwurf zurückgesetzt.");
+  }, []);
+
+  const addAttachments = useCallback(async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    setAttachError(null);
+    const next = [...attachmentsRef.current];
+    for (const file of Array.from(fileList)) {
+      if (next.length >= ATTACH_MAX_FILES) {
+        setAttachError("Höchstens drei Anhänge.");
+        break;
+      }
+      if (file.size > ATTACH_MAX_BYTES) {
+        setAttachError(`${safeAttachName(file.name)} ist größer als 4 MB.`);
+        continue;
+      }
+      const contentType = guessAttachType(file);
+      if (!contentType) {
+        setAttachError("Dieser Dateityp ist nicht erlaubt.");
+        continue;
+      }
+      try {
+        const contentBase64 = await readFileAsBase64(file);
+        if (!contentBase64) {
+          setAttachError("Anhang konnte nicht gelesen werden.");
+          continue;
+        }
+        next.push({
+          id: `${Date.now()}-${next.length}-${safeAttachName(file.name)}`,
+          filename: safeAttachName(file.name),
+          contentType,
+          contentBase64,
+          size: file.size,
+        });
+      } catch {
+        setAttachError("Anhang konnte nicht gelesen werden.");
+      }
+    }
+    attachmentsRef.current = next;
+    setAttachments(next);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
 
   useEffect(() => {
@@ -216,7 +341,7 @@ export default function MailComposeForm({
     };
   }, [handlePreview, handleSendNow, handleResetDraft]);
 
-  const readyToSend = Boolean(to.trim() && body.trim());
+  const readyToSend = Boolean(to.trim() && (body.trim() || attachments.length > 0));
 
   return (
     <div
@@ -324,8 +449,62 @@ export default function MailComposeForm({
         }}
       />
 
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={ATTACH_ACCEPT}
+        multiple
+        hidden
+        onChange={(event) => {
+          void addAttachments(event.target.files);
+        }}
+      />
+      {attachments.length > 0 ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          {attachments.map((file) => (
+            <div
+              key={file.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                borderRadius: 10,
+                border: "1px solid rgba(255,166,77,0.28)",
+                background: "rgba(255,115,0,0.08)",
+                padding: "6px 8px",
+              }}
+            >
+              <div style={{ minWidth: 0, fontSize: 12, color: "rgba(255,255,255,0.9)" }}>
+                {file.filename}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = attachmentsRef.current.filter((item) => item.id !== file.id);
+                  attachmentsRef.current = next;
+                  setAttachments(next);
+                }}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "rgba(255,214,170,0.9)",
+                  fontSize: 12,
+                  cursor: "pointer",
+                }}
+              >
+                Weg
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {attachError ? (
+        <div style={{ fontSize: 12, color: "rgba(255,174,174,0.95)" }}>{attachError}</div>
+      ) : null}
+
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {compact ? null : (
           <button
             onClick={handlePreview}
@@ -342,6 +521,21 @@ export default function MailComposeForm({
             Vorschau
           </button>
           )}
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              borderRadius: 10,
+              border: "1px solid rgba(255,166,77,0.45)",
+              background: "rgba(255,115,0,0.16)",
+              color: "#fff",
+              padding: "6px 12px",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            Anhang
+          </button>
           <button
             onClick={handleResetDraft}
             style={{

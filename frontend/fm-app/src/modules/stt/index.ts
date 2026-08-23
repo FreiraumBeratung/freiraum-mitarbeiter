@@ -1,5 +1,5 @@
 import { backendBase } from "../../lib/backendBase";
-import { acquireMicStream, getWarmMicStream, releaseWarmMic } from "../../lib/micPermission";
+import { acquireMicStream, releaseWarmMic, warmMic } from "../../lib/micPermission";
 
 let cachedLocalSttHealthAtMs = 0;
 let cachedLocalSttHealthOk = false;
@@ -251,7 +251,6 @@ export async function recordAndTranscribe(
   try {
     const sttStartedAtMs = nowMs();
     const stream = await acquireMicStream();
-    const usedWarmStream = false;
     if (signal?.aborted) {
       endMicCapture(stream);
       return null;
@@ -318,6 +317,7 @@ export async function recordAndTranscribe(
     }
     const audioBlob = await done;
     endMicCapture(stream);
+    void warmMic();
     signal?.removeEventListener("abort", abortHandler);
     const recordFinishedAtMs = nowMs();
     const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
@@ -467,8 +467,11 @@ export async function recordAndTranscribe(
 
 function releaseIdleMic(): void {
   if (activeRecorder && activeRecorder.state !== "inactive") return;
-  if (!activeMicStream && !getWarmMicStream()) return;
-  endMicCapture(activeMicStream);
+  if (activeMicStream) {
+    stopTracks(activeMicStream);
+    activeMicStream = null;
+  }
+  activeRecorder = null;
 }
 
 if (typeof window !== "undefined") {
@@ -476,7 +479,7 @@ if (typeof window !== "undefined") {
     releaseMicSession();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) releaseIdleMic();
+    if (document.hidden) releaseMicSession();
   });
   document.addEventListener("voice-state", (event) => {
     const next = (event as CustomEvent<{ state?: string }>).detail?.state;

@@ -16,6 +16,7 @@ from email.header import decode_header
 from email.message import EmailMessage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 from email.mime.image import MIMEImage
 from pathlib import Path
 
@@ -95,10 +96,108 @@ def _prepare_signature_inline_images(html_body: str) -> tuple[str, list[tuple[st
     return html, parts
 
 
+class MailAttachmentIn(BaseModel):
+    filename: str
+    contentType: str
+    contentBase64: str
+
+
 class MailSendRequest(BaseModel):
     to: EmailStr
     subject: str | None = None
     body: str
+    attachments: list[MailAttachmentIn] | None = None
+
+
+_MAX_ATTACHMENTS = 3
+_MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+_MAX_ATTACHMENT_TOTAL = 10 * 1024 * 1024
+_ALLOWED_ATTACHMENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+    "text/plain",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
+def _safe_attachment_filename(name: str) -> str:
+    base = Path(str(name or "anhang")).name.replace("\\", "_").replace("/", "_")
+    cleaned = re.sub(r"[^A-Za-z0-9._\- äöüÄÖÜß()]+", "_", base).strip(" ._")
+    if not cleaned or cleaned in {".", ".."}:
+        cleaned = "anhang"
+    return cleaned[:120]
+
+
+def _attachment_magic_ok(content_type: str, payload: bytes) -> bool:
+    if not payload:
+        return False
+    if content_type == "image/jpeg":
+        return payload.startswith(b"\xff\xd8\xff")
+    if content_type == "image/png":
+        return payload.startswith(b"\x89PNG\r\n\x1a\n")
+    if content_type == "image/gif":
+        return payload.startswith(b"GIF87a") or payload.startswith(b"GIF89a")
+    if content_type == "image/webp":
+        return payload[:4] == b"RIFF" and payload[8:12] == b"WEBP"
+    if content_type == "application/pdf":
+        return payload.startswith(b"%PDF")
+    if content_type == "text/plain":
+        return b"\x00" not in payload[:4096]
+    if "openxmlformats" in content_type:
+        return payload.startswith(b"PK")
+    return True
+
+
+def _normalize_outgoing_attachments(items: list[MailAttachmentIn] | None) -> list[tuple[str, str, bytes]]:
+    if not items:
+        return []
+    if len(items) > _MAX_ATTACHMENTS:
+        raise HTTPException(status_code=400, detail="Höchstens drei Anhänge.")
+    out: list[tuple[str, str, bytes]] = []
+    total = 0
+    for item in items:
+        filename = _safe_attachment_filename(item.filename)
+        content_type = str(item.contentType or "").strip().lower().split(";", 1)[0]
+        if content_type not in _ALLOWED_ATTACHMENT_TYPES:
+            raise HTTPException(status_code=400, detail="Dieser Dateityp ist als Anhang nicht erlaubt.")
+        raw_b64 = re.sub(r"\s+", "", str(item.contentBase64 or ""))
+        if not raw_b64 or len(raw_b64) > 8_000_000:
+            raise HTTPException(status_code=400, detail="Anhang ist leer oder zu groß.")
+        try:
+            payload = base64.b64decode(raw_b64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Anhang konnte nicht gelesen werden.")
+        if len(payload) > _MAX_ATTACHMENT_BYTES:
+            raise HTTPException(status_code=400, detail="Ein Anhang ist größer als 4 MB.")
+        total += len(payload)
+        if total > _MAX_ATTACHMENT_TOTAL:
+            raise HTTPException(status_code=400, detail="Anhänge zusammen größer als 10 MB.")
+        if not _attachment_magic_ok(content_type, payload):
+            raise HTTPException(status_code=400, detail="Anhang passt nicht zum Dateityp.")
+        out.append((filename, content_type, payload))
+    return out
+
+
+def _attach_files_to_mime(msg: MIMEMultipart, attachments: list[tuple[str, str, bytes]]) -> None:
+    for filename, content_type, payload in attachments:
+        if content_type.startswith("image/"):
+            subtype = content_type.split("/", 1)[-1]
+            part = MIMEImage(payload, _subtype=subtype)
+        elif content_type == "text/plain":
+            part = MIMEText(payload.decode("utf-8", "replace"), "plain", "utf-8")
+        else:
+            subtype = content_type.split("/", 1)[-1] if "/" in content_type else "octet-stream"
+            part = MIMEApplication(payload, _subtype=subtype)
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
 
 
 class MailSendResponse(BaseModel):
@@ -1275,7 +1374,12 @@ def _build_email_text_with_signature(body: str, signature_text: str) -> str:
     return base.rstrip() + "\n\n" + suffix
 
 
-def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
+def _send_email_via_smtp(
+    to: str,
+    subject: str,
+    body: str,
+    attachments: list[tuple[str, str, bytes]] | None = None,
+) -> str:
     """
     Versendet eine E-Mail über SMTP.
     Returns: "ok" bei Erfolg
@@ -1343,9 +1447,11 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
                 extra={"logo_path": str(EMAIL_LOGO_PATH)},
             )
 
+    _attach_files_to_mime(msg, attachments or [])
+
     logger.info(
         "Sende E-Mail",
-        extra={"to": to, "subject": subject, "signature_source": signature_bundle.get("source"), "signature_account": account_key},
+        extra={"to": to, "subject": subject, "signature_source": signature_bundle.get("source"), "signature_account": account_key, "attachments": len(attachments or [])},
     )
 
     try:
@@ -1357,31 +1463,48 @@ def _send_email_via_smtp(to: str, subject: str, body: str) -> str:
     return "ok"
 
 
-def _send_email_via_graph(to: str, subject: str, body: str) -> str:
+def _send_email_via_graph(
+    to: str,
+    subject: str,
+    body: str,
+    attachments: list[tuple[str, str, bytes]] | None = None,
+) -> str:
     account_key = _active_signature_account_key()
     signature_bundle = _load_signature_bundle_for_account(account_key)
     html_body = _build_email_html_with_signature(body, signature_bundle.get("html_signature") or "")
+    graph_attachments = [
+        {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": filename,
+            "contentType": content_type,
+            "contentBytes": base64.b64encode(payload).decode("ascii"),
+        }
+        for filename, content_type, payload in (attachments or [])
+    ]
+    message: dict = {
+        "subject": subject,
+        "body": {
+            "contentType": "HTML",
+            "content": html_body,
+        },
+        "toRecipients": [
+            {
+                "emailAddress": {
+                    "address": to,
+                }
+            }
+        ],
+    }
+    if graph_attachments:
+        message["attachments"] = graph_attachments
     response = _graph_request(
         "POST",
         "/me/sendMail",
         json_payload={
-            "message": {
-                "subject": subject,
-                "body": {
-                    "contentType": "HTML",
-                    "content": html_body,
-                },
-                "toRecipients": [
-                    {
-                        "emailAddress": {
-                            "address": to,
-                        }
-                    }
-                ],
-            },
+            "message": message,
             "saveToSentItems": True,
         },
-        timeout_sec=20,
+        timeout_sec=40 if graph_attachments else 20,
     )
     _graph_raise_for_status(response, "Mailversand über Graph fehlgeschlagen")
     return "ok"
@@ -1443,15 +1566,17 @@ async def send_mail(req: MailSendRequest):
     Erwartet ein JSON-Objekt mit {to, subject, body}.
     """
     _require_account()
-    if not req.body.strip():
+    attachments = _normalize_outgoing_attachments(req.attachments)
+    if not req.body.strip() and not attachments:
         raise HTTPException(status_code=400, detail="E-Mail-Body darf nicht leer sein.")
 
     subject = req.subject or "Nachricht vom Freiraum-Mitarbeiter"
+    body_text = req.body if req.body.strip() else " "
 
     try:
         if _graph_mail_mode_enabled():
             try:
-                result = _send_email_via_graph(req.to, subject, req.body)
+                result = _send_email_via_graph(req.to, subject, body_text, attachments)
             except HTTPException as exc:
                 # Auto-Fallback für Kunden ohne Graph-Mailbox (z. B. IONOS/externes Konto).
                 if (
@@ -1460,11 +1585,11 @@ async def send_mail(req: MailSendRequest):
                     and _smtp_config_available()
                 ):
                     logger.warning("Graph send unavailable, falling back to SMTP transport.")
-                    result = _send_email_via_smtp(req.to, subject, req.body)
+                    result = _send_email_via_smtp(req.to, subject, body_text, attachments)
                 else:
                     raise
         else:
-            result = _send_email_via_smtp(req.to, subject, req.body)
+            result = _send_email_via_smtp(req.to, subject, body_text, attachments)
         try:
             from ..services.contact_store import get_contact_store
 

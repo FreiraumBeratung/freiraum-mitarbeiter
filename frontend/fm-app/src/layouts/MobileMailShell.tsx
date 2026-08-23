@@ -4,6 +4,7 @@ import MailComposeForm from "../components/mail/MailComposeForm";
 import MobileVoiceButton from "../components/voice/MobileVoiceButton";
 import { backendBase } from "../lib/backendBase";
 import { clearStoredSessionToken } from "../lib/sessionToken";
+import { warmMic } from "../lib/micPermission";
 import { releaseMicSession } from "../modules/stt";
 import { voice } from "../modules/voice";
 import { unlockTtsPlayback } from "../modules/voice/tts";
@@ -477,6 +478,7 @@ export default function MobileMailShell() {
   useEffect(() => {
     void loadInbox();
     void loadMicrosoftAuthStatus();
+    void warmMic();
   }, [loadInbox, loadMicrosoftAuthStatus]);
 
   useEffect(() => {
