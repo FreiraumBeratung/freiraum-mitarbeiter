@@ -1,6 +1,7 @@
 import type { SelectedMailContext } from "../mail/selectedMailContext";
 import type { VoiceIntent } from "./intent_router";
 import { hasCancelPhrase, stripCancelPhraseFromBody } from "../../logic/wizard4/cancel_phrase";
+import { isImmediateSendMode } from "./send_review_mode";
 type EmailComposeIntent = Extract<VoiceIntent, { type: "email-compose" }>;
 
 function escapeRegex(input: string): string {
@@ -306,7 +307,8 @@ export function buildReplyIntentFromSelectedMailContext(
     normalized: normalizeForCancelDetection(transcript),
   });
   const hasBodyForSend = !!bodyHint;
-  const autoSend = directRequested && hasBodyForSend && !cancelRequested;
+  const toggleSend = isImmediateSendMode() && hasBodyForSend && !cancelRequested;
+  const autoSend = (directRequested || toggleSend) && hasBodyForSend && !cancelRequested;
   const forcePreviewOnly = !autoSend || cancelRequested;
   const forcePreviewOnlyReason = cancelRequested
     ? "cancel_phrase"
@@ -334,7 +336,9 @@ export function buildReplyIntentFromSelectedMailContext(
       }),
       uiHint: bodyHint
         ? autoSend
-          ? "Direktantwort erkannt. Ich sende sofort, sobald der Entwurf vollständig ist."
+          ? toggleSend
+            ? "Sofort-Modus: Antwort wird direkt gesendet."
+            : "Direktantwort erkannt. Ich sende sofort, sobald der Entwurf vollständig ist."
           : undefined
         : "Diktiere jetzt den Antworttext, ich erstelle den Entwurf.",
     },
@@ -353,9 +357,14 @@ export function buildImmediateReplyIntentFromOpenMail(
   });
   if (cancelRequested) return null;
 
+  if (isExplicitContextSendConfirmation(transcript)) return null;
+
   let bodyHint = normalizeBodyHint(existingReply?.bodyHint);
   if (!bodyHint) {
     bodyHint = normalizeBodyHint(extractReplyBodyHint(transcript, selectedContext));
+  }
+  if (!bodyHint) {
+    bodyHint = normalizeBodyHint(normalizeCommandText(transcript));
   }
   if (!bodyHint || bodyHint.length < 2) return null;
 

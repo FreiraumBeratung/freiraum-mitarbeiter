@@ -1,11 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
+  buildImmediateReplyIntentFromOpenMail,
   buildReplyIntentFromSelectedMailContext,
   extractReplyBodyHint,
   isExplicitContextSendConfirmation,
 } from "./reply_context_phase_a";
+import { setSendReviewMode } from "./send_review_mode";
 
 describe("reply_context_phase_a", () => {
+  beforeEach(() => {
+    setSendReviewMode("pruefen");
+  });
+
   const baseContext = {
     uid: "123",
     messageId: "<abc@test>",
@@ -276,6 +282,39 @@ describe("reply_context_phase_a", () => {
       expect(intent.meta?.forcePreviewOnly).toBe(true);
       expect(intent.bodyHint?.toLowerCase()).toContain("läuft sehr gut");
     }
+  });
+
+  it("sendet im Sofort-Modus auch ohne 'direkt' wenn eine Mail offen ist", () => {
+    setSendReviewMode("sofort");
+    const intent = buildReplyIntentFromSelectedMailContext(
+      "antworte es läuft sehr gut",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.bodyHint?.toLowerCase()).toContain("läuft sehr gut");
+    }
+  });
+
+  it("WhatsApp-Sofort: gesprochener Text ist der Antwortbody", () => {
+    const intent = buildImmediateReplyIntentFromOpenMail(
+      "Ich komme morgen um zehn auf die Baustelle.",
+      baseContext
+    );
+    expect(intent?.type).toBe("email-compose");
+    if (intent?.type === "email-compose") {
+      expect(intent.to).toBe("thomas@example.com");
+      expect(intent.bodyHint).toBe("Ich komme morgen um zehn auf die Baustelle.");
+      expect(intent.meta?.autoSend).toBe(true);
+      expect(intent.meta?.forcePreviewOnly).toBe(false);
+      expect(intent.meta?.source).toBe("immediate-open-mail");
+    }
+  });
+
+  it("WhatsApp-Sofort: reines 'jetzt senden' ist kein Antworttext", () => {
+    expect(buildImmediateReplyIntentFromOpenMail("Jetzt senden", baseContext)).toBeNull();
   });
 
   it("handles ASR variant 'Antwortet direkt. ...' without body leak", () => {

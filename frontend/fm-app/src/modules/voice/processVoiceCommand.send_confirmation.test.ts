@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { processVoiceCommand } from "./index";
 import { clearSelectedMailContext, setSelectedMailContext } from "../mail/selectedMailContext";
+import { setSendReviewMode } from "./send_review_mode";
 
 const fakeNavigate = (() => {}) as any;
 
@@ -62,6 +63,19 @@ describe("processVoiceCommand explicit send confirmation", () => {
     await new Promise((r) => setTimeout(r, 500));
     expect(setBodySpy).toHaveBeenCalledWith("Ja.");
     expect(sendNowSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("Sofort + offene Mail: diktierten Text direkt senden", async () => {
+    (globalThis as any).window.__fm_mobile_shell = true;
+    setSendReviewMode("sofort");
+    processVoiceCommand("Ich komme morgen um zehn auf die Baustelle.", fakeNavigate);
+    await new Promise((r) => setTimeout(r, 800));
+    expect(setBodySpy).toHaveBeenCalled();
+    const lastBody = String(setBodySpy.mock.calls.at(-1)?.[0] || "");
+    expect(lastBody.toLowerCase()).toContain("baustelle");
+    expect(sendNowSpy).toHaveBeenCalled();
+    setSendReviewMode("pruefen");
+    delete (globalThis as any).window.__fm_mobile_shell;
   });
 });
 

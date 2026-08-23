@@ -2514,15 +2514,32 @@ function applyVoiceIntent(intent: VoiceIntent, navigate: NavigateFunction) {
             source: emailIntent?.meta?.source || null,
           });
         } else if (emailIntent?.meta?.forcePreviewOnly || emailIntent?.meta?.cancelled || emailIntent?.meta?.disableSendPhraseDetection) {
-          sendMode = "previewOnly";
-          console.log("[autosend] forced previewOnly (cancel/forcePreviewOnly)", {
-            forcePreviewOnly: !!emailIntent?.meta?.forcePreviewOnly,
-            forcePreviewOnlyReason: forcePreviewReason || null,
-            cancelled: !!emailIntent?.meta?.cancelled,
-            disableSendPhraseDetection: !!emailIntent?.meta?.disableSendPhraseDetection,
-            source: emailIntent?.meta?.source || null,
-            sourceText: wizard4Draft.sourceText,
-          });
+          const allowSofortOpenMail =
+            isMobileVoiceShell() &&
+            isImmediateSendMode() &&
+            emailIntent?.meta?.cancelled !== true &&
+            forcePreviewReasonText !== "missing_body" &&
+            forcePreviewReasonText !== "cancel_phrase" &&
+            (intentSourceText.includes("exchange-context") ||
+              intentSourceText.includes("immediate-open-mail") ||
+              intentSourceText.includes("reply-context"));
+          if (allowSofortOpenMail) {
+            sendMode = "sendNow";
+            console.log("[autosend] sendMode = sendNow (Sofort + offene Mail)", {
+              source: emailIntent?.meta?.source || null,
+              forcePreviewOnlyReason: forcePreviewReason || null,
+            });
+          } else {
+            sendMode = "previewOnly";
+            console.log("[autosend] forced previewOnly (cancel/forcePreviewOnly)", {
+              forcePreviewOnly: !!emailIntent?.meta?.forcePreviewOnly,
+              forcePreviewOnlyReason: forcePreviewReason || null,
+              cancelled: !!emailIntent?.meta?.cancelled,
+              disableSendPhraseDetection: !!emailIntent?.meta?.disableSendPhraseDetection,
+              source: emailIntent?.meta?.source || null,
+              sourceText: wizard4Draft.sourceText,
+            });
+          }
         }
         // FIX 4: PRIORITÄT 1 - Intent-Meta autoSend (für ALLE Intent-Typen, auch Free-Dictation)
         // Dies muss ZUERST geprüft werden, damit es sich durchsetzt
@@ -5778,6 +5795,37 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
   }
 
   if (routedIntent.type === "ai-chat" && (selectedContext?.uid || hasComposerContext)) {
+    if (
+      immediateOpenMail &&
+      selectedContext &&
+      !shouldHardBypassContext &&
+      !isLikelyNoiseUtterance(routingTranscript) &&
+      !isLikelyMisheardComposerCommand(routingTranscript)
+    ) {
+      const spokenReply = buildImmediateReplyIntentFromOpenMail(
+        contextRoutingTranscript,
+        selectedContext,
+        replyIntent
+      );
+      if (spokenReply) {
+        console.log("[fm-voice][immediate-open-mail] spoken reply from free dictation", {
+          contextUid: selectedContext.uid,
+          bodyLength: spokenReply.bodyHint?.length ?? 0,
+        });
+        applyVoiceIntent(
+          {
+            ...spokenReply,
+            meta: {
+              ...(spokenReply.meta ?? {}),
+              __fmTiming: commandTiming,
+              __fmRunId: commandRunId,
+            },
+          } as any,
+          navigate
+        );
+        return;
+      }
+    }
     const w = typeof window !== "undefined" ? (window as any) : null;
     const isNoise = isLikelyNoiseUtterance(routingTranscript);
     const commandLikeMisheard = isLikelyMisheardComposerCommand(routingTranscript);
@@ -5872,12 +5920,16 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
     intent.type === "email-compose"
   ) {
     const explicitSendNowRequested =
-      shouldSendNowFromSourceText(contextRoutingTranscript) || intent?.meta?.autoSend === true;
+      shouldSendNowFromSourceText(contextRoutingTranscript) ||
+      intent?.meta?.autoSend === true ||
+      immediateOpenMail;
     const normalizedSubject = normalizeContextReplySubject(selectedContext.subject);
     const nextMeta: any = {
       ...(intent.meta ?? {}),
       source: "exchange-context-compose-fallback",
-      uiHint: intent.meta?.uiHint || "Ich habe einen Antwort-Entwurf vorbereitet.",
+      uiHint: intent.meta?.uiHint || (explicitSendNowRequested
+        ? "Sofort-Modus: Antwort wird direkt gesendet."
+        : "Ich habe einen Antwort-Entwurf vorbereitet."),
     };
     if (explicitSendNowRequested) {
       nextMeta.autoSend = true;
@@ -5899,6 +5951,30 @@ export function processVoiceCommand(transcript: string, navigate: NavigateFuncti
       to: selectedContext.fromEmail,
       subjectHint: normalizedSubject,
       explicitSendNowRequested,
+    });
+  }
+
+  if (
+    immediateOpenMail &&
+    selectedContext &&
+    intent.type === "email-compose" &&
+    !isNamedComposeAwayFromOpenMail(intent, selectedContext) &&
+    !(intent as any)?.meta?.cancelled &&
+    String((intent as any)?.bodyHint || "").trim().length >= 2
+  ) {
+    intent = {
+      ...intent,
+      meta: {
+        ...((intent as any).meta ?? {}),
+        autoSend: true,
+        forcePreviewOnly: false,
+        forcePreviewOnlyReason: undefined,
+        uiHint: (intent as any)?.meta?.uiHint || "Sofort-Modus: Antwort wird direkt gesendet.",
+      },
+    };
+    console.log("[fm-voice][immediate-open-mail] stamped sendNow on open-mail compose", {
+      contextUid: selectedContext.uid,
+      source: (intent as any)?.meta?.source || null,
     });
   }
 
