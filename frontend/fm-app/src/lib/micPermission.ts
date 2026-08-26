@@ -88,7 +88,9 @@ export async function warmMic(): Promise<MediaStream | null> {
 }
 
 export async function acquireMicStream(): Promise<MediaStream | null> {
-  releaseWarmMic();
+  if (warmStream || warmPromise) {
+    releaseWarmMic();
+  }
   const stream = await warmMic();
   if (stream && warmStream === stream) {
     warmStream = null;

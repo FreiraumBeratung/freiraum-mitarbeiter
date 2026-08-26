@@ -50,6 +50,7 @@ function isBackendSttReady(): boolean {
 
 let activeMicStream: MediaStream | null = null;
 let activeRecorder: MediaRecorder | null = null;
+let captureInFlight = false;
 
 export function requestRecorderStop(): void {
   try {
@@ -248,6 +249,7 @@ export async function recordAndTranscribe(
 
   // Prefer backend STT first
   let usedBackendRecorder = false;
+  captureInFlight = true;
   try {
     const sttStartedAtMs = nowMs();
     const stream = await acquireMicStream();
@@ -269,6 +271,21 @@ export async function recordAndTranscribe(
     activeMicStream = stream;
     if (typeof window !== "undefined") {
       (window as any).__fm_mic_granted = true;
+    }
+    if (signal?.aborted) {
+      endMicCapture(stream);
+      return null;
+    }
+    const liveTrack = stream.getAudioTracks().find((track) => track.readyState === "live");
+    if (liveTrack?.muted) {
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          liveTrack.removeEventListener("unmute", done);
+          resolve();
+        };
+        liveTrack.addEventListener("unmute", done, { once: true });
+        window.setTimeout(done, 500);
+      });
     }
     if (signal?.aborted) {
       endMicCapture(stream);
@@ -303,8 +320,13 @@ export async function recordAndTranscribe(
       return null;
     }
     const recordStartedAtMs = nowMs();
+    const appleTouch =
+      typeof navigator !== "undefined" &&
+      (/iPad|iPhone|iPod/i.test(navigator.userAgent || "") ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
     try {
-      recorder.start(100);
+      if (appleTouch) recorder.start();
+      else recorder.start(100);
     } catch {
       recorder.start();
     }
@@ -358,7 +380,10 @@ export async function recordAndTranscribe(
       transcribeTimeoutMs
     );
     const transcribeDoneAtMs = nowMs();
-    if (resp.ok) {
+    if (!resp.ok) {
+      throw new Error("stt-unhealthy");
+    }
+    {
       const j = await resp.json();
       const jsonParsedAtMs = nowMs();
       const text = (j?.text || "").trim();
@@ -412,6 +437,8 @@ export async function recordAndTranscribe(
       return null;
     }
     // fall back to browser API
+  } finally {
+    captureInFlight = false;
   }
 
   const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
@@ -465,8 +492,13 @@ export async function recordAndTranscribe(
   });
 }
 
+function micCaptureIsLive(): boolean {
+  if (captureInFlight) return true;
+  return !!(activeRecorder && activeRecorder.state !== "inactive");
+}
+
 function releaseIdleMic(): void {
-  if (activeRecorder && activeRecorder.state !== "inactive") return;
+  if (micCaptureIsLive()) return;
   if (activeMicStream) {
     stopTracks(activeMicStream);
     activeMicStream = null;
@@ -476,10 +508,13 @@ function releaseIdleMic(): void {
 
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", () => {
+    if (micCaptureIsLive()) return;
     releaseMicSession();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) releaseMicSession();
+    if (!document.hidden) return;
+    if (micCaptureIsLive()) return;
+    releaseMicSession();
   });
   document.addEventListener("voice-state", (event) => {
     const next = (event as CustomEvent<{ state?: string }>).detail?.state;
