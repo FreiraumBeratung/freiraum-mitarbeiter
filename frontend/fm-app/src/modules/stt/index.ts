@@ -251,6 +251,7 @@ export async function recordAndTranscribe(
   try {
     const sttStartedAtMs = nowMs();
     const stream = await acquireMicStream();
+    const usedWarmStream = false;
     if (signal?.aborted) {
       endMicCapture(stream);
       return null;

@@ -105,25 +105,17 @@ export function releaseWarmMic(): void {
 }
 
 export async function ensureMicPermission(): Promise<void> {
-  if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia) return;
+  if (typeof window === "undefined") return;
   const w = window as any;
-
-  try {
-    const perm = await navigator.permissions.query({ name: "microphone" as PermissionName });
-    if (perm.state === "denied") return;
-    if (perm.state === "granted") {
-      markGranted();
-      return;
-    }
-  } catch {
-    /* iOS kann die Permission-API auslassen – dann einmal getUserMedia. */
-  }
-
-  if (getWarmMicStream() || w.__fm_mic_granted === true) {
+  if (w.__fm_mic_granted === true || getWarmMicStream()) {
     markGranted();
     return;
   }
-
-  const stream = await warmMic();
-  if (stream) releaseWarmMic();
+  try {
+    const perm = await navigator.permissions.query({ name: "microphone" as PermissionName });
+    if (perm.state === "granted") markGranted();
+  } catch {
+    /* iOS kennt die Permission-API oft nicht. Kein getUserMedia hier:
+       Stream öffnen und sofort wieder killen macht die nächste Aufnahme still. */
+  }
 }
