@@ -1515,6 +1515,7 @@ export class VoiceController {
   private routeStartedAtMs = 0;
   private captureMode: "none" | "backend" | "browser" = "none";
   private browserTranscript = "";
+  private listenArmedAtMs = 0;
 
   setState(s: VoiceState) {
     this.state = s;
@@ -1544,15 +1545,28 @@ export class VoiceController {
     const tryBackend = shouldUseBackendRecorder();
     if (tryBackend) {
       console.warn("[fm-voice] SpeechRecognition nicht verfügbar – fallback auf Recorder.");
-      this.listening = true;
+      this.starting = true;
+      this.listening = false;
+      this.listenArmedAtMs = 0;
       this.captureMode = "backend";
-      this.setState("listening");
       const sttStartedAtMs = nowMs();
       const controller = new AbortController();
       this.recorderAbortController = controller;
-      const text = await recordAndTranscribe(60000, controller.signal, {
-        onListening: () => this.setState("listening"),
-      });
+      const armListening = () => {
+        this.starting = false;
+        this.listening = true;
+        this.listenArmedAtMs = Date.now();
+        this.setState("listening");
+      };
+      let text: string | null = null;
+      try {
+        text = await recordAndTranscribe(60000, controller.signal, {
+          onListening: armListening,
+        });
+      } finally {
+        this.starting = false;
+        this.listening = false;
+      }
       if (this.recorderAbortController === controller) {
         this.recorderAbortController = null;
       }
@@ -1560,7 +1574,6 @@ export class VoiceController {
       console.log(
         `[fm-voice][timing] stage=stt-fallback-finished elapsedMs=${Math.max(0, Math.round(nowMs() - sttStartedAtMs))} textLength=${(text ?? "").length}`
       );
-      this.listening = false;
       if (text) {
         this.captureMode = "none";
         this.handleTranscript(text);
@@ -1569,6 +1582,10 @@ export class VoiceController {
       this.captureMode = "none";
       const w = typeof window !== "undefined" ? (window as any) : null;
       const sttError = w?.__fm_stt_last_error ? String(w.__fm_stt_last_error) : "";
+      if (sttError === "mic-permission-granted") {
+        this.setState("idle");
+        return;
+      }
       if (w) {
         w.__fm_last_hint = {
           kind: "voice_retry",
@@ -1619,7 +1636,9 @@ export class VoiceController {
       } else {
         const w = typeof window !== "undefined" ? (window as any) : null;
         const sttError = w?.__fm_stt_last_error ? String(w.__fm_stt_last_error) : "";
-        if (w) {
+        if (sttError === "mic-permission-granted") {
+          this.setState("idle");
+        } else if (w) {
           w.__fm_last_hint = {
             kind: "voice_retry",
             message: sttError === "microphone-unavailable"
@@ -1690,6 +1709,12 @@ export class VoiceController {
   }
 
   async stop() {
+    if (this.starting && this.captureMode === "backend") {
+      return;
+    }
+    if (this.listenArmedAtMs && Date.now() - this.listenArmedAtMs < 900) {
+      return;
+    }
     if (this.starting && !this.listening) {
       this.cancelStart = true;
       this.setState("idle");

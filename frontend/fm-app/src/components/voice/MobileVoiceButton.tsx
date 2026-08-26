@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { probeBackendSttHealth, requestRecorderStop } from "../../modules/stt";
+import { probeBackendSttHealth, primeAudioCapture, requestRecorderStop } from "../../modules/stt";
 import { voice, type VoiceState } from "../../modules/voice";
 import { fmActionBorder, fmActionFill } from "../../lib/fmVisual";
 
@@ -62,6 +62,7 @@ export default function MobileVoiceButton() {
 
   const toggle = async (event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
+    primeAudioCapture();
     const now = Date.now();
     if (now - lastToggleAtRef.current < 350) return;
     lastToggleAtRef.current = now;

@@ -51,8 +51,46 @@ function isBackendSttReady(): boolean {
 let activeMicStream: MediaStream | null = null;
 let activeRecorder: MediaRecorder | null = null;
 let captureInFlight = false;
+let primedAudioCtx: AudioContext | null = null;
+let ignoreStopUntilMs = 0;
+let stopCaptureRequested: (() => void) | null = null;
+const STOP_GRACE_MS = 900;
+const PERMISSION_DIALOG_MS = 450;
 
-export function requestRecorderStop(): void {
+function isAppleTouchDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iPad|iPhone|iPod/i.test(ua)) return true;
+  return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+}
+
+function getAudioContextCtor(): (new () => AudioContext) | null {
+  if (typeof window === "undefined") return null;
+  return (window.AudioContext || (window as any).webkitAudioContext || null) as
+    | (new () => AudioContext)
+    | null;
+}
+
+export function primeAudioCapture(): void {
+  const Ctor = getAudioContextCtor();
+  if (!Ctor) return;
+  try {
+    if (!primedAudioCtx || primedAudioCtx.state === "closed") {
+      primedAudioCtx = new Ctor();
+    }
+    void primedAudioCtx.resume();
+  } catch {
+    /* ignore */
+  }
+}
+
+export function requestRecorderStop(force = false): void {
+  if (!force && Date.now() < ignoreStopUntilMs) return;
+  try {
+    stopCaptureRequested?.();
+  } catch {
+    /* ignore */
+  }
   try {
     if (activeRecorder && activeRecorder.state !== "inactive") {
       if (typeof activeRecorder.requestData === "function") {
@@ -106,8 +144,180 @@ function endMicCapture(media?: MediaStream | null): void {
 }
 
 export function releaseMicSession(): void {
-  requestRecorderStop();
+  ignoreStopUntilMs = 0;
+  requestRecorderStop(true);
   endMicCapture(activeMicStream);
+}
+
+function downsampleTo16kMono(input: Float32Array, sourceRate: number): Int16Array {
+  const targetRate = 16000;
+  if (sourceRate <= 0) return new Int16Array(0);
+  const ratio = sourceRate / targetRate;
+  const length = Math.max(1, Math.floor(input.length / ratio));
+  const out = new Int16Array(length);
+  let pos = 0;
+  for (let i = 0; i < length; i += 1) {
+    const nextPos = Math.min(input.length, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    let count = 0;
+    for (let j = pos; j < nextPos; j += 1) {
+      sum += input[j];
+      count += 1;
+    }
+    const sample = count > 0 ? sum / count : 0;
+    const clamped = Math.max(-1, Math.min(1, sample));
+    out[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    pos = nextPos;
+  }
+  return out;
+}
+
+function pcm16ToWavBlob(pcm: Int16Array, sampleRate: number): Blob {
+  const channels = 1;
+  const bytesPerSample = 2;
+  const blockAlign = channels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = pcm.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  let offset = 0;
+  const writeStr = (text: string) => {
+    for (let i = 0; i < text.length; i += 1) {
+      view.setUint8(offset + i, text.charCodeAt(i));
+    }
+    offset += text.length;
+  };
+
+  writeStr("RIFF");
+  view.setUint32(offset, 36 + dataSize, true);
+  offset += 4;
+  writeStr("WAVE");
+  writeStr("fmt ");
+  view.setUint32(offset, 16, true);
+  offset += 4;
+  view.setUint16(offset, 1, true);
+  offset += 2;
+  view.setUint16(offset, channels, true);
+  offset += 2;
+  view.setUint32(offset, sampleRate, true);
+  offset += 4;
+  view.setUint32(offset, byteRate, true);
+  offset += 4;
+  view.setUint16(offset, blockAlign, true);
+  offset += 2;
+  view.setUint16(offset, 16, true);
+  offset += 2;
+  writeStr("data");
+  view.setUint32(offset, dataSize, true);
+  offset += 4;
+
+  for (let i = 0; i < pcm.length; i += 1) {
+    view.setInt16(offset, pcm[i], true);
+    offset += 2;
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function blobFilename(blob: Blob): string {
+  const type = (blob.type || "").toLowerCase();
+  if (type.includes("wav")) return "voice.wav";
+  if (type.includes("mp4") || type.includes("aac") || type.includes("m4a")) return "voice.m4a";
+  if (type.includes("mpeg")) return "voice.mp3";
+  return "voice.webm";
+}
+
+async function recordPcmWavFromMic(
+  stream: MediaStream,
+  maxMs: number,
+  signal: AbortSignal | undefined,
+  onListening?: () => void
+): Promise<Blob | null> {
+  primeAudioCapture();
+  const ctx = primedAudioCtx;
+  if (!ctx) return null;
+  try {
+    await ctx.resume();
+  } catch {
+    /* ignore */
+  }
+  if (ctx.state !== "running") return null;
+  if (typeof (ctx as any).createScriptProcessor !== "function") return null;
+
+  const chunks: Float32Array[] = [];
+  let source: MediaStreamAudioSourceNode | null = null;
+  let processor: ScriptProcessorNode | null = null;
+  let mute: GainNode | null = null;
+
+  try {
+    source = ctx.createMediaStreamSource(stream);
+    processor = (ctx as any).createScriptProcessor(4096, 1, 1) as ScriptProcessorNode;
+    mute = ctx.createGain();
+    mute.gain.value = 0;
+    processor.onaudioprocess = (event: any) => {
+      const input = event?.inputBuffer?.getChannelData?.(0);
+      if (input?.length) chunks.push(new Float32Array(input));
+    };
+    source.connect(processor);
+    processor.connect(mute);
+    mute.connect(ctx.destination);
+
+    ignoreStopUntilMs = Date.now() + STOP_GRACE_MS;
+    onListening?.();
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let abortHandler: (() => void) | null = null;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        stopCaptureRequested = null;
+        if (signal && abortHandler) {
+          signal.removeEventListener("abort", abortHandler);
+        }
+        resolve();
+      };
+      abortHandler = () => {
+        if (Date.now() < ignoreStopUntilMs) return;
+        done();
+      };
+      stopCaptureRequested = done;
+      signal?.addEventListener("abort", abortHandler);
+      window.setTimeout(done, maxMs);
+    });
+  } finally {
+    stopCaptureRequested = null;
+    try {
+      processor?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      mute?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      source?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    if (processor) processor.onaudioprocess = null as any;
+  }
+
+  if (!chunks.length) return null;
+  let total = 0;
+  for (const part of chunks) total += part.length;
+  const merged = new Float32Array(total);
+  let offset = 0;
+  for (const part of chunks) {
+    merged.set(part, offset);
+    offset += part.length;
+  }
+  const pcm = downsampleTo16kMono(merged, ctx.sampleRate || 44100);
+  if (!pcm.length) return null;
+  return pcm16ToWavBlob(pcm, 16000);
 }
 
 export async function recordAndTranscribe(
@@ -127,94 +337,24 @@ export async function recordAndTranscribe(
     }
     return Date.now();
   };
-  const downsampleTo16kMono = (input: Float32Array, sourceRate: number): Int16Array => {
-    const targetRate = 16000;
-    if (sourceRate <= 0) return new Int16Array(0);
-    const ratio = sourceRate / targetRate;
-    const length = Math.max(1, Math.floor(input.length / ratio));
-    const out = new Int16Array(length);
-    let pos = 0;
-    for (let i = 0; i < length; i += 1) {
-      const nextPos = Math.min(input.length, Math.floor((i + 1) * ratio));
-      let sum = 0;
-      let count = 0;
-      for (let j = pos; j < nextPos; j += 1) {
-        sum += input[j];
-        count += 1;
-      }
-      const sample = count > 0 ? sum / count : 0;
-      const clamped = Math.max(-1, Math.min(1, sample));
-      out[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
-      pos = nextPos;
-    }
-    return out;
-  };
-
-  const pcm16ToWavBlob = (pcm: Int16Array, sampleRate: number): Blob => {
-    const channels = 1;
-    const bytesPerSample = 2;
-    const blockAlign = channels * bytesPerSample;
-    const byteRate = sampleRate * blockAlign;
-    const dataSize = pcm.length * bytesPerSample;
-    const buffer = new ArrayBuffer(44 + dataSize);
-    const view = new DataView(buffer);
-
-    let offset = 0;
-    const writeStr = (text: string) => {
-      for (let i = 0; i < text.length; i += 1) {
-        view.setUint8(offset + i, text.charCodeAt(i));
-      }
-      offset += text.length;
-    };
-
-    writeStr("RIFF");
-    view.setUint32(offset, 36 + dataSize, true);
-    offset += 4;
-    writeStr("WAVE");
-    writeStr("fmt ");
-    view.setUint32(offset, 16, true);
-    offset += 4;
-    view.setUint16(offset, 1, true); // PCM
-    offset += 2;
-    view.setUint16(offset, channels, true);
-    offset += 2;
-    view.setUint32(offset, sampleRate, true);
-    offset += 4;
-    view.setUint32(offset, byteRate, true);
-    offset += 4;
-    view.setUint16(offset, blockAlign, true);
-    offset += 2;
-    view.setUint16(offset, 16, true);
-    offset += 2;
-    writeStr("data");
-    view.setUint32(offset, dataSize, true);
-    offset += 4;
-
-    for (let i = 0; i < pcm.length; i += 1) {
-      view.setInt16(offset, pcm[i], true);
-      offset += 2;
-    }
-
-    return new Blob([buffer], { type: "audio/wav" });
-  };
-
   const toBackendWav = async (audioBlob: Blob): Promise<Blob> => {
+    if ((audioBlob.type || "").toLowerCase().includes("wav")) return audioBlob;
     try {
-      const AudioCtx =
-        (window as any).AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return audioBlob;
-      const ctx = new AudioCtx();
+      primeAudioCapture();
+      const ctx = primedAudioCtx;
+      if (!ctx) return audioBlob;
       try {
-        const arr = await audioBlob.arrayBuffer();
-        const decoded = await ctx.decodeAudioData(arr.slice(0));
-        const channel = decoded.numberOfChannels > 0 ? decoded.getChannelData(0) : new Float32Array(0);
-        if (!channel.length) return audioBlob;
-        const pcm = downsampleTo16kMono(channel, decoded.sampleRate);
-        if (!pcm.length) return audioBlob;
-        return pcm16ToWavBlob(pcm, 16000);
-      } finally {
-        await ctx.close().catch(() => undefined);
+        await ctx.resume();
+      } catch {
+        /* ignore */
       }
+      const arr = await audioBlob.arrayBuffer();
+      const decoded = await ctx.decodeAudioData(arr.slice(0));
+      const channel = decoded.numberOfChannels > 0 ? decoded.getChannelData(0) : new Float32Array(0);
+      if (!channel.length) return audioBlob;
+      const pcm = downsampleTo16kMono(channel, decoded.sampleRate);
+      if (!pcm.length) return audioBlob;
+      return pcm16ToWavBlob(pcm, 16000);
     } catch {
       return audioBlob;
     }
@@ -251,15 +391,31 @@ export async function recordAndTranscribe(
   let usedBackendRecorder = false;
   captureInFlight = true;
   try {
+    if (typeof window !== "undefined") {
+      (window as any).__fm_stt_last_error = "";
+    }
     const sttStartedAtMs = nowMs();
     const stream = await acquireMicStream();
     const usedWarmStream = false;
+    const gumMs = Math.max(0, nowMs() - sttStartedAtMs);
+    const hadMicBefore =
+      typeof window !== "undefined" && (window as any).__fm_mic_granted === true;
     if (signal?.aborted) {
       endMicCapture(stream);
       return null;
     }
     if (!stream) {
       throw new Error("microphone-unavailable");
+    }
+    if (typeof window !== "undefined") {
+      (window as any).__fm_mic_granted = true;
+    }
+    if (isAppleTouchDevice() && !hadMicBefore && gumMs > PERMISSION_DIALOG_MS) {
+      endMicCapture(stream);
+      if (typeof window !== "undefined") {
+        (window as any).__fm_stt_last_error = "mic-permission-granted";
+      }
+      return null;
     }
     const healthAlreadyReady = isBackendSttReady();
     const healthPromise = healthAlreadyReady
@@ -291,56 +447,65 @@ export async function recordAndTranscribe(
       endMicCapture(stream);
       return null;
     }
-    const mimeType = pickRecorderMime();
-    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-    activeRecorder = recorder;
-    const chunks: BlobPart[] = [];
-    const blobType = mimeType || "audio/webm";
-    const done = new Promise<Blob>((resolve) => {
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-      recorder.onstop = () => {
-        // Tracks erst hier stoppen – vorher ist die iOS-Aufnahme oft leer.
-        endMicCapture(stream);
-        resolve(new Blob(chunks, { type: blobType }));
-      };
-    });
-    let resolveStopRequest: (() => void) | null = null;
-    const stopRequested = new Promise<void>((resolve) => {
-      resolveStopRequest = resolve;
-    });
-    const abortHandler = () => {
-      resolveStopRequest?.();
-    };
-    signal?.addEventListener("abort", abortHandler, { once: true });
-    if (signal?.aborted) {
-      endMicCapture(stream);
-      signal.removeEventListener("abort", abortHandler);
-      return null;
-    }
+
+    let audioBlob: Blob | null = null;
     const recordStartedAtMs = nowMs();
-    const appleTouch =
-      typeof navigator !== "undefined" &&
-      (/iPad|iPhone|iPod/i.test(navigator.userAgent || "") ||
-        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
-    try {
-      if (appleTouch) recorder.start();
-      else recorder.start(100);
-    } catch {
-      recorder.start();
+    const appleTouch = isAppleTouchDevice();
+    if (appleTouch) {
+      audioBlob = await recordPcmWavFromMic(stream, maxMs, signal, opts?.onListening);
+      if (audioBlob) {
+        endMicCapture(stream);
+      }
     }
-    opts?.onListening?.();
+    let abortHandler: (() => void) | null = null;
+    if (!audioBlob) {
+      const mimeType = pickRecorderMime();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      activeRecorder = recorder;
+      const chunks: BlobPart[] = [];
+      const blobType = mimeType || "audio/webm";
+      const done = new Promise<Blob>((resolve) => {
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) chunks.push(e.data);
+        };
+        recorder.onstop = () => {
+          endMicCapture(stream);
+          resolve(new Blob(chunks, { type: blobType }));
+        };
+      });
+      let resolveStopRequest: (() => void) | null = null;
+      const stopRequested = new Promise<void>((resolve) => {
+        resolveStopRequest = resolve;
+      });
+      abortHandler = () => {
+        if (Date.now() < ignoreStopUntilMs) return;
+        resolveStopRequest?.();
+      };
+      signal?.addEventListener("abort", abortHandler, { once: true });
+      if (signal?.aborted) {
+        endMicCapture(stream);
+        signal.removeEventListener("abort", abortHandler);
+        return null;
+      }
+      ignoreStopUntilMs = Date.now() + STOP_GRACE_MS;
+      try {
+        if (appleTouch) recorder.start();
+        else recorder.start(100);
+      } catch {
+        recorder.start();
+      }
+      opts?.onListening?.();
+      await Promise.race([new Promise((res) => setTimeout(res, maxMs)), stopRequested]);
+      try {
+        if (recorder.state !== "inactive") recorder.stop();
+      } catch {
+        /* ignore */
+      }
+      audioBlob = await done;
+      endMicCapture(stream);
+      signal?.removeEventListener("abort", abortHandler);
+    }
     const healthCheckedAtMs = nowMs();
-    await Promise.race([new Promise((res) => setTimeout(res, maxMs)), stopRequested]);
-    try {
-      if (recorder.state !== "inactive") recorder.stop();
-    } catch {
-      /* ignore */
-    }
-    const audioBlob = await done;
-    endMicCapture(stream);
-    signal?.removeEventListener("abort", abortHandler);
     const recordFinishedAtMs = nowMs();
     const recordedMs = Math.max(0, Math.round(recordFinishedAtMs - recordStartedAtMs));
     const health = await healthPromise;
@@ -363,7 +528,7 @@ export async function recordAndTranscribe(
 
     const backendBlob = await toBackendWav(audioBlob);
     const wavReadyAtMs = nowMs();
-    const filename = backendBlob.type === "audio/wav" ? "voice.wav" : "voice.webm";
+    const filename = blobFilename(backendBlob);
     const form = new FormData();
     form.append("file", backendBlob, filename);
     const isLikelyCommandMode = recordedMs <= COMMAND_MODE_MAX_RECORD_MS;
